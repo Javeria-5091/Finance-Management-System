@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, DollarSign, LogOut, X } from "lucide-react";
+import { LayoutDashboard, DollarSign, FolderOpen, CreditCard, LogOut, X } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 interface SidebarProps {
@@ -18,9 +18,11 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
     window.location.href = "/login";
   }
 
-  const navItems = [
+    const navItems = [
     { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+    { label: "Projects", href: "/dashboard/projects", icon: FolderOpen }, // <-- YEH NAYA
     { label: "Income", href: "/dashboard/income", icon: DollarSign },
+    { label: "Expenses", href: "/dashboard/expenses", icon: CreditCard }, // <-- YEH NAYA (Abhi disable)
   ];
 
   return (

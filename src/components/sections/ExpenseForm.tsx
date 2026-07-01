@@ -2,38 +2,34 @@
 import { useState, useEffect, FormEvent } from "react";
 import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
-import { IncomeFormData, INCOME_CATEGORIES } from "@/types";
+import { ExpenseFormData, EXPENSE_CATEGORIES } from "@/types";
 import type { Project } from "@/types";
 import { X } from "lucide-react";
 
-interface IncomeFormProps {
-  initialData: IncomeFormData | null;
-  onSubmit: (data: IncomeFormData) => Promise<void>;
+interface ExpenseFormProps {
+  initialData: ExpenseFormData | null;
+  onSubmit: (data: ExpenseFormData) => Promise<void>;
   onClose: () => void;
   loading: boolean;
   projects: Project[];
 }
 
-export default function IncomeForm({ initialData, onSubmit, onClose, loading, projects }: IncomeFormProps) {
+export default function ExpenseForm({ initialData, onSubmit, onClose, loading, projects }: ExpenseFormProps) {
   const isEdit = initialData !== null;
   
-  const CATEGORIES = ["Salary", "Freelance", "Business", "Investment", "Rental", "Other"];
-  
-  const [form, setForm] = useState<IncomeFormData>({
+  const [form, setForm] = useState<ExpenseFormData>({
     title: "",
     amount: 0,
-    category: "Salary",
-    description: "",
-    income_date: new Date().toISOString().split("T")[0],
+    category: "Software",
+    expense_date: new Date().toISOString().split("T")[0],
+    notes: "",
     project_id: null,
   });
 
   const [projectError, setProjectError] = useState("");
 
   useEffect(() => {
-    if (initialData) {
-      setForm(initialData);
-    }
+    if (initialData) setForm(initialData);
   }, [initialData]);
 
   async function handleSubmit(e: FormEvent) {
@@ -52,10 +48,10 @@ export default function IncomeForm({ initialData, onSubmit, onClose, loading, pr
       <div className="bg-gray-800 border border-gray-700 rounded-xl w-full max-w-lg p-6 relative">
         <button onClick={onClose} className="absolute top-4 right-4 text-gray-400 hover:text-white"><X size={20} /></button>
         
-        <h2 className="text-xl font-bold text-white mb-6">{isEdit ? "Edit Income" : "Add New Income"}</h2>
+        <h2 className="text-xl font-bold text-white mb-6">{isEdit ? "Edit Expense" : "Add New Expense"}</h2>
         
         <form onSubmit={handleSubmit} className="space-y-4">
-          <Input label="Title" placeholder="e.g. Monthly Salary" value={form.title} onChange={e => setForm({...form, title: e.target.value})} required />
+          <Input label="Expense Title" placeholder="e.g. Bought Domain" value={form.title} onChange={e => setForm({...form, title: e.target.value})} required />
           
           <Input label="Amount (PKR)" type="number" placeholder="0" value={form.amount || ""} onChange={e => setForm({...form, amount: parseFloat(e.target.value) || 0})} required min="0" step="1" />
 
@@ -66,7 +62,7 @@ export default function IncomeForm({ initialData, onSubmit, onClose, loading, pr
               onChange={e => setForm({...form, category: e.target.value})}
               className="w-full px-3 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              {CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+              {EXPENSE_CATEGORIES.map(cat => <option key={cat} value={cat}>{cat}</option>)}
             </select>
           </div>
 
@@ -86,22 +82,22 @@ export default function IncomeForm({ initialData, onSubmit, onClose, loading, pr
             {projectError && <p className="mt-1 text-xs text-red-400">{projectError}</p>}
           </div>
 
-          <Input label="Date" type="date" value={form.income_date} onChange={e => setForm({...form, income_date: e.target.value})} required />
+          <Input label="Date" type="date" value={form.expense_date} onChange={e => setForm({...form, expense_date: e.target.value})} required />
 
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">Description (Optional)</label>
+            <label className="block text-sm font-medium text-gray-300 mb-1">Notes (Optional)</label>
             <textarea 
-              value={form.description || ""} 
-              onChange={e => setForm({...form, description: e.target.value})}
+              value={form.notes || ""} 
+              onChange={e => setForm({...form, notes: e.target.value})}
               rows={3} 
-              placeholder="Add a note..."
+              placeholder="Add details..."
               className="w-full px-3 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
             />
           </div>
 
           <div className="flex gap-3 pt-2">
             <button type="button" onClick={onClose} className="flex-1 px-4 py-2.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors">Cancel</button>
-            <Button type="submit" loading={loading}>{isEdit ? "Update" : "Add Income"}</Button>
+            <Button type="submit" loading={loading}>{isEdit ? "Update" : "Add Expense"}</Button>
           </div>
         </form>
       </div>

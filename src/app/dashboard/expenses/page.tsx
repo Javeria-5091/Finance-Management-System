@@ -2,82 +2,70 @@
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
-import { Income, IncomeFormData, Project } from "@/types";
-import IncomeForm from "@/components/sections/IncomeForm";
+import { Expense, ExpenseFormData, Project } from "@/types";
+import ExpenseForm from "@/components/sections/ExpenseForm";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 
-export default function IncomePage() {
+export default function ExpensesPage() {
   const { user } = useAuth();
-  const [incomes, setIncomes] = useState<Income[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]); // PROJECTS STATE
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [formLoading, setFormLoading] = useState(false);
   
   const [showForm, setShowForm] = useState(false);
-  const [editingData, setEditingData] = useState<Income | null>(null);
+  const [editingData, setEditingData] = useState<Expense | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  // INCOMES FETCH
-  const fetchIncomes = useCallback(async () => {
+  const fetchExpenses = useCallback(async () => {
     if (!user) return;
-    const { data, error } = await supabase
-      .from("incomes")
-      .select("*")
-      .eq("user_id", user.id)
-      .order("income_date", { ascending: false });
-      
-    if (data) setIncomes(data);
+    const { data, error } = await supabase.from("expenses").select("*").eq("user_id", user.id).order("expense_date", { ascending: false });
+    if (data) setExpenses(data);
     if (error) console.error(error);
     setLoading(false);
   }, [user]);
 
-  // PROJECTS FETCH (NAYA FUNCTION)
   const fetchProjects = useCallback(async () => {
     if (!user) return;
     const { data } = await supabase.from("projects").select("*").eq("user_id", user.id);
     if (data) setProjects(data);
   }, [user]);
 
-  // DONO CALL KARO
   useEffect(() => { 
-    fetchIncomes();
+    fetchExpenses();
     fetchProjects();
-  }, [fetchIncomes, fetchProjects]);
+  }, [fetchExpenses, fetchProjects]);
 
-  // SUBMIT
-  async function handleSubmit(data: IncomeFormData) {
+  async function handleSubmit(data: ExpenseFormData) {
     setFormLoading(true);
     if (editingData) {
-      const { error } = await supabase.from("incomes").update(data).eq("id", editingData.id);
+      const { error } = await supabase.from("expenses").update(data).eq("id", editingData.id);
       if (error) alert(error.message);
     } else {
-      const { error } = await supabase.from("incomes").insert({ ...data, user_id: user?.id });
+      const { error } = await supabase.from("expenses").insert({ ...data, user_id: user?.id });
       if (error) alert(error.message);
     }
     setFormLoading(false);
     setShowForm(false);
     setEditingData(null);
-    fetchIncomes();
+    fetchExpenses();
   }
 
-  // DELETE
   async function handleDelete() {
     if (!deleteId) return;
-    const { error } = await supabase.from("incomes").delete().eq("id", deleteId);
+    const { error } = await supabase.from("expenses").delete().eq("id", deleteId);
     if (error) alert(error.message);
     setDeleteId(null);
-    fetchIncomes();
+    fetchExpenses();
   }
 
-  // HELPERS
   function openAddModal() { setEditingData(null); setShowForm(true); }
-  function openEditModal(inc: Income) { setEditingData(inc); setShowForm(true); }
+  function openEditModal(exp: Expense) { setEditingData(exp); setShowForm(true); }
   
   function formatCurrency(amount: number) {
     return new Intl.NumberFormat("en-PK", { style: "currency", currency: "PKR" }).format(amount);
   }
 
-  // PROJECT KA NAME DHOONDHO (TABLE KE LIYE)
   function getProjectName(projectId: string | null) {
     if (!projectId) return <span className="text-gray-500">-</span>;
     const project = projects.find(p => p.id === projectId);
@@ -88,11 +76,11 @@ export default function IncomePage() {
     <div>
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
-          <h2 className="text-2xl font-bold text-white">Income Management</h2>
-          <p className="text-gray-400 text-sm">Track and manage your earnings</p>
+          <h2 className="text-2xl font-bold text-white">Expense Management</h2>
+          <p className="text-gray-400 text-sm">Track where your money goes</p>
         </div>
         <button onClick={openAddModal} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg font-medium transition-colors w-fit">
-          <Plus size={18} /> Add Income
+          <Plus size={18} /> Add Expense
         </button>
       </div>
 
@@ -109,23 +97,23 @@ export default function IncomePage() {
           </thead>
           <tbody className="divide-y divide-gray-700">
             {loading && <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">Loading...</td></tr>}
-            {!loading && incomes.length === 0 && (
-              <tr><td colSpan={5} className="px-4 py-12 text-center text-gray-400">No income entries yet. Click "Add Income" to start.</td></tr>
+            {!loading && expenses.length === 0 && (
+              <tr><td colSpan={5} className="px-4 py-12 text-center text-gray-400">No expenses yet.</td></tr>
             )}
 
-            {incomes.map(inc => (
-              <tr key={inc.id} className="hover:bg-gray-700/50 transition-colors">
+            {expenses.map(exp => (
+              <tr key={exp.id} className="hover:bg-gray-700/50 transition-colors">
                 <td className="px-4 py-3">
-                  <div className="font-medium text-white">{inc.title}</div>
-                  {inc.description && <div className="text-xs text-gray-500 truncate max-w-[200px] cursor-help mt-0.5" title={inc.description}>{inc.description}</div>}
+                  <div className="font-medium text-white">{exp.title}</div>
+                                    {exp.notes && <div className="text-xs text-gray-500 truncate max-w-[200px] cursor-help mt-0.5" title={exp.notes}>{exp.notes}</div>}
                 </td>
-                <td className="px-4 py-3 hidden sm:table-cell">{getProjectName(inc.project_id)}</td>
-                <td className="px-4 py-3 text-right font-semibold text-green-400">{formatCurrency(inc.amount)}</td>
-                <td className="px-4 py-3 text-right text-gray-400 hidden md:table-cell">{new Date(inc.income_date).toLocaleDateString("en-PK")}</td>
-                <td className="px-4 py-3 text-right">
+                <td className="px-4 py-3 hidden sm:table-cell">{getProjectName(exp.project_id)}</td>
+                <td className="px-4 py-3 text-right font-semibold text-red-400">{formatCurrency(exp.amount)}</td>
+                <td className="px-4 py-3 text-right text-gray-400 hidden md:table-cell">{new Date(exp.expense_date).toLocaleDateString("en-PK")}</td>
+                <td className="px-4 py-3 text-right">g
                   <div className="flex items-center justify-end gap-2">
-                    <button onClick={() => openEditModal(inc)} className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 rounded transition-colors"><Pencil size={16} /></button>
-                    <button onClick={() => setDeleteId(inc.id)} className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"><Trash2 size={16} /></button>
+                    <button onClick={() => openEditModal(exp)} className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 rounded transition-colors"><Pencil size={16} /></button>
+                    <button onClick={() => setDeleteId(exp.id)} className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"><Trash2 size={16} /></button>
                   </div>
                 </td>
               </tr>
@@ -134,9 +122,8 @@ export default function IncomePage() {
         </table>
       </div>
 
-      {/* FORM MEIN PROJECTS PASS KAR RAHE HAIN */}
       {showForm && (
-        <IncomeForm 
+        <ExpenseForm 
           initialData={editingData} 
           onSubmit={handleSubmit} 
           onClose={() => { setShowForm(false); setEditingData(null); }} 
@@ -148,7 +135,7 @@ export default function IncomePage() {
       {deleteId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
           <div className="bg-gray-800 border border-gray-700 rounded-xl p-6 w-full max-w-sm text-center">
-            <h3 className="text-lg font-bold text-white mb-2">Delete Income?</h3>
+            <h3 className="text-lg font-bold text-white mb-2">Delete Expense?</h3>
             <p className="text-gray-400 text-sm mb-6">This action cannot be undone.</p>
             <div className="flex gap-3">
               <button onClick={() => setDeleteId(null)} className="flex-1 px-4 py-2.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors">Cancel</button>
