@@ -1,42 +1,53 @@
 Osystic Finance Management System
-A modern, responsive web application built to track and manage personal finances, featuring secure authentication and a clean income management dashboard.
+A modern, full-stack financial management application built to track projects, incomes, and expenses efficiently. Developed using Next.js, TypeScript, Tailwind CSS, and Supabase.
 
-🛠 Tech Stack
-Framework: Next.js 14 (App Router)
-Language: TypeScript
-Styling: Tailwind CSS
-Database & Auth: Supabase (PostgreSQL + Row Level Security)
+🚀 Tech Stack
+Frontend: Next.js 14 (App Router), TypeScript, Tailwind CSS
+Backend/Database: Supabase (PostgreSQL)
+Authentication: Supabase Auth (Email/Password)
 Icons: Lucide React
 ✨ Features
-Authentication: Secure Signup, Login, and Logout using Supabase Auth.
-Protected Routes: Dashboard and income pages are protected. Unauthenticated users are redirected to login.
-Responsive Dashboard: Clean layout featuring a collapsible Sidebar and a Top Navbar.
-Income Management (CRUD):
-View all income entries in a clean data table.
-Add new income with title, amount, category, and date.
-Edit existing income entries.
-Delete entries with a confirmation modal.
-Database Security: Row Level Security (RLS) ensures users can only see and modify their own data.
-🚀 Getting Started
-Follow these steps to run this project locally:
+Phase 1: Foundation & Income
+Authentication System: Secure Login, Signup, and Logout functionality.
+Protected Routes: Dashboard and sub-routes are protected, redirecting unauthenticated users to the login page.
+Dashboard Layout: A clean, responsive layout featuring a collapsible Sidebar and a Top Navbar.
+Income Management: Full CRUD (Create, Read, Update, Delete) operations for income records.
+Phase 2: Projects, Expenses & Relations
+Project Management: Create, edit, and delete client projects. Track client name, status (Active, On Hold, Completed), and start/end dates.
+Expense Management: Full CRUD operations for tracking outgoing money.
+Relational Database Design: Implemented robust Foreign Key relationships. Every Income and Expense is strictly linked to a Project.
+Form Validations: Client-side validations ensuring no income or expense can be added without selecting a related project.
+Cascading Deletes: Deleting a project automatically deletes all its associated incomes and expenses to maintain data integrity.
+Responsive UI: Fully responsive tables and modals, adapting seamlessly from mobile to desktop.
+🗄️ Database Schema (Supabase PostgreSQL)
+The system uses a relational database structure:
 
+projects: Stores project details (name, client, status, dates). Linked to auth.users.
+incomes: Stores income data. Contains a project_id Foreign Key linked to projects.
+expenses: Stores expense data. Contains a project_id Foreign Key linked to projects.
+Security: Row Level Security (RLS) is enabled on all tables to ensure users can only access their own data.
+🛠️ Getting Started
+Prerequisites
+Node.js (v18 or higher)
+A Supabase account and project
 1. Clone the repository
-git clone https://github.com/TUMHARA-USERNAME/osystic-finance.gitcd osystic-finance
+git clone https://github.com/Javeria-5091/Finance-Management-System osystic-finance
 2. Install dependencies
+bash
 
 npm install
-3. Set up Supabase
-Create a project on Supabase.
-Go to the SQL Editor and run the SQL to create the incomes table and enable RLS policies.
-Go to Project Settings > API to get your keys.
-4. Environment Variables
+3. Set up Environment Variables
 Create a .env.local file in the root directory and add your Supabase credentials:
 
 env
 
-NEXT_PUBLIC_SUPABASE_URL=your_supabase_url_here
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key_here
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+4. Set up Supabase Database
+Go to your Supabase SQL Editor and run the required SQL queries to create the projects, incomes, and expenses tables along with RLS policies and Foreign Key constraints.
+
 5. Run the development server
+bash
 
 npm run dev
-Open http://localhost:3000 in your browser.
+Open http://localhost:3000 to view the app.
