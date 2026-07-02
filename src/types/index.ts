@@ -13,10 +13,8 @@ export interface Project {
   created_at: string;
 }
 
-// Form ke liye (id aur user_id form se nahi aate)
 export type ProjectFormData = Omit<Project, "id" | "user_id" | "created_at">;
 
-// Dropdown ke liye statuses
 export const PROJECT_STATUSES = ["Active", "Completed", "On Hold"] as const;
 
 
@@ -26,7 +24,7 @@ export const PROJECT_STATUSES = ["Active", "Completed", "On Hold"] as const;
 export interface Expense {
   id: string;
   user_id: string;
-  project_id: string | null; // Yeh Foreign Key hai
+  project_id: string | null; // Foreign Key 
   title: string;
   amount: number;
   category: string;
@@ -45,7 +43,7 @@ export const EXPENSE_CATEGORIES = ["Domain", "Hosting", "Software", "Marketing",
 export interface Income {
   id: string;
   user_id: string;
-  project_id: string | null; // <--- YEH NAYA ADD HUA HAI
+  project_id: string | null; 
   title: string;
   amount: number;
   category: string;
@@ -57,3 +55,35 @@ export interface Income {
 
 export type IncomeFormData = Omit<Income, "id" | "user_id" | "created_at" | "updated_at">;
 export const INCOME_CATEGORIES = ["Salary", "Freelance", "Business", "Investment", "Rental", "Other"];
+
+// ==========================================
+// 4. INVOICE TYPES
+// ==========================================
+export interface Invoice {
+  id: string;
+  user_id: string;
+  project_id: string | null;
+  invoice_number: string;
+  client_name: string;
+  amount: number;
+  status: "Draft" | "Pending" | "Paid" | "Overdue";
+  issue_date: string;
+  due_date: string;
+  notes: string | null;
+  created_at: string;
+}
+
+export type InvoiceFormData = Omit<Invoice, "id" | "user_id" | "created_at">;
+export const INVOICE_STATUSES = ["Draft", "Pending", "Paid", "Overdue"] as const;
+
+// ==========================================
+// 5. AUDIT LOG TYPES
+// ==========================================
+export interface AuditLog {
+  id: string;
+  user_id: string | null;
+  action: string;
+  module: string;
+  details: string | null;
+  created_at: string;
+}

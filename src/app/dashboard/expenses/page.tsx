@@ -5,6 +5,7 @@ import { useAuth } from "@/context/AuthContext";
 import { Expense, ExpenseFormData, Project } from "@/types";
 import ExpenseForm from "@/components/sections/ExpenseForm";
 import { Plus, Pencil, Trash2 } from "lucide-react";
+import { logAction } from "@/lib/logAction";
 
 export default function ExpensesPage() {
   const { user } = useAuth();
@@ -38,12 +39,14 @@ export default function ExpensesPage() {
 
   async function handleSubmit(data: ExpenseFormData) {
     setFormLoading(true);
-    if (editingData) {
+        if (editingData) {
       const { error } = await supabase.from("expenses").update(data).eq("id", editingData.id);
       if (error) alert(error.message);
+      else if(user) await logAction(user.id, "Expense Updated", "Expense", `Updated expense: ${data.title}`);
     } else {
       const { error } = await supabase.from("expenses").insert({ ...data, user_id: user?.id });
       if (error) alert(error.message);
+      else if(user) await logAction(user.id, "Expense Added", "Expense", `Added expense: ${data.title} of PKR ${data.amount}`);
     }
     setFormLoading(false);
     setShowForm(false);
@@ -110,7 +113,7 @@ export default function ExpensesPage() {
                 <td className="px-4 py-3 hidden sm:table-cell">{getProjectName(exp.project_id)}</td>
                 <td className="px-4 py-3 text-right font-semibold text-red-400">{formatCurrency(exp.amount)}</td>
                 <td className="px-4 py-3 text-right text-gray-400 hidden md:table-cell">{new Date(exp.expense_date).toLocaleDateString("en-PK")}</td>
-                <td className="px-4 py-3 text-right">g
+                <td className="px-4 py-3 text-right">
                   <div className="flex items-center justify-end gap-2">
                     <button onClick={() => openEditModal(exp)} className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 rounded transition-colors"><Pencil size={16} /></button>
                     <button onClick={() => setDeleteId(exp.id)} className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"><Trash2 size={16} /></button>

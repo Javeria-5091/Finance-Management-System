@@ -1,8 +1,9 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, DollarSign, FolderOpen, CreditCard, LogOut, X } from "lucide-react";
+import { LayoutDashboard, DollarSign, FolderOpen, CreditCard, ArrowLeftRight, FileText, FileBarChart,ClipboardList, LogOut, X } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { logAction } from "@/lib/logAction";
 
 interface SidebarProps {
   open: boolean;
@@ -13,16 +14,21 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
   const pathname = usePathname();
   const { signOut } = useAuth();
 
-  function handleLogout() {
+    function handleLogout() {
+    logAction(user?.id || "", "User Logged Out", "Auth", "User logged out");
     signOut();
     window.location.href = "/login";
   }
 
     const navItems = [
     { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-    { label: "Projects", href: "/dashboard/projects", icon: FolderOpen }, // <-- YEH NAYA
+    { label: "Projects", href: "/dashboard/projects", icon: FolderOpen },
+    { label: "Transactions", href: "/dashboard/transactions", icon: ArrowLeftRight }, 
+    { label: "Invoices", href: "/dashboard/invoices", icon: FileText },
+    { label: "Reports", href: "/dashboard/reports", icon: FileBarChart },
+    { label: "Audit Log", href: "/dashboard/audit-log", icon: ClipboardList },
     { label: "Income", href: "/dashboard/income", icon: DollarSign },
-    { label: "Expenses", href: "/dashboard/expenses", icon: CreditCard }, // <-- YEH NAYA (Abhi disable)
+    { label: "Expenses", href: "/dashboard/expenses", icon: CreditCard },
   ];
 
   return (

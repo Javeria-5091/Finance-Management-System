@@ -5,6 +5,7 @@ import { useAuth } from "@/context/AuthContext";
 import Sidebar from "@/components/sections/Sidebar";
 import TopNavbar from "@/components/sections/TopNavbar";
 
+
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const { user, loading } = useAuth();

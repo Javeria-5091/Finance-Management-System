@@ -5,6 +5,7 @@ import { useAuth } from "@/context/AuthContext";
 import { Project, ProjectFormData } from "@/types";
 import ProjectForm from "@/components/sections/ProjectForm";
 import { Plus, Pencil, Trash2 } from "lucide-react";
+import { logAction } from "@/lib/logAction";
 
 export default function ProjectsPage() {
   const { user } = useAuth();
@@ -35,13 +36,16 @@ export default function ProjectsPage() {
 
     let error = null;
 
-    if (editingData) {
+        if (editingData) {
       const res = await supabase.from("projects").update(safeData).eq("id", editingData.id);
       error = res.error;
+      if(!error && user) await logAction(user.id, "Project Updated", "Project", `Updated project: ${safeData.name}`);
     } else {
       const res = await supabase.from("projects").insert({ ...safeData, user_id: user?.id });
       error = res.error;
+      if(!error && user) await logAction(user.id, "Project Created", "Project", `Created project: ${safeData.name}`);
     }
+
 
     if (error) {
       alert("Database Error: " + error.message);
@@ -53,9 +57,11 @@ export default function ProjectsPage() {
     setFormLoading(false);
   }
 
-  async function handleDelete() {
+    async function handleDelete() {
     if (!deleteId) return;
+    const project = projects.find(p => p.id === deleteId);
     await supabase.from("projects").delete().eq("id", deleteId);
+    if(user && project) await logAction(user.id, "Project Deleted", "Project", `Deleted project: ${project.name}`);
     setDeleteId(null);
     fetchProjects();
   }

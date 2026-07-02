@@ -5,6 +5,7 @@ import { useAuth } from "@/context/AuthContext";
 import { Income, IncomeFormData, Project } from "@/types";
 import IncomeForm from "@/components/sections/IncomeForm";
 import { Plus, Pencil, Trash2 } from "lucide-react";
+import { logAction } from "@/lib/logAction";
 
 export default function IncomePage() {
   const { user } = useAuth();
@@ -47,12 +48,14 @@ export default function IncomePage() {
   // SUBMIT
   async function handleSubmit(data: IncomeFormData) {
     setFormLoading(true);
-    if (editingData) {
+        if (editingData) {
       const { error } = await supabase.from("incomes").update(data).eq("id", editingData.id);
       if (error) alert(error.message);
+      else if(user) await logAction(user.id, "Income Updated", "Income", `Updated income: ${data.title}`);
     } else {
       const { error } = await supabase.from("incomes").insert({ ...data, user_id: user?.id });
       if (error) alert(error.message);
+      else if(user) await logAction(user.id, "Income Added", "Income", `Added income: ${data.title} of PKR ${data.amount}`);
     }
     setFormLoading(false);
     setShowForm(false);
