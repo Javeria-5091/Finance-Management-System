@@ -18,7 +18,7 @@ export default function ProjectsPage() {
   const [editingData, setEditingData] = useState<Project | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  // ✅ EXACT ALAG ALAG PERMISSIONS
+  
   const canAdd = hasPermission("can_create_project");
   const canEdit = hasPermission("can_edit_project");
   const canDelete = hasPermission("can_delete_project");

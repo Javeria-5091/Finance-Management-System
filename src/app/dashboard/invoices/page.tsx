@@ -9,7 +9,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
 export default function InvoicesPage() {
-  const { user, hasPermission } = useAuth(); // isAdmin ki zaroorat nahi ab
+  const { user, hasPermission } = useAuth(); 
   
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -20,7 +20,6 @@ export default function InvoicesPage() {
   const [editingData, setEditingData] = useState<Invoice | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  // ✅ EXACT ALAG ALAG PERMISSIONS
   const canAdd = hasPermission("can_create_invoice");
   const canEdit = hasPermission("can_edit_invoice");
   const canDelete = hasPermission("can_delete_invoice");
@@ -172,7 +171,6 @@ export default function InvoicesPage() {
           <p className="text-gray-400 text-sm">Manage client invoices and payments</p>
         </div>
         
-        {/* ✅ ADD BUTTON SIRF canAdd HONE PE */}
         {canAdd && (
           <button onClick={() => { setEditingData(null); setShowForm(true); }} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg font-medium transition-colors w-fit">
             <Plus size={18} /> Create Invoice
@@ -189,7 +187,7 @@ export default function InvoicesPage() {
               <th className="px-4 py-3 text-xs font-medium text-gray-400 uppercase">Status</th>
               <th className="px-4 py-3 text-xs font-medium text-gray-400 uppercase text-right">Amount</th>
               <th className="px-4 py-3 text-xs font-medium text-gray-400 uppercase text-right hidden md:table-cell">Due Date</th>
-              {/* ✅ ACTIONS COLUMN HAMESHA DIKHEGA (Kyunke Download sab ko chahiye) */}
+             
               <th className="px-4 py-3 text-xs font-medium text-gray-400 uppercase text-right">Actions</th>
             </tr>
           </thead>
@@ -205,7 +203,7 @@ export default function InvoicesPage() {
                 <td className="px-4 py-3 text-right font-semibold text-white">{formatCurrency(inv.amount)}</td>
                 <td className="px-4 py-3 text-right text-gray-400 hidden md:table-cell">{new Date(inv.due_date).toLocaleDateString("en-PK")}</td>
                 
-                {/* ✅ ACTIONS: DOWNLOAD HAMESHA, EDIT/DELETE PERMISSIONS KE MUTABIQ */}
+               
                 <td className="px-4 py-3 text-right">
                   <div className="flex items-center justify-end gap-1">
                     <button onClick={() => handleDownloadPDF(inv)} className="p-1.5 text-gray-400 hover:text-green-400 hover:bg-green-500/10 rounded transition-colors" title="Download PDF"><Download size={16} /></button>
@@ -225,7 +223,7 @@ export default function InvoicesPage() {
         </table>
       </div>
 
-      {/* ✅ FORM MODAL (canAdd ya canEdit se hi aayega, yahan condition ki zaroorat nahi) */}
+     
       {showForm && (
         <InvoiceForm initialData={editingData} onSubmit={handleSubmit} onClose={() => { setShowForm(false); setEditingData(null); }} loading={formLoading} projects={projects} />
       )}

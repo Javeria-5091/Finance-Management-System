@@ -19,11 +19,10 @@ export default function IncomePage() {
   const [editingData, setEditingData] = useState<Income | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  // ✅ EXACT ALAG ALAG PERMISSIONS
   const canAdd = hasPermission("can_add_income");
   const canEdit = hasPermission("can_edit_income");
   const canDelete = hasPermission("can_delete_income");
-  const showActions = canEdit || canDelete; // Table column dikhani hai ya nahi
+  const showActions = canEdit || canDelete; 
 
   const fetchIncomes = useCallback(async () => {
     if (!user) return;
@@ -86,7 +85,7 @@ export default function IncomePage() {
 const projectMap = new Map(projects.map(p => [p.id, p.name]));
   function getProjectName(projectId: string | null) {
     if (!projectId) return <span className="text-gray-500">-</span>;
-    const name = projectMap.get(projectId); // YEH INSTANT HAI
+    const name = projectMap.get(projectId);
     return name ? <span className="text-blue-400">{name}</span> : <span className="text-gray-500">Deleted</span>;
   }
 

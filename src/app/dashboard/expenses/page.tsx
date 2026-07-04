@@ -19,7 +19,6 @@ export default function ExpensesPage() {
   const [editingData, setEditingData] = useState<Expense | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  // ✅ EXACT ALAG ALAG PERMISSIONS
   const canAdd = hasPermission("can_add_expense");
   const canEdit = hasPermission("can_edit_expense");
   const canDelete = hasPermission("can_delete_expense");

@@ -31,7 +31,6 @@ export default function ProjectForm({ initialData, onSubmit, onClose, loading }:
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     
-    // SAFETY NET: Agar end date empty string hai toh null bhejo
     const finalData = {
       ...form,
       end_date: form.end_date === "" ? null : form.end_date

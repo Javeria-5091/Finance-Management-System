@@ -33,11 +33,11 @@ export default function TransactionsPage() {
   useEffect(() => {
     if (!user) return;
     async function fetchData() {
-      // ✅ FIX: .eq("user_id", userId) HATA DO - RLS khud sab data dega
+     
       const [incRes, expRes, projRes] = await Promise.all([
         supabase.from("incomes").select("*").order("income_date", { ascending: false }),
         supabase.from("expenses").select("*").order("expense_date", { ascending: false }),
-        supabase.from("projects").select("*") // ✅ YAHAN SE BHI HATA DO
+        supabase.from("projects").select("*") 
       ]);
 
       const incData: Transaction[] = (incRes.data || []).map(i => ({

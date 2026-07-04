@@ -13,18 +13,16 @@ interface TopNavbarProps {
 
 export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) { 
   const { user } = useAuth(); 
-  const router = useRouter(); // YEH ADD KIYA
+  const router = useRouter(); 
   
-  // Safe extraction for fallback values
   const initials = user && user.email ? user.email[0].toUpperCase() : 'U'; 
 
-  // Notification States 
+ 
   const [notifications, setNotifications] = useState<Notification[]>([]); 
   const [showDropdown, setShowDropdown] = useState(false); 
   const [unreadCount, setUnreadCount] = useState(0); 
 
-  // Fetch Notifications 
-    // Fetch Notifications (Safe)
+ 
   useEffect(() => {
     if (!user) return;
     const userId = user.id;
@@ -40,7 +38,7 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
 
         if (error) {
           console.error("Notifications fetch error:", error.message);
-          return; // Error aaye toh app crash nahi hoga
+          return; 
         }
 
         if (data) {
@@ -68,7 +66,7 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
     await supabase
       .from('notifications')
       .update({ is_read: true })
-      .eq('user_id', user.id) // Guarded directly above
+      .eq('user_id', user.id) 
       .eq('is_read', false); 
       
     setNotifications(prev => prev.map(n => ({ ...n, is_read: true }))); 

@@ -13,7 +13,7 @@ import {
   Users,
   ShieldCheck,
   X,
-  LogOut, // ✅ SIGN OUT ICON ADD KIYA
+  LogOut, 
 } from "lucide-react";
 
 interface SidebarProps {
@@ -21,7 +21,6 @@ interface SidebarProps {
   onClose: () => void;
 }
 
-// ✅ MENU ITEMS WITH ROLE REQUIREMENTS
 const menuItems = [
   {
     label: "Dashboard",
@@ -81,23 +80,22 @@ const menuItems = [
 
 export default function Sidebar({ open, onClose }: SidebarProps) {
   const pathname = usePathname();
-  const { role, profile, signOut } = useAuth(); // ✅ signOut ADD KIYA
+  const { role, profile, signOut } = useAuth(); 
 
-  // ✅ FILTER MENU ITEMS BASED ON ROLE
   const visibleItems = menuItems.filter((item) => {
     if (!role) return false;
     return item.showFor.includes(role);
   });
 
-  // ✅ SIGN OUT HANDLER
+
   async function handleSignOut() {
     await signOut();
-    onClose(); // Mobile sidebar band karo
+    onClose(); 
   }
 
   return (
     <>
-      {/* Mobile Overlay */}
+     
       {open && (
         <div
           className="fixed inset-0 bg-black/50 z-40 lg:hidden"
@@ -109,7 +107,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
       <aside
         className={`fixed top-0 left-0 z-50 h-full w-64 bg-gray-800 border-r border-gray-700 transform transition-transform duration-300 lg:translate-x-0 lg:static lg:z-auto ${
           open ? "translate-x-0" : "-translate-x-full"
-        } flex flex-col`} // ✅ flex flex-col add kiya taake footer neeche rahe
+        } flex flex-col`} 
       >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-gray-700">
@@ -173,7 +171,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
           })}
         </nav>
 
-        {/* ✅ SIGN OUT BUTTON (BOTTOM MEIN FIXED) */}
+       
         <div className="p-3 border-t border-gray-700 mt-auto">
           <button
             onClick={handleSignOut}

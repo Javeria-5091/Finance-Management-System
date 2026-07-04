@@ -6,17 +6,16 @@ import Sidebar from "@/components/sections/Sidebar";
 import TopNavbar from "@/components/sections/TopNavbar";
 import { ShieldAlert } from "lucide-react";
 
-// ✅ SIRF YE ROUTES ADMIN-ONLY HAIN
+
 const ADMIN_ONLY_ROUTES = [
   "/dashboard/admin",
   "/dashboard/audit-log",
 ];
 
-// ❌ PERMISSION_ROUTES WALI OBJECT PURA HATA DO (ISE DELETE KAR DO)
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { user, role, loading, isAdmin } = useAuth(); // ✅ hasPermission bhi hata diya kyunki zaroorat nahi
+  const { user, role, loading, isAdmin } = useAuth(); 
   const router = useRouter();
   const pathname = usePathname();
 
@@ -38,7 +37,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
   if (!user) return null;
 
-  // ✅ ADMIN-ONLY ROUTE CHECK
   const isAdminRoute = ADMIN_ONLY_ROUTES.some((route) => pathname.startsWith(route));
 
   if (isAdminRoute && !isAdmin) {
@@ -63,8 +61,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     );
   }
 
-  // ❌ PERMISSION-BASED ROUTE CHECK WALA FOR LOOP PURA HATA DO (ISE DELETE KAR DO)
-  // Ab yahan se koi bhi page block nahi hoga, sirf Admin wale block honge
 
   return (
     <div className="min-h-screen flex bg-gray-900">

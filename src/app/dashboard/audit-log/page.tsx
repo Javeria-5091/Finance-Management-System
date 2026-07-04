@@ -11,44 +11,39 @@ export default function AuditLogPage() {
   const [loading, setLoading] = useState(true);
   const [limit, setLimit] = useState(20);
   
-  // Search & Filter States
   const [search, setSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState("All");
 
-  // FIXED: Dono useEffects ko separate kiya aur brackets ki nesting theek ki
   useEffect(() => {
-    // Agar user null hai to yahin se block kar do
     if (!user || !user.id) return;
 
-    // FIXED: TypeScript user protection ke liye id ko locally scope kiya
     const userId = user.id;
 
     async function fetchLogs() {
       const { data } = await supabase
         .from("audit_logs")
         .select("*")
-        .eq("user_id", userId) // Fixed safely
+        .eq("user_id", userId) 
         .order("created_at", { ascending: false })
         .limit(limit); 
 
       if (data) {
         if (limit === 20) setLogs(data); 
-        else setLogs(prev => [...prev, ...data]); // Baad mein append karo
+        else setLogs(prev => [...prev, ...data]); 
       }
       setLoading(false);
     }
 
     fetchLogs();
-  }, [user, limit]); // Fixed dependencies and cleanly closed hook
+  }, [user, limit]); 
 
-  // Unique modules dynamically nikalo
+  
   const modules = ["All", ...Array.from(new Set(logs.map(l => l.module)))];
 
-  // Filter Logic
   const filteredLogs = logs.filter(log => {
     const matchesSearch = 
       log.action.toLowerCase().includes(search.toLowerCase()) ||
-      (log.details && log.details.toLowerCase().includes(search.toLowerCase())) || // Fixed optional chaining safely
+      (log.details && log.details.toLowerCase().includes(search.toLowerCase())) || 
       log.module.toLowerCase().includes(search.toLowerCase());
       
     const matchesModule = moduleFilter === "All" || log.module === moduleFilter;
@@ -157,7 +152,6 @@ export default function AuditLogPage() {
           </tbody>
         </table>
         
-        {/* YEH LOAD MORE BUTTON ADD KIYA */}
         {logs.length >= limit && (
           <div className="p-4 text-center border-t border-gray-700">
             <button 

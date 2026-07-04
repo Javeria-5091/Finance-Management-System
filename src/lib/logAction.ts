@@ -2,7 +2,7 @@ import { supabase } from "./supabase";
 
 export async function logAction(userId: string, action: string, module: string, details?: string) {
   try {
-    // Audit Log mein save karo
+    
     await supabase.from("audit_logs").insert({
       user_id: userId,
       action,
@@ -10,7 +10,6 @@ export async function logAction(userId: string, action: string, module: string, 
       details: details || null,
     });
 
-    // Notification bhi generate karo (Sirf kuch specific actions ke liye)
     let notify = false;
     let notifTitle = "";
     let notifMessage = "";

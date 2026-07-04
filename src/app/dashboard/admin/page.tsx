@@ -6,7 +6,7 @@ import { useAuth } from "@/context/AuthContext";
 import { X, Check, Search, Plus } from "lucide-react";
 import type { UserProfile } from "@/types";
 
-// ✅ 12 GRANULAR CRUD PERMISSIONS (Categorized)
+// 12 GRANULAR CRUD PERMISSIONS (Categorized)
 const REAL_PERMISSIONS: { key: keyof UserProfile; label: string; category: string }[] = [
   { key: "can_create_project", label: "Create Project", category: "Projects" },
   { key: "can_edit_project", label: "Edit Project", category: "Projects" },
@@ -88,7 +88,6 @@ export default function AdminPage() {
     if (!selectedUser) return;
     setSaving(true);
 
-    // ✅ SAB 12 PERMISSIONS EXTRACT KARO
     const {
       role,
       can_create_project, can_edit_project, can_delete_project,
@@ -97,7 +96,6 @@ export default function AdminPage() {
       can_create_invoice, can_edit_invoice, can_delete_invoice,
     } = selectedUser;
 
-    // ✅ DATABASE KO BHEJO
     const { error } = await supabase
       .from("profiles")
       .update({
@@ -216,7 +214,7 @@ export default function AdminPage() {
               </select>
             </div>
 
-            {/* ✅ CATEGORIZED PERMISSIONS UI */}
+            {/* CATEGORIZED PERMISSIONS UI */}
             <div className="mb-6">
               <label className="block text-sm font-medium text-gray-300 mb-3">Module Permissions</label>
               <div className="space-y-4">

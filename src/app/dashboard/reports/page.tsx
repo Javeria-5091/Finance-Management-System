@@ -24,7 +24,7 @@ export default function ReportsPage() {
     if (!user?.id) return; 
 
     async function fetchData() {
-      // ✅ FIX: .eq("user_id", userId) HATA DO - RLS khud sab data dega
+      
       const [incRes, expRes, projRes] = await Promise.all([
         supabase.from("incomes").select("*").order("income_date", { ascending: false }),
         supabase.from("expenses").select("*").order("expense_date", { ascending: false }),

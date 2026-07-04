@@ -26,5 +26,5 @@ export function validateForm(type: string, data: any): string | null {
     if (!data.due_date) return "Due date is required.";
   }
 
-  return null; // Sab sahi hai
+  return null; 
 }

@@ -54,7 +54,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!user) return;
 
       try {
-        // SIRF profiles table se data lo
+        
         const { data, error } = await supabase
           .from("profiles")
           .select("*")
@@ -62,7 +62,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           .single();
 
         if (error) {
-          // ❌ AGAR YEH CONSOLE MEIN DIKHE TO MATLAB RLS MASLA HAI
+          
           console.error("❌ Profile RLS Error:", error.message);
           setProfile({
             id: "",
@@ -107,7 +107,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             can_delete_invoice: Boolean(data.can_delete_invoice),
           };
           
-          // ✅ YEH LINE CHECK KARO CONSOLE MEIN
+          
           console.log("✅ Profile Loaded Successfully. Role:", profileData.role);
           setProfile(profileData);
         }

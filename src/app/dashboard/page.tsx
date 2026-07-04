@@ -10,7 +10,7 @@ import {
 import type { PieLabelRenderProps } from "recharts";
 
 export default function DashboardPage() {
-  const { user } = useAuth(); // ✅ isAdmin HATA DIYA - KIUNKE SABKO SAB DATA DIKHANA HAI
+  const { user } = useAuth(); // 
   const [projects, setProjects] = useState<Project[]>([]);
   const [incomes, setIncomes] = useState<Income[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -21,8 +21,7 @@ export default function DashboardPage() {
     if (!user) return;
     
     async function fetchData() {
-      // ✅ FIX: SAB QUERIES SE user_id FILTER HATA DO
-      // RLS khud sab logged-in users ko data dikhayega
+     
       const [projRes, incRes, expRes] = await Promise.all([
         supabase.from("projects").select("*"),
         supabase.from("incomes").select("*").order("income_date", { ascending: false }),
@@ -35,7 +34,7 @@ export default function DashboardPage() {
       setLoading(false);
     }
     fetchData();
-  }, [user]); // ✅ isAdmin dependency bhi hata di
+  }, [user]);
 
   // MATH / CALCULATIONS
   const totalIncome = incomes.reduce((sum, inc) => sum + inc.amount, 0);
