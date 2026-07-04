@@ -8,9 +8,10 @@ import { Plus, Pencil, Trash2 } from "lucide-react";
 import { logAction } from "@/lib/logAction";
 
 export default function IncomePage() {
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
+  
   const [incomes, setIncomes] = useState<Income[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]); // PROJECTS STATE
+  const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [formLoading, setFormLoading] = useState(false);
   
@@ -18,13 +19,17 @@ export default function IncomePage() {
   const [editingData, setEditingData] = useState<Income | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  // INCOMES FETCH
+  // ✅ EXACT ALAG ALAG PERMISSIONS
+  const canAdd = hasPermission("can_add_income");
+  const canEdit = hasPermission("can_edit_income");
+  const canDelete = hasPermission("can_delete_income");
+  const showActions = canEdit || canDelete; // Table column dikhani hai ya nahi
+
   const fetchIncomes = useCallback(async () => {
     if (!user) return;
     const { data, error } = await supabase
       .from("incomes")
       .select("*")
-      .eq("user_id", user.id)
       .order("income_date", { ascending: false });
       
     if (data) setIncomes(data);
@@ -32,23 +37,23 @@ export default function IncomePage() {
     setLoading(false);
   }, [user]);
 
-  // PROJECTS FETCH (NAYA FUNCTION)
   const fetchProjects = useCallback(async () => {
     if (!user) return;
-    const { data } = await supabase.from("projects").select("*").eq("user_id", user.id);
+    const { data } = await supabase
+      .from("projects")
+      .select("*")
+      .order("start_date", { ascending: false });
     if (data) setProjects(data);
   }, [user]);
 
-  // DONO CALL KARO
   useEffect(() => { 
     fetchIncomes();
     fetchProjects();
   }, [fetchIncomes, fetchProjects]);
 
-  // SUBMIT
   async function handleSubmit(data: IncomeFormData) {
     setFormLoading(true);
-        if (editingData) {
+    if (editingData) {
       const { error } = await supabase.from("incomes").update(data).eq("id", editingData.id);
       if (error) alert(error.message);
       else if(user) await logAction(user.id, "Income Updated", "Income", `Updated income: ${data.title}`);
@@ -63,28 +68,26 @@ export default function IncomePage() {
     fetchIncomes();
   }
 
-  // DELETE
   async function handleDelete() {
     if (!deleteId) return;
     const { error } = await supabase.from("incomes").delete().eq("id", deleteId);
     if (error) alert(error.message);
+    if(user) await logAction(user.id, "Income Deleted", "Income", `Deleted income entry`);
     setDeleteId(null);
     fetchIncomes();
   }
 
-  // HELPERS
   function openAddModal() { setEditingData(null); setShowForm(true); }
   function openEditModal(inc: Income) { setEditingData(inc); setShowForm(true); }
   
   function formatCurrency(amount: number) {
     return new Intl.NumberFormat("en-PK", { style: "currency", currency: "PKR" }).format(amount);
   }
-
-  // PROJECT KA NAME DHOONDHO (TABLE KE LIYE)
+const projectMap = new Map(projects.map(p => [p.id, p.name]));
   function getProjectName(projectId: string | null) {
     if (!projectId) return <span className="text-gray-500">-</span>;
-    const project = projects.find(p => p.id === projectId);
-    return project ? <span className="text-blue-400">{project.name}</span> : <span className="text-gray-500">Deleted</span>;
+    const name = projectMap.get(projectId); // YEH INSTANT HAI
+    return name ? <span className="text-blue-400">{name}</span> : <span className="text-gray-500">Deleted</span>;
   }
 
   return (
@@ -94,9 +97,12 @@ export default function IncomePage() {
           <h2 className="text-2xl font-bold text-white">Income Management</h2>
           <p className="text-gray-400 text-sm">Track and manage your earnings</p>
         </div>
-        <button onClick={openAddModal} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg font-medium transition-colors w-fit">
-          <Plus size={18} /> Add Income
-        </button>
+        
+        {canAdd && (
+          <button onClick={openAddModal} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg font-medium transition-colors w-fit">
+            <Plus size={18} /> Add Income
+          </button>
+        )}
       </div>
 
       <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
@@ -107,13 +113,15 @@ export default function IncomePage() {
               <th className="px-4 py-3 text-xs font-medium text-gray-400 uppercase hidden sm:table-cell">Project</th>
               <th className="px-4 py-3 text-xs font-medium text-gray-400 uppercase text-right">Amount</th>
               <th className="px-4 py-3 text-xs font-medium text-gray-400 uppercase text-right hidden md:table-cell">Date</th>
-              <th className="px-4 py-3 text-xs font-medium text-gray-400 uppercase text-right">Actions</th>
+              {showActions && (
+                <th className="px-4 py-3 text-xs font-medium text-gray-400 uppercase text-right">Actions</th>
+              )}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-700">
-            {loading && <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">Loading...</td></tr>}
+            {loading && <tr><td colSpan={showActions ? 5 : 4} className="px-4 py-8 text-center text-gray-400">Loading...</td></tr>}
             {!loading && incomes.length === 0 && (
-              <tr><td colSpan={5} className="px-4 py-12 text-center text-gray-400">No income entries yet. Click "Add Income" to start.</td></tr>
+              <tr><td colSpan={showActions ? 5 : 4} className="px-4 py-12 text-center text-gray-400">No income entries yet.</td></tr>
             )}
 
             {incomes.map(inc => (
@@ -125,19 +133,25 @@ export default function IncomePage() {
                 <td className="px-4 py-3 hidden sm:table-cell">{getProjectName(inc.project_id)}</td>
                 <td className="px-4 py-3 text-right font-semibold text-green-400">{formatCurrency(inc.amount)}</td>
                 <td className="px-4 py-3 text-right text-gray-400 hidden md:table-cell">{new Date(inc.income_date).toLocaleDateString("en-PK")}</td>
-                <td className="px-4 py-3 text-right">
-                  <div className="flex items-center justify-end gap-2">
-                    <button onClick={() => openEditModal(inc)} className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 rounded transition-colors"><Pencil size={16} /></button>
-                    <button onClick={() => setDeleteId(inc.id)} className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"><Trash2 size={16} /></button>
-                  </div>
-                </td>
+                
+                {showActions && (
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex items-center justify-end gap-2">
+                      {canEdit && (
+                        <button onClick={() => openEditModal(inc)} className="p-1.5 text-gray-400 hover:text-blue-400 hover:bg-blue-500/10 rounded transition-colors"><Pencil size={16} /></button>
+                      )}
+                      {canDelete && (
+                        <button onClick={() => setDeleteId(inc.id)} className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"><Trash2 size={16} /></button>
+                      )}
+                    </div>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
 
-      {/* FORM MEIN PROJECTS PASS KAR RAHE HAIN */}
       {showForm && (
         <IncomeForm 
           initialData={editingData} 

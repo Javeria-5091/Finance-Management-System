@@ -21,24 +21,29 @@ export default function ReportsPage() {
   const [selectedProject, setSelectedProject] = useState("all");
 
   useEffect(() => {
-    if (!user) return;
+    if (!user?.id) return; 
+
     async function fetchData() {
+      // ✅ FIX: .eq("user_id", userId) HATA DO - RLS khud sab data dega
       const [incRes, expRes, projRes] = await Promise.all([
-        supabase.from("incomes").select("*").eq("user_id", user.id),
-        supabase.from("expenses").select("*").eq("user_id", user.id),
-        supabase.from("projects").select("*").eq("user_id", user.id)
+        supabase.from("incomes").select("*").order("income_date", { ascending: false }),
+        supabase.from("expenses").select("*").order("expense_date", { ascending: false }),
+        supabase.from("projects").select("*").order("start_date", { ascending: false }),
       ]);
+
       if (incRes.data) setIncomes(incRes.data);
       if (expRes.data) setExpenses(expRes.data);
       if (projRes.data) setProjects(projRes.data);
+      
       setLoading(false);
     }
-    fetchData();
-  }, [user]);
 
-  // DYNAMIC YEARS GENERATION (Ab 2026, 2027 sab aa jayega)
+    fetchData();
+  }, [user]); 
+
+  // DYNAMIC YEARS GENERATION
   const currentYear = new Date().getFullYear();
-  const years = Array.from({ length: 5 }, (_, i) => currentYear - 2 + i); // e.g., 2024, 2025, 2026, 2027, 2028
+  const years = Array.from({ length: 5 }, (_, i) => currentYear - 2 + i);
 
   // Filtering Logic
   const getFilteredData = () => {
@@ -78,7 +83,7 @@ export default function ReportsPage() {
 
   // --- EXPORT FUNCTIONS ---
   
-  // 1. CSV EXPORT (100% Safe Strings)
+  // 1. CSV EXPORT
   function downloadCSV() {
     let rows: string[][] = [["Osystic Finance - " + getTitle()], []];
     const showInc = reportType !== "expense";
@@ -112,7 +117,7 @@ export default function ReportsPage() {
     document.body.appendChild(link); link.click(); document.body.removeChild(link);
   }
 
-  // 2. PDF EXPORT (Strict String Conversion to fix xxxxxx bug)
+  // 2. PDF EXPORT
   function downloadPDF() {
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -135,7 +140,6 @@ export default function ReportsPage() {
       autoTable(doc, {
         startY: y, margin: { left: 14, right: 14 },
         head: [["Title", "Project", "Amount (PKR)", "Date"]],
-        // YAHAN SAB KO STRING MEIN CONVERT KIYA HAI
         body: fIncome.map(i => [String(i.title), String(getProjectName(i.project_id)), String(Number(i.amount).toLocaleString()), String(i.income_date)]),
         theme: "striped", headStyles: { fillColor: [16, 185, 129], textColor: 255 }, styles: { fontSize: 9 }
       });
@@ -150,7 +154,6 @@ export default function ReportsPage() {
       autoTable(doc, {
         startY: y, margin: { left: 14, right: 14 },
         head: [["Title", "Project", "Amount (PKR)", "Date"]],
-        // YAHAN BHI STRING MEIN CONVERT KIYA HAI
         body: fExpense.map(e => [String(e.title), String(getProjectName(e.project_id)), String(Number(e.amount).toLocaleString()), String(e.expense_date)]),
         theme: "striped", headStyles: { fillColor: [239, 68, 68], textColor: 255 }, styles: { fontSize: 9 }
       });

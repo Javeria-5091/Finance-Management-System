@@ -12,12 +12,8 @@ export interface Project {
   end_date: string | null;
   created_at: string;
 }
-
 export type ProjectFormData = Omit<Project, "id" | "user_id" | "created_at">;
-
 export const PROJECT_STATUSES = ["Active", "Completed", "On Hold"] as const;
-
-
 // ==========================================
 // 2. EXPENSE TYPES
 // ==========================================
@@ -32,11 +28,8 @@ export interface Expense {
   notes: string | null;
   created_at: string;
 }
-
 export type ExpenseFormData = Omit<Expense, "id" | "user_id" | "created_at">;
 export const EXPENSE_CATEGORIES = ["Domain", "Hosting", "Software", "Marketing", "Salary", "Freelance", "Other"];
-
-
 // ==========================================
 // 3. INCOME TYPES (UPDATED - Project ID Added)
 // ==========================================
@@ -52,10 +45,8 @@ export interface Income {
   created_at: string;
   updated_at: string;
 }
-
 export type IncomeFormData = Omit<Income, "id" | "user_id" | "created_at" | "updated_at">;
 export const INCOME_CATEGORIES = ["Salary", "Freelance", "Business", "Investment", "Rental", "Other"];
-
 // ==========================================
 // 4. INVOICE TYPES
 // ==========================================
@@ -72,10 +63,8 @@ export interface Invoice {
   notes: string | null;
   created_at: string;
 }
-
 export type InvoiceFormData = Omit<Invoice, "id" | "user_id" | "created_at">;
 export const INVOICE_STATUSES = ["Draft", "Pending", "Paid", "Overdue"] as const;
-
 // ==========================================
 // 5. AUDIT LOG TYPES
 // ==========================================
@@ -85,5 +74,39 @@ export interface AuditLog {
   action: string;
   module: string;
   details: string | null;
+  created_at: string;
+}
+// ==========================================
+// 6. NOTIFICATION TYPES
+// ==========================================
+export interface Notification {
+  id: string;
+  user_id: string;
+  title: string;
+  message: string;
+  is_read: boolean;
+  created_at: string;
+}
+// ==========================================
+// 7. USER PROFILE TYPES
+// ==========================================
+export interface UserProfile {
+  id: string;
+  user_id: string;
+  email: string;
+  full_name: string;
+  role: string;
+  can_create_project: boolean;
+  can_edit_project: boolean;  
+  can_delete_project: boolean;
+  can_add_income: boolean;
+  can_edit_income: boolean;    
+  can_delete_income: boolean;  
+  can_add_expense: boolean;
+  can_edit_expense: boolean;  
+  can_delete_expense: boolean; 
+  can_create_invoice: boolean;
+  can_edit_invoice: boolean;   
+  can_delete_invoice: boolean;
   created_at: string;
 }
