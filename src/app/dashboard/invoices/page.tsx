@@ -6,7 +6,7 @@ import { Invoice, InvoiceFormData, Project } from "@/types";
 import InvoiceForm from "@/components/sections/InvoiceForm";
 import { Plus, Pencil, Trash2, Download } from "lucide-react";
 import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
+//import autoTable from "jspdf-autotable";
 
 export default function InvoicesPage() {
   const { user, hasPermission } = useAuth(); 
@@ -65,11 +65,15 @@ export default function InvoicesPage() {
     fetchInvoices();
   }
 
-  // PDF FUNCTION
-  function handleDownloadPDF(inv: Invoice) {
+  async function handleDownloadPDF(inv: Invoice) {
+    const jsPDFModule = await import("jspdf");
+    const jsPDF = jsPDFModule.default;
+    await import("jspdf-autotable");
+
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
     
+    // 1. HEADER SECTION
     doc.setFillColor(17, 24, 39);
     doc.rect(0, 0, pageWidth, 45, 'F');
     
@@ -88,6 +92,7 @@ export default function InvoicesPage() {
     doc.setFontSize(10);
     doc.text(inv.invoice_number, pageWidth - 14, 32, { align: "right" });
 
+    // 2. DETAILS SECTION
     let y = 60;
     doc.setTextColor(50);
     doc.setFontSize(11);
@@ -102,14 +107,18 @@ export default function InvoicesPage() {
     doc.setTextColor(100);
     doc.text(`Issue Date:`, 120, y);
     doc.text(`${new Date(inv.issue_date).toLocaleDateString("en-PK", { day: 'numeric', month: 'long', year: 'numeric' })}`, 120, y + 6);
+    
     doc.text(`Due Date:`, 120, y + 16);
     doc.text(`${new Date(inv.due_date).toLocaleDateString("en-PK", { day: 'numeric', month: 'long', year: 'numeric' })}`, 120, y + 22);
+    
     doc.text(`Status:`, 120, y + 32);
     doc.setTextColor(inv.status === "Paid" ? "#10b981" : inv.status === "Overdue" ? "#ef4444" : "#f59e0b");
     doc.setFont("helvetica", "bold");
     doc.text(inv.status.toUpperCase(), 120, y + 38);
 
+    // 3. TABLE SECTION
     const tableTop = y + 50;
+        // @ts-expect-error - Dynamic import hack for Next.js compatibility
     autoTable(doc, {
       startY: tableTop,
       margin: { left: 14, right: 14 },
@@ -118,40 +127,89 @@ export default function InvoicesPage() {
         ["Service / Project Payment", "1", `${inv.amount.toLocaleString()}`, `${inv.amount.toLocaleString()}`]
       ],
       theme: "plain",
-      headStyles: { fillColor: [241, 245, 249], textColor: [30, 41, 59], fontStyle: 'bold', fontSize: 10 },
-      bodyStyles: { textColor: [50, 50, 50], fontSize: 10, cellPadding: 8 },
-      columnStyles: { 0: { cellWidth: 'auto' }, 1: { cellWidth: 25, halign: 'center' }, 2: { cellWidth: 45, halign: 'right' }, 3: { cellWidth: 45, halign: 'right', fontStyle: 'bold' } },
-      didDrawCell: (data) => { doc.setDrawColor(229, 231, 235); doc.setLineWidth(0.2); doc.rect(data.cell.x, data.cell.y, data.cell.width, data.cell.height); }
+      headStyles: { 
+        fillColor: [241, 245, 249],
+        textColor: [30, 41, 59],
+        fontStyle: 'bold',
+        fontSize: 10
+      },
+      bodyStyles: { 
+        textColor: [50, 50, 50], 
+        fontSize: 10,
+        cellPadding: 8
+      },
+      columnStyles: {
+        0: { cellWidth: 'auto' },
+        1: { cellWidth: 25, halign: 'center' },
+        2: { cellWidth: 45, halign: 'right' },
+        3: { cellWidth: 45, halign: 'right', fontStyle: 'bold' }
+      },
+      didDrawCell: (data: any) => {
+        doc.setDrawColor(229, 231, 235);
+        doc.setLineWidth(0.2);
+        doc.rect(data.cell.x, data.cell.y, data.cell.width, data.cell.height);
+      }
     });
 
+    // 4. TOTALS SECTION
     let finalY = (doc as any).lastAutoTable.finalY + 10;
     const totalsX = 120;
+    
     doc.setDrawColor(229, 231, 235);
     doc.line(totalsX, finalY, pageWidth - 14, finalY);
-    doc.setFontSize(10); doc.setTextColor(100); doc.text("Subtotal:", totalsX, finalY + 8);
-    doc.setTextColor(50); doc.setFont("helvetica", "bold"); doc.text(`${inv.amount.toLocaleString()} PKR`, pageWidth - 14, finalY + 8, { align: "right" });
-    doc.setFont("helvetica", "normal"); doc.setTextColor(100); doc.text("Tax (0%):", totalsX, finalY + 16);
-    doc.setTextColor(50); doc.text("0 PKR", pageWidth - 14, finalY + 16, { align: "right" });
+    
+    doc.setFontSize(10);
+    doc.setTextColor(100);
+    doc.text("Subtotal:", totalsX, finalY + 8);
+    doc.setTextColor(50);
+    doc.setFont("helvetica", "bold");
+    doc.text(`${inv.amount.toLocaleString()} PKR`, pageWidth - 14, finalY + 8, { align: "right" });
+
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(100);
+    doc.text("Tax (0%):", totalsX, finalY + 16);
+    doc.setTextColor(50);
+    doc.text("0 PKR", pageWidth - 14, finalY + 16, { align: "right" });
 
     doc.setFillColor(17, 24, 39);
     doc.rect(totalsX - 5, finalY + 22, pageWidth - totalsX + 5 - 9, 12, 'F');
-    doc.setFontSize(12); doc.setTextColor(255); doc.text("GRAND TOTAL:", totalsX, finalY + 31);
+    
+    doc.setFontSize(12);
+    doc.setTextColor(255);
+    doc.text("GRAND TOTAL:", totalsX, finalY + 31);
     doc.text(`${inv.amount.toLocaleString()} PKR`, pageWidth - 14, finalY + 31, { align: "right" });
 
+    // 5. TERMS & CONDITIONS
     let footerY = finalY + 50;
-    if (footerY > 250) { doc.addPage(); footerY = 20; }
-    doc.setFillColor(249, 250, 251); doc.rect(14, footerY, pageWidth - 28, 35, 'F');
-    doc.setFontSize(10); doc.setTextColor(50); doc.setFont("helvetica", "bold"); doc.text("BANK DETAILS / TERMS & CONDITIONS", 20, footerY + 8);
-    doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(100);
+    
+    if (footerY > 250) {
+      doc.addPage();
+      footerY = 20;
+    }
+
+    doc.setFillColor(249, 250, 251);
+    doc.rect(14, footerY, pageWidth - 28, 35, 'F');
+
+    doc.setFontSize(10);
+    doc.setTextColor(50);
+    doc.setFont("helvetica", "bold");
+    doc.text("BANK DETAILS / TERMS & CONDITIONS", 20, footerY + 8);
+    
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.setTextColor(100);
+    
     const bankText = inv.notes || "Bank: HBL | Account Title: Osystic Tech | IBAN: PK36HABB0012345678901234\nPlease make the payment before the due date to avoid late fees. Thank you for your business!";
     doc.text(bankText, 20, footerY + 16, { maxWidth: pageWidth - 40 });
 
-    doc.setFontSize(8); doc.setTextColor(150);
+    // 6. FINAL FOOTER
+    doc.setFontSize(8);
+    doc.setTextColor(150);
     doc.text("This is a computer-generated invoice. No signature is required.", 14, doc.internal.pageSize.height - 15);
     doc.text("Generated by Osystic Finance Management System", 14, doc.internal.pageSize.height - 10);
+
     doc.save(`${inv.invoice_number}.pdf`);
   }
-
   function getStatusColor(status: string) {
     if (status === "Paid") return "bg-green-500/20 text-green-400";
     if (status === "Pending") return "bg-yellow-500/20 text-yellow-400";

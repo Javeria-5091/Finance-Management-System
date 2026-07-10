@@ -1,24 +1,25 @@
-import type { Metadata } from "next";
-import { AuthProvider } from "@/context/AuthContext";
-import { ThemeProvider } from "next-themes";
-// @ts-ignore
-import "./globals.css";
+import './globals.css'
+import { Inter } from 'next/font/google'
+import { AuthProvider } from '@/context/AuthContext'
+import { ThemeProvider } from '@/context/ThemeContext' 
 
-export const metadata: Metadata = {
-  title: "Osystic Finance",
-  description: "Finance Management System",
-};
+const inter = Inter({ subsets: ['latin'] })
+
+export const metadata = {
+  title: 'Osystic Finance',
+  description: 'Finance Management System',
+}
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className="antialiased bg-gray-100 text-gray-900 dark:bg-gray-900 dark:text-gray-50 transition-colors duration-300">
-        <ThemeProvider attribute="class">
+      <body className="bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-white transition-colors duration-300">
+        <ThemeProvider>
           <AuthProvider>
             {children}
           </AuthProvider>
         </ThemeProvider>
       </body>
     </html>
-  );
+  )
 }

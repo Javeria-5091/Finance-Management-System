@@ -10,6 +10,7 @@ export interface Project {
   status: "Active" | "Completed" | "On Hold";
   start_date: string;
   end_date: string | null;
+  budget_id: string | null;
   created_at: string;
 }
 export type ProjectFormData = Omit<Project, "id" | "user_id" | "created_at">;
@@ -110,3 +111,39 @@ export interface UserProfile {
   can_delete_invoice: boolean;
   created_at: string;
 }
+
+// ==========================================
+// 8. BUDGET TYPES
+// ==========================================
+export interface Budget {
+  id: string;
+  user_id: string;
+  name: string;
+  category: string;
+  total_amount: number;
+  start_date: string;
+  end_date: string;
+  description: string | null;
+  created_at: string;
+}
+export type BudgetFormData = Omit<Budget, "id" | "user_id" | "created_at">;
+export const BUDGET_CATEGORIES = ["Operational", "Project Specific", "Marketing", "Salary", "IT & Infrastructure", "Misc"];
+
+// ==========================================
+// 9. PAYMENT TYPES
+// ==========================================
+export interface Payment {
+  id: string;
+  user_id: string;
+  invoice_id: string | null;
+  project_id: string | null;
+  amount: number;
+  payment_date: string;
+  payment_method: string;
+  status: "Pending" | "Paid" | "Partial Payment" | "Overdue";
+  notes: string | null;
+  created_at: string;
+}
+export type PaymentFormData = Omit<Payment, "id" | "user_id" | "created_at">;
+export const PAYMENT_METHODS = ["Bank Transfer", "JazzCash", "EasyPaisa", "Cheque", "Cash"];
+export const PAYMENT_STATUSES = ["Pending", "Paid", "Partial Payment", "Overdue"];

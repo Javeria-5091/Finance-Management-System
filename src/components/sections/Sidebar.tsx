@@ -14,6 +14,8 @@ import {
   ShieldCheck,
   X,
   LogOut, 
+  CreditCard,
+  Wallet
 } from "lucide-react";
 
 interface SidebarProps {
@@ -51,6 +53,18 @@ const menuItems = [
     href: "/dashboard/projects",
     icon: FolderKanban,
     showFor: ["Admin", "HOD", "Program Manager", "Project Manager", "User"],
+  },
+    {
+    label: "Budgets",
+    href: "/dashboard/budgets",
+    icon: Wallet, // lucide-react se import karna
+    showFor: ["Admin", "HOD", "Program Manager", "Project Manager", "User"], // Sab dekh sakein
+  },
+  {
+    label: "Payments",
+    href: "/dashboard/payments",
+    icon: CreditCard, // lucide-react se import karna
+    showFor: ["Admin", "HOD", "Program Manager", "Project Manager", "User"], // Sab dekh sakein
   },
   {
     label: "Invoices",
