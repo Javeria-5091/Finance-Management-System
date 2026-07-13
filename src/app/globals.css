@@ -7,23 +7,22 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Input autofill fix for both themes */
+/* Input autofill fix */
 input:-webkit-autofill,
 input:-webkit-autofill:hover,
 input:-webkit-autofill:focus {
   -webkit-text-fill-color: white;
-  -webkit-box-shadow: 0 0 0px 1000px #1f2937 inset; /* Will only show in dark mode */
+  -webkit-box-shadow: 0 0 0px 1000px #1f2937 inset;
   transition: background-color 5000s ease-in-out 0s;
 }
 
-/* Light mode autofill override */
 html:not(.dark) input:-webkit-autofill {
   -webkit-text-fill-color: black;
   -webkit-box-shadow: 0 0 0px 1000px white inset;
 }
 
-/* Scrollbar */
+/* ✅ UNIVERSAL SCROLLBAR (Ab theme conflict nahi hoga) */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-.dark ::-webkit-scrollbar-thumb { background: #374151; }
+::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #64748b; }

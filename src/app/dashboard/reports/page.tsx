@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import { Income, Expense, Project } from "@/types";
-import { Download, FileText } from "lucide-react";
+import { Download, FileText, Filter } from "lucide-react"; // ✅ Filter icon add kiya
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -24,7 +24,6 @@ export default function ReportsPage() {
     if (!user?.id) return; 
 
     async function fetchData() {
-      
       const [incRes, expRes, projRes] = await Promise.all([
         supabase.from("incomes").select("*").order("income_date", { ascending: false }),
         supabase.from("expenses").select("*").order("expense_date", { ascending: false }),
@@ -172,21 +171,28 @@ export default function ReportsPage() {
     doc.save(`${reportType}_report.pdf`);
   }
 
-  if (loading) return <div className="flex items-center justify-center h-64 text-gray-400">Loading Data...</div>;
+  if (loading) return <div className="flex items-center justify-center h-64 text-gray-500 dark:text-gray-400">Loading Data...</div>;
 
   return (
     <div>
+      {/* HEADER */}
       <div className="mb-6">
-        <h2 className="text-2xl font-bold text-white">Financial Reports</h2>
-        <p className="text-gray-400 text-sm">Generate and export detailed reports</p>
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Financial Reports</h2>
+        <p className="text-gray-500 dark:text-gray-400 text-sm">Generate and export detailed reports</p>
       </div>
 
-      {/* FILTERS */}
-      <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 mb-6 space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* FILTERS SECTION */}
+      <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5 mb-6 shadow-sm dark:shadow-none space-y-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+          
+          {/* Report Type */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-1">Report Type</label>
-            <select value={reportType} onChange={e => setReportType(e.target.value)} className="w-full px-3 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Report Type</label>
+            <select 
+              value={reportType} 
+              onChange={e => setReportType(e.target.value)} 
+              className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+            >
               <option value="monthly">Monthly Report</option>
               <option value="yearly">Yearly Report</option>
               <option value="project-wise">Project-wise Report</option>
@@ -196,10 +202,15 @@ export default function ReportsPage() {
             </select>
           </div>
 
+          {/* Month */}
           {(reportType === "monthly" || reportType === "yearly") && (
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Month</label>
-              <select value={selectedMonth} onChange={e => setSelectedMonth(Number(e.target.value))} className="w-full px-3 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Month</label>
+              <select 
+                value={selectedMonth} 
+                onChange={e => setSelectedMonth(Number(e.target.value))} 
+                className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+              >
                 {Array.from({length: 12}, (_, i) => i + 1).map(m => (
                   <option key={m} value={m}>{new Date(2000, m-1).toLocaleString('default', {month: 'long'})}</option>
                 ))}
@@ -207,19 +218,29 @@ export default function ReportsPage() {
             </div>
           )}
 
+          {/* Year */}
           {(reportType === "monthly" || reportType === "yearly") && (
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1">Year</label>
-              <select value={selectedYear} onChange={e => setSelectedYear(Number(e.target.value))} className="w-full px-3 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Year</label>
+              <select 
+                value={selectedYear} 
+                onChange={e => setSelectedYear(Number(e.target.value))} 
+                className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+              >
                 {years.map(y => <option key={y} value={y}>{y}</option>)}
               </select>
             </div>
           )}
 
+          {/* Project Selection */}
           {reportType === "project-wise" && (
             <div className="sm:col-span-2">
-              <label className="block text-sm font-medium text-gray-300 mb-1">Select Project</label>
-              <select value={selectedProject} onChange={e => setSelectedProject(e.target.value)} className="w-full px-3 py-2.5 bg-gray-900 border border-gray-700 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">Select Project</label>
+              <select 
+                value={selectedProject} 
+                onChange={e => setSelectedProject(e.target.value)} 
+                className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+              >
                 <option value="all">All Projects</option>
                 {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
@@ -231,70 +252,86 @@ export default function ReportsPage() {
       {/* SUMMARY CARDS */}
       {(reportType === "profit-loss" || reportType === "monthly" || reportType === "yearly" || reportType === "project-wise") && (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-4">
-            <p className="text-sm text-gray-400">Total Income</p>
-            <p className="text-xl font-bold text-green-400 mt-1">{formatCurrency(totalInc)}</p>
+          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4 shadow-sm dark:shadow-none">
+            <p className="text-sm text-gray-500 dark:text-gray-400">Total Income</p>
+            <p className="text-xl font-bold text-green-600 dark:text-green-400 mt-1">{formatCurrency(totalInc)}</p>
           </div>
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-4">
-            <p className="text-sm text-gray-400">Total Expenses</p>
-            <p className="text-xl font-bold text-red-400 mt-1">{formatCurrency(totalExp)}</p>
+          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4 shadow-sm dark:shadow-none">
+            <p className="text-sm text-gray-500 dark:text-gray-400">Total Expenses</p>
+            <p className="text-xl font-bold text-red-600 dark:text-red-400 mt-1">{formatCurrency(totalExp)}</p>
           </div>
-          <div className="bg-gray-800 border border-gray-700 rounded-xl p-4">
-            <p className="text-sm text-gray-400">Net Profit/Loss</p>
-            <p className={`text-xl font-bold mt-1 ${profit >= 0 ? "text-blue-400" : "text-red-400"}`}>{formatCurrency(profit)}</p>
+          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4 shadow-sm dark:shadow-none">
+            <p className="text-sm text-gray-500 dark:text-gray-400">Net Profit/Loss</p>
+            <p className={`text-xl font-bold mt-1 ${profit >= 0 ? "text-blue-600 dark:text-blue-400" : "text-red-600 dark:text-red-400"}`}>{formatCurrency(profit)}</p>
           </div>
         </div>
       )}
 
       {/* TABLE PREVIEW & EXPORT BUTTONS */}
-      <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
-        <div className="p-4 border-b border-gray-700 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-          <h3 className="text-white font-medium">Preview: {getTitle()}</h3>
+      <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden shadow-sm dark:shadow-none">
+        
+        {/* Top Bar */}
+        <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+          <h3 className="text-gray-900 dark:text-white font-medium">Preview: {getTitle()}</h3>
           <div className="flex gap-2 w-full sm:w-auto">
-            <button onClick={downloadCSV} className="flex-1 sm:flex-initial flex items-center justify-center gap-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+            <button onClick={downloadCSV} className="flex-1 sm:flex-initial flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition-colors shadow-sm">
               <Download size={16} /> Excel (CSV)
             </button>
-            <button onClick={downloadPDF} className="flex-1 sm:flex-initial flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors">
+            <button onClick={downloadPDF} className="flex-1 sm:flex-initial flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium transition-colors shadow-sm">
               <FileText size={16} /> Download PDF
             </button>
           </div>
         </div>
         
+        {/* Table */}
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
-            <thead className="bg-gray-900/50 text-gray-400 uppercase text-xs">
+            {/* Table Head */}
+            <thead className="bg-gray-100 dark:bg-gray-900/70 border-b border-gray-200 dark:border-gray-700 text-xs text-gray-600 dark:text-gray-400 uppercase tracking-wider">
               <tr>
-                <th className="px-4 py-3">Type</th>
-                <th className="px-4 py-3">Title</th>
-                <th className="px-4 py-3 hidden md:table-cell">Project</th>
-                <th className="px-4 py-3">Category</th>
-                <th className="px-4 py-3 text-right">Amount</th>
-                <th className="px-4 py-3 text-right hidden sm:table-cell">Date</th>
+                <th className="px-4 py-3 text-left font-semibold">Type</th>
+                <th className="px-4 py-3 text-left font-semibold">Title</th>
+                <th className="px-4 py-3 text-left font-semibold hidden md:table-cell">Project</th>
+                <th className="px-4 py-3 text-left font-semibold">Category</th>
+                <th className="px-4 py-3 text-right font-semibold">Amount</th>
+                <th className="px-4 py-3 text-right font-semibold hidden sm:table-cell">Date</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-700">
+            
+            {/* Table Body */}
+            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
               {(reportType !== "expense") && fIncome.map(i => (
-                <tr key={i.id}>
-                  <td className="px-4 py-2"><span className="bg-green-500/20 text-green-400 text-xs px-2 py-0.5 rounded">Income</span></td>
-                  <td className="px-4 py-2 text-white">{i.title}</td>
-                  <td className="px-4 py-2 text-gray-400 hidden md:table-cell">{getProjectName(i.project_id)}</td>
-                  <td className="px-4 py-2 text-gray-400">{i.category}</td>
-                  <td className="px-4 py-2 text-right text-green-400 font-medium">+{formatCurrency(i.amount)}</td>
-                  <td className="px-4 py-2 text-right text-gray-500 hidden sm:table-cell">{i.income_date}</td>
+                <tr key={i.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                  <td className="px-4 py-2.5">
+                    <span className="bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400 text-xs px-2 py-0.5 rounded font-medium">Income</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-gray-900 dark:text-white font-medium">{i.title}</td>
+                  <td className="px-4 py-2.5 text-gray-500 dark:text-gray-400 hidden md:table-cell">{getProjectName(i.project_id)}</td>
+                  <td className="px-4 py-2.5 text-gray-500 dark:text-gray-400">{i.category}</td>
+                  <td className="px-4 py-2.5 text-right text-emerald-600 dark:text-emerald-400 font-semibold">+{formatCurrency(i.amount)}</td>
+                  <td className="px-4 py-2.5 text-right text-gray-500 dark:text-gray-400 hidden sm:table-cell">{i.income_date}</td>
                 </tr>
               ))}
+              
               {(reportType !== "income") && fExpense.map(e => (
-                <tr key={e.id}>
-                  <td className="px-4 py-2"><span className="bg-red-500/20 text-red-400 text-xs px-2 py-0.5 rounded">Expense</span></td>
-                  <td className="px-4 py-2 text-white">{e.title}</td>
-                  <td className="px-4 py-2 text-gray-400 hidden md:table-cell">{getProjectName(e.project_id)}</td>
-                  <td className="px-4 py-2 text-gray-400">{e.category}</td>
-                  <td className="px-4 py-2 text-right text-red-400 font-medium">-{formatCurrency(e.amount)}</td>
-                  <td className="px-4 py-2 text-right text-gray-500 hidden sm:table-cell">{e.expense_date}</td>
+                <tr key={e.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                  <td className="px-4 py-2.5">
+                    <span className="bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400 text-xs px-2 py-0.5 rounded font-medium">Expense</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-gray-900 dark:text-white font-medium">{e.title}</td>
+                  <td className="px-4 py-2.5 text-gray-500 dark:text-gray-400 hidden md:table-cell">{getProjectName(e.project_id)}</td>
+                  <td className="px-4 py-2.5 text-gray-500 dark:text-gray-400">{e.category}</td>
+                  <td className="px-4 py-2.5 text-right text-red-600 dark:text-red-400 font-semibold">-{formatCurrency(e.amount)}</td>
+                  <td className="px-4 py-2.5 text-right text-gray-500 dark:text-gray-400 hidden sm:table-cell">{e.expense_date}</td>
                 </tr>
               ))}
+
               {fIncome.length === 0 && fExpense.length === 0 && (
-                <tr><td colSpan={6} className="px-4 py-12 text-center text-gray-500">No data found for this selection.</td></tr>
+                <tr>
+                  <td colSpan={6} className="px-4 py-12 text-center text-gray-400 dark:text-gray-500">
+                    No data found for this selection.
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>

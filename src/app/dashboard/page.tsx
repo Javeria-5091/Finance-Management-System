@@ -17,7 +17,7 @@ import { LucideIcon } from "lucide-react";
 
 export default function DashboardPage() {
   const { user } = useAuth(); 
-  const { isDark } = useTheme(); // ✅ THEME HOOK
+  const { isDark } = useTheme(); //  THEME HOOK
   const [projects, setProjects] = useState<Project[]>([]);
   const [incomes, setIncomes] = useState<Income[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -81,7 +81,7 @@ export default function DashboardPage() {
 
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-500">Loading Analytics...</div>;
 
-  // ✅ DYNAMIC CHART COLORS (LIGHT/DARK AUTO DETECT)
+  // DYNAMIC CHART COLORS (LIGHT/DARK AUTO DETECT)
   const textColor = isDark ? '#94a3b8' : '#64748b';
   const gridColor = isDark ? '#1e293b' : '#f1f5f9';
   const tooltipBg = isDark ? '#0f172a' : '#ffffff';
@@ -126,10 +126,10 @@ export default function DashboardPage() {
   const projectCompChart = { labels: projectBudgetData.map(d => d.name), datasets: [{ label: 'Budget', data: projectBudgetData.map(d => d.Budget), backgroundColor: '#8b5cf6', borderRadius: 6, barPercentage: 0.6 }, { label: 'Spent', data: projectBudgetData.map(d => d.Spent), backgroundColor: '#f472b6', borderRadius: 6, barPercentage: 0.6 }] };
 
   return (
-    // ✅ DYNAMIC MAIN WRAPPER
-    <div className={`space-y-6 pb-8 overflow-x-hidden transition-colors duration-300 ${isDark ? 'dark' : 'bg-gray-50'}`}>
+    //  DYNAMIC MAIN WRAPPER
+    <div className={`space-y-6 pb-8 overflow-x-hidden transition-colors duration-300 ${isDark ? 'bg-gray-950' : 'bg-gray-50'}`}>
       
-      {/* ✅ DYNAMIC HEADER */}
+      {/*  DYNAMIC HEADER */}
       <div className={`relative h-48 rounded-3xl overflow-hidden shadow-2xl flex items-center p-8 border transition-colors duration-300 ${isDark ? 'bg-gradient-to-br from-gray-900 via-slate-900 to-gray-900 border-gray-800' : 'bg-gradient-to-br from-blue-600 via-blue-500 to-indigo-600 border-blue-400'}`}>
         <div className={`absolute inset-0 bg-[radial-gradient(circle_at_80%_50%,rgba(255,255,255,0.15),transparent_50%)]`}></div>
         <div className="relative z-10">
@@ -142,7 +142,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ✅ DYNAMIC CARDS GRID */}
+      {/*  DYNAMIC CARDS GRID */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-4">
         <StatCard title="Total Income" value={formatCurrency(totalIncome)} color="text-emerald-600" bg="bg-emerald-100 dark:bg-emerald-500/10" icon={TrendingUp} isDark={isDark} />
         <StatCard title="Expenses" value={formatCurrency(totalExpenses)} color="text-red-600" bg="bg-red-100 dark:bg-rose-500/10" icon={TrendingDown} isDark={isDark} />
@@ -158,7 +158,7 @@ export default function DashboardPage() {
         <StatCard title="Over Budget" value={overBudgetCount.toString()} color="text-rose-600" bg="bg-rose-100 dark:bg-rose-500/10" icon={AlertTriangle} isDark={isDark} />
       </div>
 
-      {/* ✅ DYNAMIC CHARTS GRID */}
+      {/*  DYNAMIC CHARTS GRID */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         
         {/* CHART CONTAINER CLASS (Dynamic Border & BG) */}
@@ -226,7 +226,7 @@ export default function DashboardPage() {
   );
 }
 
-// ✅ DYNAMIC STAT CARD
+//  DYNAMIC STAT CARD
 function StatCard({ title, value, color, bg, icon: Icon, isDark }: { title: string; value: string; color: string; bg: string; icon: LucideIcon, isDark: boolean }) {
   return (
     <div className={`rounded-xl p-4 group transition-all border ${isDark ? 'bg-gray-900/60 border-gray-800 hover:border-gray-700' : 'bg-white border-gray-200 hover:border-gray-300 shadow-sm hover:shadow-md'}`}>

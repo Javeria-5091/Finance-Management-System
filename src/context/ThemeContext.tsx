@@ -7,33 +7,29 @@ interface ThemeContextType {
 }
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
-
-export const useTheme = () => {
-  const context = useContext(ThemeContext);
-  if (!context) throw new Error("useTheme must be used within a ThemeProvider");
-  return context;
-};
+export const useTheme = () => useContext(ThemeContext)!;
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [isDark, setIsDark] = useState(true); // Default Dark
+  const [isDark, setIsDark] = useState(true); // Default dark
 
   useEffect(() => {
-    // Check local storage for saved theme
-    const savedTheme = localStorage.getItem("theme");
-    if (savedTheme) {
-      setIsDark(savedTheme === "dark");
+    // Sirf localStorage check karo, OS setting ko bhool mat karo
+    const savedTheme = localStorage.getItem("osystic_theme");
+    if (savedTheme === "light") {
+      setIsDark(false);
+    } else {
+      setIsDark(true);
     }
   }, []);
 
   useEffect(() => {
-    // Apply class to html tag and save to local storage
     const root = document.documentElement;
     if (isDark) {
       root.classList.add("dark");
-      localStorage.setItem("theme", "dark");
+      localStorage.setItem("osystic_theme", "dark");
     } else {
       root.classList.remove("dark");
-      localStorage.setItem("theme", "light");
+      localStorage.setItem("osystic_theme", "light");
     }
   }, [isDark]);
 
