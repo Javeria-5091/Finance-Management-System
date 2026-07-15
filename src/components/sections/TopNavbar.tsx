@@ -1,11 +1,13 @@
 "use client"; 
 import { useState, useEffect } from "react"; 
-import { Menu, Bell, Search, Sun, Moon } from "lucide-react"; 
+// Search hata diya, MessageSquare hata ke Sparkles laga diya
+import { Menu, Bell, Sun, Moon, Sparkles } from "lucide-react"; 
 import { useAuth } from "@/context/AuthContext"; 
 import { useTheme } from "@/context/ThemeContext"; 
 import { supabase } from "@/lib/supabase"; 
 import type { Notification } from "@/types"; 
 import { useRouter } from "next/navigation";
+import AiChatSlideOver from "../ai/AiChatSlideOver"; 
 
 interface TopNavbarProps { 
   onMenuClick: () => void; 
@@ -18,8 +20,8 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
   const { user } = useAuth(); 
   const router = useRouter(); 
   const { isDark, toggleTheme } = useTheme(); 
+  const [isChatOpen, setIsChatOpen] = useState(false);
   
-  const initials = user && user.email ? user.email[0].toUpperCase() : "U"; 
   const [notifications, setNotifications] = useState<Notification[]>([]); 
   const [showDropdown, setShowDropdown] = useState(false); 
   const [unreadCount, setUnreadCount] = useState(0); 
@@ -29,7 +31,7 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
     const userId = user.id;
     async function fetchNotifications() {
       try {
-        const { data, error } = await supabase
+        const { data } = await supabase
           .from("notifications")
           .select("*")
           .eq("user_id", userId)
@@ -70,124 +72,83 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
   } 
 
   return ( 
-    <header className={`sticky top-0 z-30 h-16 flex items-center justify-between px-4 lg:px-6 border-b transition-colors duration-300 ${
-      isDark 
-        ? "bg-gray-900/80 backdrop-blur-md border-gray-800" 
-        : "bg-white/80 backdrop-blur-md border-gray-200"
-    }`}> 
-      
-      {/* Left Side */} 
-      <div className="flex items-center gap-3"> 
-        <button 
-          onClick={onMenuClick} 
-          className={`lg:hidden p-2 rounded-lg transition-colors ${
-            isDark ? "hover:bg-gray-800 text-gray-400 hover:text-white" : "hover:bg-gray-100 text-gray-600 hover:text-gray-900"
-          }`}
-        > 
-          <Menu size={22} /> 
-        </button> 
-        <h1 className={`text-lg font-semibold ${isDark ? "text-white" : "text-gray-900"}`}>{title}</h1> 
-      </div> 
-
-      {/* Right Side */} 
-      <div className="flex items-center gap-2"> 
+    <> 
+      <header className={`sticky top-0 z-30 h-16 flex items-center justify-between px-4 lg:px-6 border-b transition-colors duration-300 ${
+        isDark ? "bg-gray-900/80 backdrop-blur-md border-gray-800" : "bg-white/80 backdrop-blur-md border-gray-200"
+      }`}> 
         
-        {/* Search (Desktop) */} 
-        <button className={`hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm transition-colors ${
-          isDark 
-            ? "bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600" 
-            : "bg-gray-50 border-gray-200 text-gray-500 hover:border-gray-300"
-        }`}> 
-          <Search className="w-4 h-4" /> 
-          <span>Search...</span> 
-          <kbd className={`ml-4 text-[10px] font-mono px-1.5 py-0.5 rounded ${
-            isDark ? "bg-gray-900 text-gray-500" : "bg-white text-gray-400 border border-gray-200"
-          }`}>Ctrl+K</kbd> 
-        </button> 
-
-        {/* THEME TOGGLE BUTTON */}
-        <button
-          onClick={toggleTheme}
-          className={`relative w-14 h-7 rounded-full p-1 transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-offset-2 ${
-            isDark 
-              ? "bg-gray-600 focus:ring-blue-500" 
-              : "bg-gray-300 focus:ring-indigo-500"
-          }`}
-        >
-          <div 
-            className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform duration-300 flex items-center justify-center ${
-              isDark ? "translate-x-7" : "translate-x-0"
-            }`}
-          >
-            {isDark ? <Moon size={12} className="text-indigo-600" /> : <Sun size={12} className="text-amber-500" />}
-          </div>
-        </button>
-
-        {/* Notifications Bell */} 
-        <div className="relative"> 
-          <button 
-            onClick={() => setShowDropdown(!showDropdown)} 
-            className={`relative p-2 rounded-lg transition-colors ${
-              isDark ? "hover:bg-gray-800 text-gray-400 hover:text-white" : "hover:bg-gray-100 text-gray-600 hover:text-gray-900"
-            }`}
-          > 
-            <Bell size={20} /> 
-            {unreadCount > 0 && ( 
-              <span className="absolute -top-0.5 -right-0.5 w-5 h-5 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center"> 
-                {unreadCount > 9 ? "9+" : unreadCount} 
-              </span> 
-            )} 
+        <div className="flex items-center gap-3"> 
+          <button onClick={onMenuClick} className={`lg:hidden p-2 rounded-lg transition-colors ${isDark ? "hover:bg-gray-800 text-gray-400 hover:text-white" : "hover:bg-gray-100 text-gray-600 hover:text-gray-900"}`}> 
+            <Menu size={22} /> 
           </button> 
-
-          {showDropdown && ( 
-            <> 
-              <div className="fixed inset-0 z-40" onClick={() => setShowDropdown(false)} /> 
-              <div className={`absolute right-0 mt-2 w-80 border rounded-xl shadow-2xl z-50 overflow-hidden animate-[slideUp_0.2s_ease-out] ${
-                isDark ? "bg-gray-800 border-gray-700" : "bg-white border-gray-200"
-              }`}> 
-                <div className={`flex items-center justify-between px-4 py-3 border-b ${isDark ? "border-gray-700" : "border-gray-200"}`}> 
-                  <h3 className={`text-sm font-semibold ${isDark ? "text-white" : "text-gray-800"}`}>Notifications</h3> 
-                  {unreadCount > 0 && ( 
-                    <button onClick={markAllAsRead} className="text-xs text-blue-500 hover:text-blue-400 font-medium"> 
-                      Mark all as read 
-                    </button> 
-                  )} 
-                </div> 
-
-                <div className="max-h-80 overflow-y-auto"> 
-                  {notifications.length === 0 ? ( 
-                    <div className={`px-4 py-8 text-center text-sm ${isDark ? "text-gray-500" : "text-gray-400"}`}>No notifications yet</div> 
-                  ) : ( 
-                    notifications.map(n => ( 
-                      <div 
-                        key={n.id} 
-                        onClick={() => {
-                          if (!n.is_read) markAsRead(n.id);
-                          const titleLower = n.title.toLowerCase();
-                          if (titleLower.includes("project")) router.push("/dashboard/projects");
-                          else if (titleLower.includes("income")) router.push("/dashboard/income");
-                          else if (titleLower.includes("expense")) router.push("/dashboard/expenses");
-                          else if (titleLower.includes("invoice")) router.push("/dashboard/invoices");
-                          setShowDropdown(false);
-                        }}
-                        className={`flex items-start gap-3 px-4 py-3 border-b transition-colors cursor-pointer ${
-                          isDark ? "border-gray-700/50 hover:bg-gray-700/50" : "border-gray-100 hover:bg-gray-50"
-                        } ${!n.is_read ? (isDark ? "bg-blue-500/5" : "bg-blue-50") : ""}`} 
-                      > 
-                        <div className={`mt-1 w-2 h-2 rounded-full shrink-0 ${n.is_read ? "bg-transparent" : "bg-blue-500"}`} /> 
-                        <div className="flex-1 min-w-0"> 
-                          <p className={`text-sm ${n.is_read ? (isDark ? "text-gray-400" : "text-gray-500") : (isDark ? "text-white font-medium" : "text-gray-900 font-medium")}`}>{n.title}</p>
-                          <span className={`text-[10px] ${isDark ? "text-gray-500" : "text-gray-400"}`}>{timeAgo(n.created_at)}</span>
-                        </div> 
-                      </div>
-                    ))
-                  )} 
-                </div> 
-              </div> 
-            </> 
-          )} 
+          <h1 className={`text-lg font-semibold ${isDark ? "text-white" : "text-gray-900"}`}>{title}</h1> 
         </div> 
-      </div> 
-    </header> 
+
+        <div className="flex items-center gap-2"> 
+          
+          {/* THEME TOGGLE */}
+          <button onClick={toggleTheme} className={`relative w-14 h-7 rounded-full p-1 transition-colors duration-300 focus:outline-none ${isDark ? "bg-gray-600" : "bg-gray-300"}`}>
+            <div className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform duration-300 flex items-center justify-center ${isDark ? "translate-x-7" : "translate-x-0"}`}>
+              {isDark ? <Moon size={12} className="text-indigo-600" /> : <Sun size={12} className="text-amber-500" />}
+            </div>
+          </button>
+
+          {/* PREMIUM AI BUTTON */}
+          <button 
+            onClick={() => setIsChatOpen(true)} 
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
+              isDark 
+                ? "bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30 border border-indigo-500/30" 
+                : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100 border border-indigo-200"
+            }`}
+            title="Ask AI Assistant"
+          > 
+            <Sparkles size={16} className="text-indigo-500" /> 
+            <span className="hidden sm:inline">AI</span>
+          </button>
+
+          {/* NOTIFICATIONS BELL */} 
+          <div className="relative"> 
+            <button onClick={() => setShowDropdown(!showDropdown)} className={`relative p-2 rounded-lg transition-colors ${isDark ? "hover:bg-gray-800 text-gray-400 hover:text-white" : "hover:bg-gray-100 text-gray-600 hover:text-gray-900"}`}> 
+              <Bell size={20} /> 
+              {unreadCount > 0 && ( 
+                <span className="absolute -top-0.5 -right-0.5 w-5 h-5 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center"> 
+                  {unreadCount > 9 ? "9+" : unreadCount} 
+                </span> 
+              )} 
+            </button> 
+
+            {showDropdown && ( 
+              <> 
+                <div className="fixed inset-0 z-40" onClick={() => setShowDropdown(false)} /> 
+                <div className={`absolute right-0 mt-2 w-80 border rounded-xl shadow-2xl z-50 overflow-hidden ${isDark ? "bg-gray-800 border-gray-700" : "bg-white border-gray-200"}`}> 
+                  <div className={`flex items-center justify-between px-4 py-3 border-b ${isDark ? "border-gray-700" : "border-gray-200"}`}> 
+                    <h3 className={`text-sm font-semibold ${isDark ? "text-white" : "text-gray-800"}`}>Notifications</h3> 
+                    {unreadCount > 0 && ( <button onClick={markAllAsRead} className="text-xs text-blue-500 hover:text-blue-400 font-medium">Mark all as read</button> )} 
+                  </div> 
+                  <div className="max-h-80 overflow-y-auto"> 
+                    {notifications.length === 0 ? ( 
+                      <div className={`px-4 py-8 text-center text-sm ${isDark ? "text-gray-500" : "text-gray-400"}`}>No notifications yet</div> 
+                    ) : ( 
+                      notifications.map(n => ( 
+                        <div key={n.id} onClick={() => { if (!n.is_read) markAsRead(n.id); const titleLower = n.title.toLowerCase(); if (titleLower.includes("project")) router.push("/dashboard/projects"); else if (titleLower.includes("income")) router.push("/dashboard/income"); else if (titleLower.includes("expense")) router.push("/dashboard/expenses"); else if (titleLower.includes("invoice")) router.push("/dashboard/invoices"); setShowDropdown(false); }} className={`flex items-start gap-3 px-4 py-3 border-b transition-colors cursor-pointer ${isDark ? "border-gray-700/50 hover:bg-gray-700/50" : "border-gray-100 hover:bg-gray-50"} ${!n.is_read ? (isDark ? "bg-blue-500/5" : "bg-blue-50") : ""}`}> 
+                          <div className={`mt-1 w-2 h-2 rounded-full shrink-0 ${n.is_read ? "bg-transparent" : "bg-blue-500"}`} /> 
+                          <div className="flex-1 min-w-0"> 
+                            <p className={`text-sm ${n.is_read ? (isDark ? "text-gray-400" : "text-gray-500") : (isDark ? "text-white font-medium" : "text-gray-900 font-medium")}`}>{n.title}</p>
+                            <span className={`text-[10px] ${isDark ? "text-gray-500" : "text-gray-400"}`}>{timeAgo(n.created_at)}</span>
+                          </div> 
+                        </div> 
+                      ))
+                    )} 
+                  </div> 
+                </div> 
+              </> 
+            )} 
+          </div>
+        </div> 
+      </header> 
+
+      <AiChatSlideOver isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} />
+    </> 
   ); 
 }
