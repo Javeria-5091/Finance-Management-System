@@ -100,7 +100,8 @@ export default function ExpenseForm({ initialData, onSubmit, onClose, loading, p
               <input
                 required
                 type="number"
-                step="0.01"
+                min="0"
+                step="1"
                 value={form.amount}
                 onChange={e => setForm({ ...form, amount: Number(e.target.value) })}
                 className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
