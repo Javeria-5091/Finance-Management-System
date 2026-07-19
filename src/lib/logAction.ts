@@ -1,14 +1,27 @@
 import { supabase } from "./supabase";
 
-export async function logAction(userId: string, action: string, module: string, details?: string) {
+/**
+ * LOG ACTION - UPDATED FOR ENTERPRISE ARCHITECTURE
+ * 
+ * MATHEEM: Audit log ab DATABASE TRIGGERS se automatic hota hai 
+ * (audit.trigger_audit_log). Yeh function SIRF Notifications generate karta hai.
+ * 
+ * Phase 1 Tables (auto-audited via triggers):
+ * - core.organization_config
+ * - finance.chart_of_accounts
+ * - finance.fiscal_years
+ * - finance.accounting_periods
+ * 
+ * Phase 2 mein jab public.incomes/expenses update hongi, 
+ * unpe bhi trigger lagayenge, phir woh bhi auto-audit honge.
+ */
+
+export async function logAction(action: string, module: string, details?: string) {
   try {
-    
-    await supabase.from("audit_logs").insert({
-      user_id: userId,
-      action,
-      module,
-      details: details || null,
-    });
+    // -------------------------------------------------
+    // AUDIT LOG: No longer needed manually! 
+    // Database trigger handles it automatically.
+    // -------------------------------------------------
 
     let notify = false;
     let notifTitle = "";
@@ -24,14 +37,22 @@ export async function logAction(userId: string, action: string, module: string, 
       notifMessage = details || `An item was deleted from ${module}.`;
     }
 
+    // -------------------------------------------------
+    // NOTIFICATIONS: Still manual (until we add triggers)
+    // -------------------------------------------------
     if (notify) {
-      await supabase.from("notifications").insert({
-        user_id: userId,
-        title: notifTitle,
-        message: notifMessage,
-      });
+      // Fallback to auth.uid() if no userId passed
+      const { data: { user } } = await supabase.auth.getUser();
+      
+      if (user) {
+        await supabase.from("notifications").insert({
+          user_id: user.id,
+          title: notifTitle,
+          message: notifMessage,
+        });
+      }
     }
   } catch (error) {
-    console.error("Failed to log action:", error);
+    console.error("Failed to process action notification:", error);
   }
 }
