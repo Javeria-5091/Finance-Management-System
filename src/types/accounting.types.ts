@@ -249,3 +249,74 @@ export interface ReopenPeriodInput {
   period_id: string;
   reason: string;
 }
+
+export type JournalStatus = 'DRAFT' | 'SUBMITTED' | 'VERIFIED' | 'APPROVED' | 'POSTED' | 'REVERSED' | 'REJECTED' | 'CANCELLED';
+
+export interface JournalEntry {
+  id: string;
+  reference: string;
+  description: string;
+  status: JournalStatus;
+  transaction_date: string;
+  posting_date: string | null;
+  period_id: string;
+  fiscal_year_id: string;
+  currency: string;
+  exchange_rate: number;
+  total_debit: number;
+  total_credit: number;
+  source_type: string | null;
+  source_id: string | null;
+  project_id: string | null;
+  notes: string | null;
+  rejection_reason: string | null;
+  reversal_of_id: string | null;
+  // Stamps
+  created_by: string;
+  created_at: string;
+  submitted_by: string | null;
+  submitted_at: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  posted_by: string | null;
+  posted_at: string | null;
+}
+
+export interface JournalLine {
+  id: string;
+  journal_entry_id: string;
+  line_number: number;
+  account_id: string;
+  description: string | null;
+  debit_amount: number;
+  credit_amount: number;
+  base_debit: number | null;
+  base_credit: number | null;
+  // Joined data
+  account_code?: string;
+  account_name?: string;
+}
+
+export interface GeneralLedgerRow {
+  journal_entry_id: string;
+  journal_reference: string;
+  journal_description: string;
+  transaction_date: string;
+  account_id: string;
+  account_code: string;
+  account_name: string;
+  debit_amount: number;
+  credit_amount: number;
+  running_balance: number;
+}
+
+export interface TrialBalanceRow {
+  account_id: string;
+  code: string;
+  name: string;
+  account_type: string;
+  normal_balance: string;
+  total_debit: number;
+  total_credit: number;
+  net_balance: number;
+}

@@ -20,7 +20,6 @@
     "@supabase/supabase-js": "^2.110.5",
     "ai": "^7.0.26",
     "chart.js": "^4.5.1",
-    "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
     "lucide-react": "^1.22.0",
     "next": "^16.2.10",

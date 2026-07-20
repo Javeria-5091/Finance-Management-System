@@ -23,6 +23,9 @@ import {
   Building2,
   ChevronDown,
   ChevronRight,
+  ArrowUpDown, // ✅ ADDED: For Exchange Rates
+  Table2,      // ✅ ADDED: For Trial Balance
+  List,        // ✅ ADDED: For General Ledger
 } from "lucide-react";
 
 interface SidebarProps {
@@ -55,7 +58,6 @@ const navGroups = [
     id: "accounting",
     label: "Accounting",
     items: [
-      // ✅ FIX: /accounting/ add kiya
       { label: "Chart of Accounts", href: "/dashboard/accounting/chart-of-accounts", icon: BookOpen, showFor: ["Admin", "HOD", "Program Manager", "Project Manager", "User"] },
       { label: "Journal Entries", href: "/dashboard/accounting/journal-entries", icon: ScrollText, showFor: ["Admin", "HOD", "Program Manager", "Project Manager", "User"] },
       { label: "Fiscal Calendar", href: "/dashboard/accounting/fiscal-calendar", icon: CalendarDays, showFor: ["Admin", "HOD", "Program Manager", "Project Manager", "User"] },
@@ -65,7 +67,10 @@ const navGroups = [
     id: "reports",
     label: "Reports",
     items: [
-      { label: "Reports", href: "/dashboard/reports", icon: BarChart3, showFor: ["Admin", "HOD", "Program Manager", "Project Manager", "User"] },
+      { label: "All Reports", href: "/dashboard/reports", icon: BarChart3, showFor: ["Admin", "HOD", "Program Manager", "Project Manager", "User"] },
+      // ✅ PHASE 2 ADDITIONS: Double-Entry Reports
+      { label: "Trial Balance", href: "/dashboard/reports/trial-balance", icon: Table2, showFor: ["Admin", "HOD", "Program Manager"] },
+      { label: "General Ledger", href: "/dashboard/reports/general-ledger", icon: List, showFor: ["Admin", "HOD", "Program Manager"] },
     ],
   },
   {
@@ -73,7 +78,6 @@ const navGroups = [
     label: "Admin",
     items: [
       { label: "Admin Panel", href: "/dashboard/admin", icon: Users, showFor: ["Admin", "User"] },
-      // ✅ FIX: /admin/ add kiya
       { label: "Audit Log", href: "/dashboard/admin/audit-log", icon: ShieldCheck, showFor: ["Admin", "User"] },
     ],
   },
@@ -81,8 +85,9 @@ const navGroups = [
     id: "settings",
     label: "Settings",
     items: [
-      // ✅ FIX: /settings/organization kiya
       { label: "Organization", href: "/dashboard/settings/organization", icon: Building2, showFor: ["Admin", "HOD"] },
+      // ✅ PHASE 2 ADDITION: Multi-currency Exchange Rates
+      { label: "Exchange Rates", href: "/dashboard/settings/exchange-rates", icon: ArrowUpDown, showFor: ["Admin", "HOD"] },
     ],
   },
 ];
