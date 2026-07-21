@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { List, Search } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
+import { useAccounts } from '@/hooks/useAccounts'; 
 import type { PostableAccount } from '@/types/accounting.types';
 
 interface GLEntry {
@@ -18,25 +19,12 @@ interface GLEntry {
 }
 
 export default function GeneralLedgerPage() {
-  const [accounts, setAccounts] = useState<PostableAccount[]>([]);
+  
+  const { accounts, loading: loadingAccounts } = useAccounts();
+  
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [ledgerData, setLedgerData] = useState<GLEntry[]>([]);
   const [loading, setLoading] = useState(false);
-  const [loadingAccounts, setLoadingAccounts] = useState(true);
-
-  // Fetch accounts for dropdown
-  useEffect(() => {
-    const fetchAccounts = async () => {
-      const { data, error } = await supabase
-        .from('postable_accounts')
-        .select('*')
-        .order('code');
-
-      if (!error && data) setAccounts(data);
-      setLoadingAccounts(false);
-    };
-    fetchAccounts();
-  }, []);
 
   // Fetch Ledger data when account is selected
   useEffect(() => {
@@ -76,7 +64,6 @@ export default function GeneralLedgerPage() {
 
   return (
     <div className="p-6">
-      {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <List className="w-6 h-6 text-gray-500 dark:text-gray-400" />
@@ -87,7 +74,6 @@ export default function GeneralLedgerPage() {
         </div>
       </div>
 
-      {/* Account Selector */}
       <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4 mb-6 shadow-sm">
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
           Select Account to View Ledger
@@ -98,8 +84,9 @@ export default function GeneralLedgerPage() {
             value={selectedAccountId}
             onChange={(e) => setSelectedAccountId(e.target.value)}
             className="w-full pl-10 pr-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            disabled={loadingAccounts} 
           >
-            <option value="">-- Choose an Account --</option>
+            <option value="">{loadingAccounts ? "Loading accounts..." : "-- Choose an Account --"}</option>
             {accounts.map((acc) => (
               <option key={acc.id} value={acc.id}>
                 {acc.code} - {acc.name}
@@ -109,7 +96,6 @@ export default function GeneralLedgerPage() {
         </div>
       </div>
 
-      {/* Ledger Table */}
       {selectedAccount && (
         <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden shadow-sm">
           <div className="p-4 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-750">

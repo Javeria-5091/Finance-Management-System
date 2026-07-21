@@ -46,14 +46,12 @@ export async function getPeriods(fiscalYearId: string): Promise<AccountingPeriod
   return data as AccountingPeriod[];
 }
 
-// ✅ FIX 1: supabase.schema(SCHEMA).rpc() likha
 export async function getCurrentPeriod(): Promise<CurrentPeriod | null> {
   const { data, error } = await supabase.schema(SCHEMA).rpc('get_current_period');
   if (error) throw error;
   return data?.[0] ?? null;
 }
 
-// ✅ FIX 2: supabase.schema(SCHEMA).rpc() likha
 export async function getPeriodByDate(date: string) {
   const { data, error } = await supabase.schema(SCHEMA).rpc('get_period_by_date', { 
     p_date: date 
@@ -62,7 +60,6 @@ export async function getPeriodByDate(date: string) {
   return data?.[0] ?? null;
 }
 
-// ✅ FIX 3: supabase.schema(SCHEMA).rpc() likha
 export async function isDateInOpenPeriod(date: string): Promise<boolean> {
   const { data, error } = await supabase.schema(SCHEMA).rpc('is_date_in_open_period', { 
     p_date: date 
@@ -122,7 +119,6 @@ export async function closePeriod(input: ClosePeriodInput): Promise<void> {
   const { error } = await supabase.schema(SCHEMA).from('accounting_periods').update(updateData).eq('id', input.period_id);
   if (error) throw error;
 
-  // ✅ FIX 4: Audit schema ke liye alag se .schema('audit').rpc() lagaya
   await supabase.schema('audit').rpc('log_manual', {
     p_table_schema: 'finance',
     p_table_name: 'accounting_periods',
@@ -147,7 +143,6 @@ export async function reopenPeriod(input: ReopenPeriodInput): Promise<void> {
 
   if (error) throw error;
 
-  // ✅ FIX 5: Audit schema ke liye bhi .schema('audit').rpc()
   await supabase.schema('audit').rpc('log_manual', {
     p_table_schema: 'finance',
     p_table_name: 'accounting_periods',

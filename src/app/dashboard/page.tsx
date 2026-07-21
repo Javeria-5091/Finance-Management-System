@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
-import { useTheme } from "@/context/ThemeContext"; // ✅ IMPORT
+import { useTheme } from "@/context/ThemeContext"; 
 import { Project, Income, Expense, Budget } from "@/types"; 
 import {
   Chart as ChartJS, CategoryScale, LinearScale, BarElement, LineElement,

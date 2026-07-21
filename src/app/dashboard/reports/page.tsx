@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import { Income, Expense, Project } from "@/types";
-import { Download, FileText, Filter } from "lucide-react"; // ✅ Filter icon add kiya
+import { Download, FileText, Filter } from "lucide-react"; 
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -91,7 +91,7 @@ export default function ReportsPage() {
     if (showInc) {
       rows.push(["--- INCOME DATA ---"]);
       rows.push(["Title", "Project", "Amount (PKR)", "Category", "Date"]);
-      fIncome.forEach(i => rows.push([String(i.title), String(getProjectName(i.project_id)), String(i.amount), String(i.category), String(i.income_date)]));
+      fIncome.forEach(i => rows.push([String(i.title), String(getProjectName(i.id)), String(i.amount), String(i.category), String(i.income_date)]));
       rows.push(["TOTAL INCOME", "", String(totalInc), "", ""]);
       rows.push([]);
     }
@@ -99,7 +99,7 @@ export default function ReportsPage() {
     if (showExp) {
       rows.push(["--- EXPENSE DATA ---"]);
       rows.push(["Title", "Project", "Amount (PKR)", "Category", "Date"]);
-      fExpense.forEach(e => rows.push([String(e.title), String(getProjectName(e.project_id)), String(e.amount), String(e.category), String(e.expense_date)]));
+      fExpense.forEach(e => rows.push([String(e.title), String(getProjectName(e.id)), String(e.amount), String(e.category), String(e.expense_date)]));
       rows.push(["TOTAL EXPENSES", "", String(totalExp), "", ""]);
       rows.push([]);
     }
@@ -139,7 +139,7 @@ export default function ReportsPage() {
       autoTable(doc, {
         startY: y, margin: { left: 14, right: 14 },
         head: [["Title", "Project", "Amount (PKR)", "Date"]],
-        body: fIncome.map(i => [String(i.title), String(getProjectName(i.project_id)), String(Number(i.amount).toLocaleString()), String(i.income_date)]),
+        body: fIncome.map(i => [String(i.title), String(getProjectName(i.id)), String(Number(i.amount).toLocaleString()), String(i.income_date)]),
         theme: "striped", headStyles: { fillColor: [16, 185, 129], textColor: 255 }, styles: { fontSize: 9 }
       });
       y = (doc as any).lastAutoTable.finalY + 10;
@@ -153,7 +153,7 @@ export default function ReportsPage() {
       autoTable(doc, {
         startY: y, margin: { left: 14, right: 14 },
         head: [["Title", "Project", "Amount (PKR)", "Date"]],
-        body: fExpense.map(e => [String(e.title), String(getProjectName(e.project_id)), String(Number(e.amount).toLocaleString()), String(e.expense_date)]),
+        body: fExpense.map(e => [String(e.title), String(getProjectName(e.id)), String(Number(e.amount).toLocaleString()), String(e.expense_date)]),
         theme: "striped", headStyles: { fillColor: [239, 68, 68], textColor: 255 }, styles: { fontSize: 9 }
       });
       y = (doc as any).lastAutoTable.finalY + 10;
@@ -306,7 +306,7 @@ export default function ReportsPage() {
                     <span className="bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400 text-xs px-2 py-0.5 rounded font-medium">Income</span>
                   </td>
                   <td className="px-4 py-2.5 text-gray-900 dark:text-white font-medium">{i.title}</td>
-                  <td className="px-4 py-2.5 text-gray-500 dark:text-gray-400 hidden md:table-cell">{getProjectName(i.project_id)}</td>
+                  <td className="px-4 py-2.5 text-gray-500 dark:text-gray-400 hidden md:table-cell">{getProjectName(i.id)}</td>
                   <td className="px-4 py-2.5 text-gray-500 dark:text-gray-400">{i.category}</td>
                   <td className="px-4 py-2.5 text-right text-emerald-600 dark:text-emerald-400 font-semibold">+{formatCurrency(i.amount)}</td>
                   <td className="px-4 py-2.5 text-right text-gray-500 dark:text-gray-400 hidden sm:table-cell">{i.income_date}</td>
@@ -319,7 +319,7 @@ export default function ReportsPage() {
                     <span className="bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400 text-xs px-2 py-0.5 rounded font-medium">Expense</span>
                   </td>
                   <td className="px-4 py-2.5 text-gray-900 dark:text-white font-medium">{e.title}</td>
-                  <td className="px-4 py-2.5 text-gray-500 dark:text-gray-400 hidden md:table-cell">{getProjectName(e.project_id)}</td>
+                  <td className="px-4 py-2.5 text-gray-500 dark:text-gray-400 hidden md:table-cell">{getProjectName(e.id)}</td>
                   <td className="px-4 py-2.5 text-gray-500 dark:text-gray-400">{e.category}</td>
                   <td className="px-4 py-2.5 text-right text-red-600 dark:text-red-400 font-semibold">-{formatCurrency(e.amount)}</td>
                   <td className="px-4 py-2.5 text-right text-gray-500 dark:text-gray-400 hidden sm:table-cell">{e.expense_date}</td>

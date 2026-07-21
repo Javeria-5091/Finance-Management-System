@@ -2,6 +2,7 @@ import './globals.css'
 import { Inter } from 'next/font/google'
 import { AuthProvider } from '@/context/AuthContext'
 import { ThemeProvider } from '@/context/ThemeContext' 
+import { PermissionProvider } from "@/context/PermissionContext";
 
 const inter = Inter({ subsets: ['latin'] })
 
@@ -16,7 +17,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-white transition-colors duration-300">
         <ThemeProvider>
           <AuthProvider>
-            {children}
+            <PermissionProvider>
+              {children}
+            </PermissionProvider>
           </AuthProvider>
         </ThemeProvider>
       </body>

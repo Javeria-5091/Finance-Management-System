@@ -21,8 +21,9 @@ html:not(.dark) input:-webkit-autofill {
   -webkit-box-shadow: 0 0 0px 1000px white inset;
 }
 
-/* ✅ UNIVERSAL SCROLLBAR (Ab theme conflict nahi hoga) */
+/* UNIVERSAL SCROLLBAR (Ab theme conflict nahi hoga) */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+

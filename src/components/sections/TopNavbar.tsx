@@ -1,9 +1,9 @@
 "use client"; 
 import { useState, useEffect } from "react"; 
-// Search hata diya, MessageSquare hata ke Sparkles laga diya
-import { Menu, Bell, Sun, Moon, Sparkles } from "lucide-react"; 
+import { Menu, Bell, Sun, Moon, Sparkles, CalendarDays, AlertTriangle } from "lucide-react"; // ✅ CalendarDays & AlertTriangle ADDED
 import { useAuth } from "@/context/AuthContext"; 
 import { useTheme } from "@/context/ThemeContext"; 
+import { useFiscalPeriod } from "@/hooks/useFiscalPeriod"; // ✅ HOOK ADDED
 import { supabase } from "@/lib/supabase"; 
 import type { Notification } from "@/types"; 
 import { useRouter } from "next/navigation";
@@ -12,16 +12,17 @@ import AiChatSlideOver from "../ai/AiChatSlideOver";
 interface TopNavbarProps { 
   onMenuClick: () => void; 
   title: string; 
-  isDark: boolean;      
-  toggleTheme: () => void;
 } 
 
 export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) { 
   const { user } = useAuth(); 
   const router = useRouter(); 
   const { isDark, toggleTheme } = useTheme(); 
-  const [isChatOpen, setIsChatOpen] = useState(false);
   
+  // ✅ HOOK USE: Current Fiscal Period ka data
+  const { currentPeriod, loading: periodLoading } = useFiscalPeriod();
+  
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]); 
   const [showDropdown, setShowDropdown] = useState(false); 
   const [unreadCount, setUnreadCount] = useState(0); 
@@ -81,7 +82,29 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
           <button onClick={onMenuClick} className={`lg:hidden p-2 rounded-lg transition-colors ${isDark ? "hover:bg-gray-800 text-gray-400 hover:text-white" : "hover:bg-gray-100 text-gray-600 hover:text-gray-900"}`}> 
             <Menu size={22} /> 
           </button> 
-          <h1 className={`text-lg font-semibold ${isDark ? "text-white" : "text-gray-900"}`}>{title}</h1> 
+          <h1 className={`text-lg font-semibold ${isDark ? "text-white" : "text-gray-900"}`}>{title}</h1>
+          
+          {/* ✅ FISCAL PERIOD INDICATOR BADGE */}
+          <div className={`hidden md:flex items-center gap-2 ml-4 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+            currentPeriod?.period_status === 'OPEN' 
+              ? (isDark ? "border-green-500/30 bg-green-500/10 text-green-400" : "border-green-200 bg-green-50 text-green-700")
+              : (isDark ? "border-red-500/30 bg-red-500/10 text-red-400" : "border-red-200 bg-red-50 text-red-700")
+          }`}>
+            <CalendarDays size={14} />
+            {periodLoading ? (
+              <span>Loading...</span>
+            ) : currentPeriod ? (
+              <>
+                <span>{currentPeriod.period_name}</span>
+                <span className={`w-2 h-2 rounded-full ${currentPeriod.period_status === 'OPEN' ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
+              </>
+            ) : (
+              <div className="flex items-center gap-1">
+                <AlertTriangle size={12} />
+                <span>No Open Period</span>
+              </div>
+            )}
+          </div>
         </div> 
 
         <div className="flex items-center gap-2"> 
@@ -151,4 +174,4 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
       <AiChatSlideOver isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} />
     </> 
   ); 
-}
+} 

@@ -56,7 +56,6 @@ export default function InvoicesPage() {
     fetchInvoices();
   }
 
-  // ✅ NATIVE BROWSER PRINT FUNCTION
   function handlePrint(inv: Invoice) {
     setPrintId(inv.id);
     setTimeout(() => window.print(), 100);
@@ -73,7 +72,6 @@ export default function InvoicesPage() {
     return new Intl.NumberFormat("en-PK", { style: "currency", currency: "PKR", minimumFractionDigits: 0 }).format(amount);
   }
 
-  // ✅ JO INVOICE PRINT HO RAHA HAI, SIRF WOHI DIKHEGA
   const printInvoice = printId ? invoices.find(i => i.id === printId) : null;
 
   return (
@@ -90,7 +88,6 @@ export default function InvoicesPage() {
         )}
       </div>
 
-      {/* ✅ PRINT VIEW (Screen pe dikhega, Print mein nahi) */}
       {printInvoice && (
         <div className="fixed inset-0 z-[9999] bg-white text-black p-10 print:block">
           <div className="max-w-3xl mx-auto border border-gray-300 p-8 rounded-lg">
@@ -165,8 +162,6 @@ export default function InvoicesPage() {
           </div>
         </div>
       )}
-
-      {/* ✅ NORMAL VIEW (Print mein yeh nahi dikhega) */}
       {!printInvoice && (
         <div className="print:hidden">
           <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden shadow-sm dark:shadow-none">

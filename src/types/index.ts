@@ -31,7 +31,6 @@ export interface Income {
   created_at: string;
   updated_at: string;
   
-  // ✅ PHASE 2 ADDITIONS
   status: 'DRAFT' | 'SUBMITTED' | 'VERIFIED' | 'APPROVED' | 'POSTED' | 'REVERSED' | 'REJECTED' | 'CANCELLED';
   journal_entry_id?: string | null;
   period_id?: string | null;
@@ -56,7 +55,7 @@ export interface IncomeFormData {
   description?: string | null;
   income_date: string;
   project_id?: string | null;
-  account_id?: string | null; // ✅ PHASE 2: COA Link
+  account_id?: string | null; 
 }
 
 // ==========================================
@@ -72,8 +71,7 @@ export interface Expense {
   notes?: string | null;
   project_id?: string | null;
   created_at: string;
-  
-  // ✅ PHASE 2 ADDITIONS
+
   status: 'DRAFT' | 'SUBMITTED' | 'VERIFIED' | 'APPROVED' | 'POSTED' | 'REVERSED' | 'REJECTED' | 'CANCELLED';
   journal_entry_id?: string | null;
   period_id?: string | null;
@@ -99,7 +97,7 @@ export interface ExpenseFormData {
   expense_date: string;
   notes?: string | null;
   project_id?: string | null;
-  account_id?: string | null; // ✅ PHASE 2: COA Link
+  account_id?: string | null; 
 }
 
 // ==========================================

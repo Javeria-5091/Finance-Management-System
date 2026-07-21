@@ -2,7 +2,7 @@
 import { useState, useEffect, ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
-import { useTheme } from "@/context/ThemeContext"; // ✅ IMPORT KIYA
+import { useTheme } from "@/context/ThemeContext"; // IMPORT KIYA
 import Sidebar from "@/components/sections/Sidebar";
 import TopNavbar from "@/components/sections/TopNavbar";
 import { ShieldAlert } from "lucide-react";
@@ -15,7 +15,7 @@ const ADMIN_ONLY_ROUTES = [
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const { user, isAdmin } = useAuth();
-  const { isDark, toggleTheme } = useTheme(); // ✅ THEME HOOK
+  const { isDark, toggleTheme } = useTheme(); // THEME HOOK
   const router = useRouter();
   const pathname = usePathname();
 
@@ -45,11 +45,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   }
 
   return (
-    // ✅ BG COLOR DYNAMIC (Light/Dark dono ke liye)
+    // BG COLOR DYNAMIC (Light/Dark dono ke liye)
     <div className="min-h-screen flex bg-gray-100 dark:bg-gray-900 transition-colors duration-300">
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
       <div className="flex-1 flex flex-col">
-        {/* ✅ THEME TOGGLE PASS KIYA TOPNAV KO */}
+        {/* THEME TOGGLE PASS KIYA TOPNAV KO */}
         <TopNavbar 
           onMenuClick={() => setSidebarOpen(true)} 
           title="Osystic Finance" 
