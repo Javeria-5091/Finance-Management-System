@@ -17,7 +17,7 @@ interface SidebarProps {
   onClose: () => void;
 }
 
-// ✅ Strict Permission Mapping
+//  Strict Permission Mapping
 const navGroups = [
   {
     id: "overview",
@@ -27,18 +27,23 @@ const navGroups = [
       { label: "Transactions", href: "/dashboard/transactions", icon: FileText, permission: "INCOME_READ" },
     ],
   },
-  {
-    id: "operations",
-    label: "Operations",
-    items: [
-      { label: "Projects", href: "/dashboard/projects", icon: FolderKanban, permission: "INCOME_READ" },
-      { label: "Income", href: "/dashboard/income", icon: ArrowDownCircle, permission: "INCOME_READ" },
-      { label: "Expenses", href: "/dashboard/expenses", icon: ArrowUpCircle, permission: "EXPENSE_READ" },
-      { label: "Budgets", href: "/dashboard/budgets", icon: Wallet, permission: "EXPENSE_READ" },
-      { label: "Payments", href: "/dashboard/payments", icon: CreditCard, permission: "INCOME_READ" },
-      { label: "Invoices", href: "/dashboard/invoices", icon: FileText, permission: "INCOME_READ" },
-    ],
-  },
+  // Inside navGroups array, update the 'operations' group:
+{
+  id: "operations",
+  label: "Operations",
+  items: [
+    { label: "Projects", href: "/dashboard/projects", icon: FolderKanban, permission: "INCOME_READ" },
+    { label: "Income", href: "/dashboard/income", icon: ArrowDownCircle, permission: "INCOME_READ" },
+    { label: "Expenses", href: "/dashboard/expenses", icon: ArrowUpCircle, permission: "EXPENSE_READ" },
+    { label: "Budgets", href: "/dashboard/budgets", icon: Wallet, permission: "EXPENSE_READ" },
+    { label: "Invoices", href: "/dashboard/invoices", icon: FileText, permission: "INCOME_READ" },
+    { label: "Payment Receipts", href: "/dashboard/payment-receipts", icon: CreditCard, permission: "INCOME_READ" }, 
+    { label: "Credit Notes", href: "/dashboard/credit-notes", icon: ArrowDownCircle, permission: "INCOME_READ" },   
+    
+    // Move Payments here or remove if covered by Payment Receipts
+    // { label: "Payments", href: "/dashboard/payments", icon: CreditCard, permission: "INCOME_READ" },
+  ],
+},
   {
     id: "accounting",
     label: "Accounting",
@@ -91,7 +96,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
     onClose(); 
   };
 
-  // ✅ Secure Filter Logic: Agar loading hai toh sab dikhao (Blank screen prevent karo)
+  //  Secure Filter Logic: Agar loading hai toh sab dikhao (Blank screen prevent karo)
   const filterItems = (items: typeof navGroups[0]['items']) => {
     if (permLoading) return items; 
     return items.filter((item) => {

@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
-import { usePermissions } from "@/hooks/usePermissions"; // ✅ ADDED
+import { usePermissions } from "@/hooks/usePermissions";
 import { Income, IncomeFormData, Project } from "@/types";
 import IncomeForm from "@/components/sections/IncomeForm";
 import StatusActions from "@/components/finance/StatusActions";
@@ -21,8 +21,8 @@ const STATUS_STYLES: Record<string, string> = {
 
 export default function IncomePage() {
   const { user } = useAuth();
-  const { hasPermission } = usePermissions(); // ✅ ADDED
-  const canAdd = hasPermission("INCOME_CREATE"); // ✅ ADDED
+  const { hasPermission } = usePermissions(); 
+  const canAdd = hasPermission("INCOME_CREATE"); 
 
   const [incomes, setIncomes] = useState<any[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -128,7 +128,7 @@ export default function IncomePage() {
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Income Management</h2>
           <p className="text-gray-500 text-sm">Double-entry workflow enabled</p>
         </div>
-        {/* ✅ HOOK USED HERE: Sirf dikhao agar permission hai */}
+        {/*  HOOK USED HERE: Sirf dikhao agar permission hai */}
         {canAdd && (
           <button onClick={() => { setEditingData(null); setShowForm(true); }} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-medium w-fit">
             <Plus size={18} /> Add Income

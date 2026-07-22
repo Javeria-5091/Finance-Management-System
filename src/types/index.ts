@@ -101,23 +101,50 @@ export interface ExpenseFormData {
 }
 
 // ==========================================
-// 4. INVOICE TYPES
+// INVOICE TYPES (Phase 4 Upgrade)
 // ==========================================
+
 export interface Invoice {
   id: string;
   user_id: string;
   project_id: string | null;
-  invoice_number: string;
+  invoice_number: string | null;
   client_name: string;
-  amount: number;
-  status: "Draft" | "Pending" | "Paid" | "Overdue";
+  amount: number; 
+  status: string;
   issue_date: string;
-  due_date: string;
+  due_date: string | null;
   notes: string | null;
   created_at: string;
+  updated_at: string;
+  currency: string;
+  exchange_rate: number; 
+  subtotal: number;    
+  tax_amount: number;    
+  discount_amount: number; 
+  total_amount: number; 
+  base_subtotal: number; 
+  base_tax_amount: number; 
+  base_discount_amount: number;
+  base_total_amount: number; 
+  amount_paid: number;  
+  base_amount_paid: number; 
+  inv_outstanding_amount: number; 
+  base_outstanding_amount: number; 
 }
-export type InvoiceFormData = Omit<Invoice, "id" | "user_id" | "created_at">;
-export const INVOICE_STATUSES = ["Draft", "Pending", "Paid", "Overdue"] as const;
+
+export type InvoiceFormData = Omit<Invoice, "id" | "user_id" | "created_at" | "updated_at">;
+export const INVOICE_STATUSES = [
+  "DRAFT", 
+  "SUBMITTED", 
+  "APPROVED", 
+  "ISSUED", 
+  "PARTIALLY_PAID", 
+  "PAID", 
+  "OVERDUE", 
+  "VOID", 
+  "REVERSED" 
+] as const;
 
 // ==========================================
 // 5. AUDIT LOG TYPES

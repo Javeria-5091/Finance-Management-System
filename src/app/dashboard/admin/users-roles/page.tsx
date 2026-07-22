@@ -121,7 +121,7 @@ export default function UsersRolesPage() {
   const [permissions, setPermissions] = useState<any[]>([]);
   const [userRoles, setUserRoles] = useState<any[]>([]);
   const [allUsers, setAllUsers] = useState<any[]>([]);
-  const [rolePermissions, setRolePermissions] = useState<any[]>([]); // ✅ NEW
+  const [rolePermissions, setRolePermissions] = useState<any[]>([]); 
   
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -129,11 +129,11 @@ export default function UsersRolesPage() {
   
   const [editingRoleId, setEditingRoleId] = useState<string | null>(null);
   const [editingRoleName, setEditingRoleName] = useState("");
-  const [editingRoleLevel, setEditingRoleLevel] = useState(50); // ✅ NEW
+  const [editingRoleLevel, setEditingRoleLevel] = useState(50); 
   const [matrix, setMatrix] = useState<Record<string, { scope: string; limit: string }>>({});
   
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showAssignModal, setShowAssignModal] = useState(false); // ✅ NEW
+  const [showAssignModal, setShowAssignModal] = useState(false); 
   const [newRole, setNewRole] = useState({ display_name: "", description: "", level: 50 });
   const [assignForm, setAssignForm] = useState({
     user_id: "",
@@ -141,7 +141,7 @@ export default function UsersRolesPage() {
     effective_from: new Date().toISOString().split('T')[0],
     effective_to: null as string | null,
     delegated_from: null as string | null
-  }); // ✅ NEW
+  }); 
 
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
@@ -195,12 +195,12 @@ export default function UsersRolesPage() {
     return roles.filter(r => r.id !== ceoRole.id);
   }, [roles, getCEORole]);
 
-  // ✅ NEW: Helper to get user count for a role
+  //  NEW: Helper to get user count for a role
   const getUserCountForRole = useCallback((roleId: string) => {
     return allUsers.filter(u => u.role_id === roleId).length;
   }, [allUsers]);
 
-  // ✅ NEW: Helper to get permission count for a role
+  //  NEW: Helper to get permission count for a role
   const getPermCountForRole = useCallback((roleId: string) => {
     return rolePermissions.filter(rp => rp.role_id === roleId).length;
   }, [rolePermissions]);
@@ -232,7 +232,7 @@ export default function UsersRolesPage() {
         .order("created_at", { ascending: false });
       if (urErr) throw new Error(`Failed to fetch user roles: ${urErr.message}`);
 
-      // ✅ NEW: Fetch ALL role permissions for counts
+      //  NEW: Fetch ALL role permissions for counts
       const { data: rpData, error: rpErr } = await supabase.from("role_permissions").select("role_id, permission_id");
       if (rpErr) throw new Error(`Failed to fetch role permissions: ${rpErr.message}`);
 
@@ -272,7 +272,7 @@ export default function UsersRolesPage() {
       if (permsData) setPermissions(permsData);
       setUserRoles(urData || []);
       setAllUsers(mergedUsers);
-      if (rpData) setRolePermissions(rpData); // ✅ NEW
+      if (rpData) setRolePermissions(rpData);
 
     } catch (err: any) {
       console.error("🚨 Fetch Error:", err);
@@ -353,7 +353,7 @@ export default function UsersRolesPage() {
     setEditingRoleId(roleId);
     const role = roles.find(r => r.id === roleId);
     setEditingRoleName(role?.display_name || "");
-    setEditingRoleLevel(role?.level || 50); // ✅ NEW
+    setEditingRoleLevel(role?.level || 50); 
     
     const { data } = await supabase.from("role_permissions").select("*").eq("role_id", roleId);
     const initMatrix: Record<string, { scope: string; limit: string }> = {};
@@ -398,7 +398,7 @@ export default function UsersRolesPage() {
     if (!editingRoleId) return;
     setSaving(true);
     try {
-      // ✅ NEW: Also update role name and level if changed
+      //  NEW: Also update role name and level if changed
       const role = roles.find(r => r.id === editingRoleId);
       if (role && (role.display_name !== editingRoleName || role.level !== editingRoleLevel)) {
         const { error: updateErr } = await supabase.from("roles").update({
@@ -468,7 +468,7 @@ export default function UsersRolesPage() {
   };
 
   // ==========================================
-  // ✅ NEW: ASSIGN ROLE TO USER LOGIC
+  //  NEW: ASSIGN ROLE TO USER LOGIC
   // ==========================================
   const openAssignModal = () => {
     setAssignForm({
@@ -611,7 +611,7 @@ export default function UsersRolesPage() {
   const ceoRole = getCEORole();
   const otherUsers = getOtherUsers();
   const nonCEORoles = getNonCEORoles();
-  const totalPermissions = permissions.length; // ✅ NEW
+  const totalPermissions = permissions.length; 
 
   // ==========================================
   // MAIN UI
@@ -671,7 +671,7 @@ export default function UsersRolesPage() {
         </div>
       )}
 
-      {/* ✅ NEW: Assign Role Modal */}
+      {/*  NEW: Assign Role Modal */}
       {showAssignModal && (
         <div className="fixed inset-0 z-[95] flex items-center justify-center p-4">
 <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={!saving ? () => setShowAssignModal(false) : undefined} />
@@ -859,8 +859,8 @@ className="w-full px-4 py-2.5 border dark:border-gray-600 rounded-lg bg-white da
 <tbody className="divide-y dark:divide-gray-700">
 {roles.map(r => {
 const isCEO = ceoRole?.id === r.id;
-const userCount = getUserCountForRole(r.id); // ✅ NEW
-const permCount = getPermCountForRole(r.id); // ✅ NEW
+const userCount = getUserCountForRole(r.id); 
+const permCount = getPermCountForRole(r.id); 
 
 return (
 <tr key={r.id} className={`hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors ${isCEO ? 'bg-amber-50/50 dark:bg-amber-900/10' : ''}`}>
@@ -929,7 +929,7 @@ return (
 </div>
 </div>
 
-{/* ✅ NEW: Role Name & Level Section */}
+{/*  NEW: Role Name & Level Section */}
 <div className="px-5 py-4 bg-white dark:bg-gray-800 border-b dark:border-gray-700">
 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 <div>
@@ -1068,7 +1068,7 @@ Unassigned: <strong>{allUsers.filter(u => !u.hasRole).length}</strong>
 </span>
 </div>
 
-{/* ✅ NEW: Assign Role to User Button */}
+{/*  NEW: Assign Role to User Button */}
 <button
 onClick={openAssignModal}
 className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-xs font-medium transition-colors"

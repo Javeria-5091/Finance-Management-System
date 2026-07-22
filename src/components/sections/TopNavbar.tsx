@@ -1,9 +1,9 @@
 "use client"; 
 import { useState, useEffect } from "react"; 
-import { Menu, Bell, Sun, Moon, Sparkles, CalendarDays, AlertTriangle } from "lucide-react"; // ✅ CalendarDays & AlertTriangle ADDED
+import { Menu, Bell, Sun, Moon, Sparkles, CalendarDays, AlertTriangle } from "lucide-react"; 
 import { useAuth } from "@/context/AuthContext"; 
 import { useTheme } from "@/context/ThemeContext"; 
-import { useFiscalPeriod } from "@/hooks/useFiscalPeriod"; // ✅ HOOK ADDED
+import { useFiscalPeriod } from "@/hooks/useFiscalPeriod"; 
 import { supabase } from "@/lib/supabase"; 
 import type { Notification } from "@/types"; 
 import { useRouter } from "next/navigation";
@@ -19,7 +19,6 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
   const router = useRouter(); 
   const { isDark, toggleTheme } = useTheme(); 
   
-  // ✅ HOOK USE: Current Fiscal Period ka data
   const { currentPeriod, loading: periodLoading } = useFiscalPeriod();
   
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -84,7 +83,7 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
           </button> 
           <h1 className={`text-lg font-semibold ${isDark ? "text-white" : "text-gray-900"}`}>{title}</h1>
           
-          {/* ✅ FISCAL PERIOD INDICATOR BADGE */}
+          {/*  FISCAL PERIOD INDICATOR BADGE */}
           <div className={`hidden md:flex items-center gap-2 ml-4 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
             currentPeriod?.period_status === 'OPEN' 
               ? (isDark ? "border-green-500/30 bg-green-500/10 text-green-400" : "border-green-200 bg-green-50 text-green-700")
