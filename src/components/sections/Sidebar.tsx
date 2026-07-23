@@ -36,12 +36,13 @@ const navGroups = [
     { label: "Income", href: "/dashboard/income", icon: ArrowDownCircle, permission: "INCOME_READ" },
     { label: "Expenses", href: "/dashboard/expenses", icon: ArrowUpCircle, permission: "EXPENSE_READ" },
     { label: "Budgets", href: "/dashboard/budgets", icon: Wallet, permission: "EXPENSE_READ" },
+    { label: "Vendors", href: "/dashboard/vendors", icon: Building2, permission: "EXPENSE_READ" },
+    { label: "Vendor Bills", href: "/dashboard/vendor-bills", icon: FileText, permission: "EXPENSE_READ" },
+    { label: "Vendor Payments", href: "/dashboard/vendor-payments", icon: CreditCard, permission: "EXPENSE_READ" },
     { label: "Invoices", href: "/dashboard/invoices", icon: FileText, permission: "INCOME_READ" },
     { label: "Payment Receipts", href: "/dashboard/payment-receipts", icon: CreditCard, permission: "INCOME_READ" }, 
     { label: "Credit Notes", href: "/dashboard/credit-notes", icon: ArrowDownCircle, permission: "INCOME_READ" },   
     
-    // Move Payments here or remove if covered by Payment Receipts
-    // { label: "Payments", href: "/dashboard/payments", icon: CreditCard, permission: "INCOME_READ" },
   ],
 },
   {

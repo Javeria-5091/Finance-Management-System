@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
 
-export default function ReasonModal({ open, title, description = null, onConfirm, onCancel }) {
+export default function ReasonModal({ open, title, description = string, onConfirm, onCancel }) {
   const [reason, setReason] = useState('');
 
   if (!open) return null;
