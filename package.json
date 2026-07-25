@@ -18,8 +18,10 @@
     "@react-three/fiber": "^9.6.1",
     "@supabase/ssr": "^0.12.2",
     "@supabase/supabase-js": "^2.110.5",
+    "@tanstack/react-query": "^5.101.4",
     "ai": "^7.0.26",
     "chart.js": "^4.5.1",
+    "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
     "lucide-react": "^1.22.0",
     "next": "^16.2.10",
@@ -27,6 +29,7 @@
     "react": "^19",
     "react-chartjs-2": "^5.3.1",
     "react-dom": "^19",
+    "react-hot-toast": "^2.6.0",
     "recharts": "^3.9.1",
     "three": "^0.185.1",
     "zod": "^4.4.3"

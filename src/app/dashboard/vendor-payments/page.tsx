@@ -4,18 +4,24 @@ import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/hooks/usePermissions";
 import { Plus, CheckCircle, CreditCard, X, Loader2 } from "lucide-react";
-import StatusActions from "@/components/finance/StatusActions";
+import ReasonModal from "@/components/finance/ReasonModal";
 
-// ✅ FIX #5: Lowercase keys
 const STATUS_STYLES: Record<string, string> = {
-  draft: "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
-  approved: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
-  posted: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
-  reversed: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
-  cancelled: "bg-gray-200 text-gray-500 dark:bg-gray-600 dark:text-gray-400 italic",
+  DRAFT: "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
+  APPROVED: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+  POSTED: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+  REVERSED: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  CANCELLED: "bg-gray-200 text-gray-500 dark:bg-gray-600 dark:text-gray-400 italic",
 };
 
-// ✅ FIX #2: outstanding_amount instead of base_outstanding_amount
+const formatStatus = (status: string | null | undefined): string => {
+  if (!status) return "Unknown";
+  return status
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+};
+
 interface VendorBillForAllocation {
   id: string;
   bill_number: string | null;
@@ -36,18 +42,18 @@ interface VendorPayment {
   description: string | null;
 }
 
-// ✅ FIX: Finance schema reference
 const db = supabase.schema("finance");
 
 export default function VendorPaymentsPage() {
   const { user } = useAuth();
   const { hasPermission, isLoading: permLoading } = usePermissions();
+  
   const [payments, setPayments] = useState<VendorPayment[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-
-  // Allocation state
+  const [successMsg, setSuccessMsg] = useState("");
+  
   const [bills, setBills] = useState<VendorBillForAllocation[]>([]);
   const [vendors, setVendors] = useState<any[]>([]);
   const [allocations, setAllocations] = useState<Record<string, number>>({});
@@ -59,24 +65,36 @@ export default function VendorPaymentsPage() {
     description: "",
   });
 
+  const [reasonState, setReasonState] = useState({
+    open: false,
+    title: "",
+    action: "",
+    id: "",
+  });
+
   const totalAllocated = Object.values(allocations).reduce(
     (sum, val) => sum + val,
     0
   );
   const unallocated = parseFloat(form.amount || "0") - totalAllocated;
-  const isBalanced = unallocated >= -0.01 && unallocated <= 0.01 && totalAllocated > 0;
+  const isBalanced =
+    unallocated >= -0.01 && unallocated <= 0.01 && totalAllocated > 0;
 
-  // ✅ FIX #1: finance schema
   const fetchPayments = useCallback(async () => {
     setLoading(true);
-    const { data, error } = await db
-      .from("vendor_payments")
-      .select("*")
-      .order("payment_date", { ascending: false });
+    try {
+      const { data, error } = await db
+        .from("vendor_payments")
+        .select("*")
+        .order("payment_date", { ascending: false });
 
-    if (error) console.error("Failed to fetch payments:", error.message);
-    if (data) setPayments(data as VendorPayment[]);
-    setLoading(false);
+      if (error) throw error;
+      setPayments((data as VendorPayment[]) || []);
+    } catch (err: any) {
+      console.error("Failed to fetch payments:", err.message);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -94,12 +112,11 @@ export default function VendorPaymentsPage() {
       description: "",
     });
 
-    // ✅ FIX #4: status = 'active' instead of is_active = true
     const { data: vData } = await db
-    .from("vendors")
-    .select("*")
-    .eq("is_active", true)
-    .order("name");
+      .from("vendors")
+      .select("*")
+      .eq("is_active", true)
+      .order("name");
     if (vData) setVendors(vData);
 
     if (selectedVendorId) {
@@ -109,23 +126,22 @@ export default function VendorPaymentsPage() {
     setShowModal(true);
   };
 
-  // ✅ FIX #1 & #2: finance schema + outstanding_amount
   const fetchOutstandingBills = async (vendorId: string) => {
-    const { data: billsData, error } = await db
-      .from("vendor_bills")
-      .select(
-        "id, bill_number, vendor_id, outstanding_amount, due_date, status"
-      )
-      .eq("vendor_id", vendorId)
-      .in("status", ["posted", "partially_paid", "overdue"])
-      .gt("outstanding_amount", 0)
-      .order("due_date", { ascending: true });
+    try {
+      const { data: billsData, error } = await db
+        .from("vendor_bills")
+        .select("id, bill_number, vendor_id, outstanding_amount, due_date, status")
+        .eq("vendor_id", vendorId)
+        .in("status", ["POSTED", "PARTIALLY_PAID"])
+        .gt("outstanding_amount", 0)
+        .order("due_date", { ascending: true });
 
-    if (error) {
-      console.error("Failed to fetch bills:", error.message);
+      if (error) throw error;
+      setBills((billsData as VendorBillForAllocation[]) || []);
+    } catch (err: any) {
+      console.error("Failed to fetch bills:", err.message);
       setBills([]);
     }
-    if (billsData) setBills(billsData as VendorBillForAllocation[]);
   };
 
   const handleVendorChange = (vendorId: string) => {
@@ -157,12 +173,10 @@ export default function VendorPaymentsPage() {
 
     setSubmitting(true);
     try {
-      // 1. Generate payment number
       const { data: numData } = await db.rpc("get_next_number", {
         p_type: "VENDOR_PAYMENT",
       });
 
-      // 2. Create Vendor Payment (draft)
       const { data: payment, error } = await db
         .from("vendor_payments")
         .insert({
@@ -171,11 +185,12 @@ export default function VendorPaymentsPage() {
           amount: parseFloat(form.amount),
           currency: "PKR",
           exchange_rate: 1,
+          base_amount: parseFloat(form.amount),
           vendor_id: form.vendor_id,
           payment_method: form.payment_method,
           reference: form.reference || null,
           description: form.description || null,
-          status: "draft",
+          status: "DRAFT",
           created_by: user?.id,
         })
         .select()
@@ -183,12 +198,12 @@ export default function VendorPaymentsPage() {
 
       if (error) throw new Error(error.message);
 
-      // ✅ FIX #3: vendor_payment_id instead of payment_receipt_id
       const allocInserts = Object.entries(allocations).map(
         ([billId, amount]) => ({
           vendor_payment_id: payment.id,
           vendor_bill_id: billId,
           allocated_amount: amount,
+          base_allocated_amount: amount,
           allocated_by: user?.id,
         })
       );
@@ -197,49 +212,101 @@ export default function VendorPaymentsPage() {
         const { error: allocError } = await db
           .from("vendor_payment_allocations")
           .insert(allocInserts);
-        if (allocError) throw new Error("Allocation failed: " + allocError.message);
+        if (allocError)
+          throw new Error("Allocation failed: " + allocError.message);
       }
 
-      // 3. Try to post to ledger (graceful failure)
+      // Try to post to ledger (graceful failure)
       try {
-        // Fetch current open period
-        const { data: periodData } = await db
+        const { data: periodData, error: periodError } = await db
           .from("accounting_periods")
           .select("id")
-          .eq("status", "open")
+          .eq("status", "OPEN")
           .limit(1)
-          .single();
+          .maybeSingle();
 
-        if (periodData) {
+        if (!periodError && periodData) {
           const { error: postError } = await db.rpc("post_vendor_payment", {
             p_payment_id: payment.id,
             p_period_id: periodData.id,
             p_transaction_date: new Date().toISOString().split("T")[0],
           });
 
-          if (postError) {
-            console.warn("Posting warning:", postError.message);
-            // Don't fail the whole payment, just warn
-          } else {
-            // Update status to posted
+          if (!postError) {
             await db
               .from("vendor_payments")
-              .update({ status: "posted" })
+              .update({ status: "POSTED" })
               .eq("id", payment.id);
           }
         }
       } catch (postErr: any) {
-        console.warn("Posting skipped:", postErr.message);
+        console.warn("Ledger posting skipped:", postErr?.message);
       }
 
-      alert("Payment Recorded & Allocated Successfully!");
+      // Success
       setShowModal(false);
-      fetchPayments();
+      setSuccessMsg("Payment of " + formatCurrency(parseFloat(form.amount || "0")) + " recorded & allocated successfully!");
+      
+      try {
+        await fetchPayments();
+      } catch (e) {
+        console.error(e);
+      }
+
+      setTimeout(() => setSuccessMsg(""), 4000);
     } catch (err: any) {
       alert("Error: " + err.message);
     } finally {
       setSubmitting(false);
     }
+  };
+
+     const processAction = async (payId: string, action: string) => {
+    const updates: any = {};
+
+    // ✅ CANCELLED ki jagah REVERSED use karo (Accounting standard)
+    if (action === "cancel") {
+      updates.status = "REVERSED";
+    } else {
+      const map: Record<string, string> = {
+        approve: "APPROVED",
+        post: "POSTED",
+      };
+      updates.status = map[action];
+    }
+
+    try {
+      const { error } = await db.from("vendor_payments").update(updates).eq("id", payId);
+      if (error) throw error;
+      
+      if (action === "post") {
+        const { data: allocs } = await db
+          .from("vendor_payment_allocations")
+          .select("vendor_bill_id")
+          .eq("vendor_payment_id", payId);
+        
+        if (allocs && allocs.length > 0) {
+          const billIds = allocs.map((a) => a.vendor_bill_id);
+          await db
+            .from("vendor_bills")
+            .update({ status: "PAID" })
+            .in("id", billIds);
+        }
+      }
+
+      fetchPayments();
+    } catch (err: any) {
+      alert("Action failed: " + err.message);
+    }
+    setReasonState({ open: false, title: "", action: "", id: "" });
+  };
+
+  const handleAction = (payId: string, action: string, needsReason?: boolean) => {
+    if (needsReason) {
+      setReasonState({ open: true, title: `Confirm ${action}`, action, id: payId });
+      return;
+    }
+    processAction(payId, action);
   };
 
   const formatCurrency = (amount: number) =>
@@ -262,7 +329,7 @@ export default function VendorPaymentsPage() {
 
   return (
     <div className="p-6">
-      {/* Header */}
+      {/* HEADER */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
@@ -282,7 +349,27 @@ export default function VendorPaymentsPage() {
         )}
       </div>
 
-      {/* Table */}
+      {/* SUCCESS BANNER */}
+      {successMsg && (
+        <div className="mb-6 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl p-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-green-100 dark:bg-green-900/50 rounded-full flex items-center justify-center">
+              <CheckCircle size={18} className="text-green-600 dark:text-green-400" />
+            </div>
+            <p className="text-sm font-medium text-green-800 dark:text-green-300">
+              {successMsg}
+            </p>
+          </div>
+          <button 
+            onClick={() => setSuccessMsg("")}
+            className="text-green-500 hover:text-green-700 dark:hover:text-green-300 transition-colors"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
+      {/* TABLE */}
       <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -293,25 +380,20 @@ export default function VendorPaymentsPage() {
                 <th className="px-4 py-3 text-right">Amount (PKR)</th>
                 <th className="px-4 py-3">Method</th>
                 <th className="px-4 py-3 text-center">Status</th>
+                <th className="px-4 py-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y dark:divide-gray-700">
               {loading ? (
                 <tr>
-                  <td
-                    colSpan={5}
-                    className="px-4 py-12 text-center text-gray-400"
-                  >
+                  <td colSpan={6} className="px-4 py-12 text-center text-gray-400">
                     <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2" />
                     Loading...
                   </td>
                 </tr>
               ) : payments.length === 0 ? (
                 <tr>
-                  <td
-                    colSpan={5}
-                    className="px-4 py-16 text-center text-gray-400"
-                  >
+                  <td colSpan={6} className="px-4 py-16 text-center text-gray-400">
                     No payments yet.
                   </td>
                 </tr>
@@ -329,22 +411,49 @@ export default function VendorPaymentsPage() {
                         ? new Date(p.payment_date).toLocaleDateString()
                         : "N/A"}
                     </td>
-                    {/* ✅ FIX #8: Use amount instead of base_amount */}
                     <td className="px-4 py-3 text-right font-semibold">
                       {formatCurrency(p.amount)}
                     </td>
                     <td className="px-4 py-3 text-gray-500 text-xs">
-                      {p.payment_method?.replace(/_/g, " ")}
+                      {formatStatus(p.payment_method)}
                     </td>
                     <td className="px-4 py-3 text-center">
                       <span
                         className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
-                          STATUS_STYLES[p.status] ||
+                          STATUS_STYLES[p.status?.toUpperCase()] ||
                           "bg-gray-100 text-gray-700"
                         }`}
                       >
-                        {p.status?.replace(/_/g, " ")}
+                        {formatStatus(p.status)}
                       </span>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        {p.status?.toUpperCase() === "DRAFT" && (
+                          <button
+                            onClick={() => handleAction(p.id, "approve")}
+                            className="px-2 py-1 text-[10px] font-bold bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 rounded hover:bg-blue-200 dark:hover:bg-blue-900/50 transition-colors"
+                          >
+                            ✓ Approve
+                          </button>
+                        )}
+                        {p.status?.toUpperCase() === "APPROVED" && (
+                          <button
+                            onClick={() => handleAction(p.id, "post")}
+                            className="px-2 py-1 text-[10px] font-bold bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 rounded hover:bg-green-200 dark:hover:bg-green-900/50 transition-colors"
+                          >
+                            ⇒ Post
+                          </button>
+                        )}
+                        {["DRAFT", "APPROVED"].includes(p.status?.toUpperCase() || "") && (
+                          <button
+                            onClick={() => handleAction(p.id, "cancel", true)}
+                            className="px-2 py-1 text-[10px] font-bold bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 rounded hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -354,7 +463,7 @@ export default function VendorPaymentsPage() {
         </div>
       </div>
 
-      {/* ==================== PAYMENT ALLOCATION MODAL ==================== */}
+      {/* PAYMENT ALLOCATION MODAL */}
       {showModal && (
         <div
           className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
@@ -363,7 +472,6 @@ export default function VendorPaymentsPage() {
           }}
         >
           <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-2xl w-full max-w-3xl shadow-2xl max-h-[90vh] flex flex-col">
-            {/* Header */}
             <div className="p-5 border-b dark:border-gray-700 flex justify-between items-center shrink-0">
               <div className="flex items-center gap-2">
                 <CreditCard className="w-5 h-5 text-green-600" />
@@ -379,9 +487,7 @@ export default function VendorPaymentsPage() {
               </button>
             </div>
 
-            {/* Scrollable Body */}
             <div className="p-5 space-y-4 overflow-y-auto flex-1">
-              {/* Vendor + Amount + Method */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-gray-50 dark:bg-gray-900/30 p-4 rounded-lg">
                 <div className="md:col-span-1">
                   <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
@@ -436,7 +542,6 @@ export default function VendorPaymentsPage() {
                 </div>
               </div>
 
-              {/* Reference & Description */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
@@ -468,25 +573,19 @@ export default function VendorPaymentsPage() {
                 </div>
               </div>
 
-              {/* Unallocated Banner */}
               <div
                 className={`p-3 rounded-lg border-2 flex justify-between items-center transition-colors ${
                   !form.amount
                     ? "bg-gray-50 border-gray-200 text-gray-500"
                     : isBalanced
-                      ? "bg-green-50 border-green-200 text-green-700"
-                      : "bg-red-50 border-red-200 text-red-700"
+                    ? "bg-green-50 border-green-200 text-green-700"
+                    : "bg-red-50 border-red-200 text-red-700"
                 }`}
               >
-                <span className="text-sm font-medium">
-                  Unallocated Amount:
-                </span>
-                <span className="text-lg font-bold">
-                  {unallocated.toLocaleString()}
-                </span>
+                <span className="text-sm font-medium">Unallocated Amount:</span>
+                <span className="text-lg font-bold">{unallocated.toLocaleString()}</span>
               </div>
 
-              {/* Bills Allocation List */}
               <div className="space-y-2">
                 <h3 className="text-sm font-bold text-gray-700 dark:text-gray-300">
                   {form.vendor_id
@@ -512,7 +611,6 @@ export default function VendorPaymentsPage() {
                         <p className="text-sm font-medium text-gray-900 dark:text-white">
                           {bill.bill_number || "No Number"}
                         </p>
-                        {/* ✅ FIX #6: Removed JS comment from JSX */}
                         <p className="text-xs text-gray-500">
                           Due:{" "}
                           {bill.due_date
@@ -525,14 +623,11 @@ export default function VendorPaymentsPage() {
                           </span>
                         </p>
                       </div>
-                      {/* ✅ FIX #7: Removed toLocaleString() from max attribute */}
                       <input
                         type="number"
                         placeholder="0"
                         value={allocations[bill.id] || ""}
-                        onChange={(e) =>
-                          handleAllocate(bill.id, e.target.value)
-                        }
+                        onChange={(e) => handleAllocate(bill.id, e.target.value)}
                         className="w-32 p-2 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm text-right outline-none focus:ring-2 focus:ring-green-500"
                         max={bill.outstanding_amount}
                         min={0}
@@ -544,7 +639,6 @@ export default function VendorPaymentsPage() {
               </div>
             </div>
 
-            {/* Footer */}
             <div className="flex justify-end gap-3 p-5 border-t dark:border-gray-700 shrink-0 bg-white dark:bg-gray-800 rounded-b-2xl">
               <button
                 onClick={() => setShowModal(false)}
@@ -565,6 +659,15 @@ export default function VendorPaymentsPage() {
           </div>
         </div>
       )}
+
+      {/* REASON MODAL */}
+      <ReasonModal
+        open={reasonState.open}
+        title={reasonState.title}
+        description={`Are you sure you want to ${reasonState.action} this payment?`}
+        onConfirm={(reason: string) => processAction(reasonState.id, reasonState.action)}
+        onCancel={() => setReasonState({ open: false, title: "", action: "", id: "" })}
+      />
     </div>
   );
 }
