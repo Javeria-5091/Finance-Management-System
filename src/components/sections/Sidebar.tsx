@@ -24,12 +24,12 @@ import {
   Building2,
   ChevronDown,
   ChevronRight,
-  ArrowUpDown,
-  Table2,
-  List,
-  Landmark,
   ArrowLeftRight,
   Scale,
+  TrendingUp,
+  Calculator,
+  Shield,
+  Landmark,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -37,11 +37,11 @@ interface SidebarProps {
   onClose: () => void;
 }
 
-// ============================================================
-// STRICT PERMISSION MAPPING
-// Each item maps to a permission key checked via usePermissions()
-// null = always visible (e.g., Dashboard)
-// ============================================================
+/* ═══════════════════════════════════════════════════════
+   NAVIGATION STRUCTURE
+   Every group MUST have `id` — used for collapse/expand state
+   null permission = always visible (e.g., Dashboard)
+   ═══════════════════════════════════════════════════════ */
 const navGroups = [
   {
     id: "overview",
@@ -67,7 +67,6 @@ const navGroups = [
       { label: "Credit Notes", href: "/dashboard/credit-notes", icon: ArrowDownCircle, permission: "INCOME_READ" },
     ],
   },
-  // ✅ PHASE 6: BANKING & CASH — sits between Operations and Accounting
   {
     id: "banking",
     label: "Banking & Cash",
@@ -102,12 +101,42 @@ const navGroups = [
     ],
   },
   {
+    id: "tax-equity",           // ✅ FIXED: Added id here
+    label: "Tax & Equity",
+    items: [
+      {
+        href: "/dashboard/tax-equity/tax-configuration",
+        label: "Tax Configuration",
+        icon: Shield,
+        permission: "TAX_READ",
+      },
+      {
+        href: "/dashboard/tax-equity/tax-reconciliation",
+        label: "Tax Reconciliation",
+        icon: Calculator,
+        permission: "TAX_READ",
+      },
+      {
+        href: "/dashboard/tax-equity/profit-distribution",
+        label: "Profit Distribution",
+        icon: TrendingUp,
+        permission: "EQUITY_READ",
+      },
+      {
+        href: "/dashboard/settings/ownership-reserves",
+        label: "Ownership & Reserves",
+        icon: Users,
+        permission: "SETTINGS_READ",
+      },
+    ],
+  },
+  {
     id: "reports",
     label: "Reports",
     items: [
       { label: "All Reports", href: "/dashboard/reports", icon: BarChart3, permission: "REPORT_READ" },
-      { label: "Trial Balance", href: "/dashboard/reports/trial-balance", icon: Table2, permission: "REPORT_READ" },
-      { label: "General Ledger", href: "/dashboard/reports/general-ledger", icon: List, permission: "REPORT_READ" },
+      { label: "Trial Balance", href: "/dashboard/reports/trial-balance", icon: ScrollText, permission: " REPORT_READ" },
+      { label: "General Ledger", href: "/dashboard/reports/general-ledger", icon: FileText, permission: "REPORT_READ" },
     ],
   },
   {
@@ -123,10 +152,22 @@ const navGroups = [
     label: "Settings",
     items: [
       { label: "Organization", href: "/dashboard/settings/organization", icon: Building2, permission: "ADMIN_CONFIG" },
-      { label: "Exchange Rates", href: "/dashboard/settings/exchange-rates", icon: ArrowUpDown, permission: "ADMIN_CONFIG" },
+      { label: "Exchange Rates", href: "/dashboard/settings/exchange-rates", icon: Scale, permission: "ADMIN_CONFIG" },
+      { label: "Ownership & Reserves", href: "/dashboard/settings/ownership-reserves", icon: Users, permission: "SETTINGS_READ",
+      },
     ],
   },
 ];
+
+/* ═══════════════════════════════════════════════════════
+   TYPE GUARD — Ensures group.id always exists
+   ═══════════════════════════════════════════════════════ */
+type NavGroup = (typeof navGroups)[number];
+
+function getGroupId(group: NavGroup): string {
+  // Defense: if id is missing, generate from label
+  return (group as any).id || (group as any).label?.replace(/[^a-zA-Z]/g, '').toLowerCase() || 'unknown';
+}
 
 export default function Sidebar({ open, onClose }: SidebarProps) {
   const pathname = usePathname();
@@ -144,9 +185,8 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
     onClose();
   };
 
-  // ✅ Secure Filter: hide items user has no permission for
-  // When permissions are still loading, show everything to avoid blank flash
-  const filterItems = (items: typeof navGroups[0]["items"]) => {
+  // Filter items based on permission (show all while loading to avoid flash)
+  const filterItems = (items: NavGroup["items"]) => {
     if (permLoading) return items;
     return items.filter((item) => {
       if (!item.permission) return true;
@@ -166,12 +206,16 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
 
       <aside
         className={`fixed top-0 left-0 z-50 h-screen w-64 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transform transition-transform duration-300 lg:translate-x-0 lg:static lg:z-auto flex flex-col overflow-hidden ${
-          open ? "translate-x-0" : "-translate-x-full"
-        }`}
+            open ? "translate-x-0" : "-translate-x-full"
+          }`}
       >
         {/* ===== HEADER ===== */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-          <Link href="/dashboard" className="flex items-center gap-2.5">
+          <Link
+            href="/dashboard"
+            onClick={onClose}
+            className="flex items-center gap-2.5"
+          >
             <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
               <span className="text-white font-bold text-xs">O</span>
             </div>
@@ -210,13 +254,15 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
             const visibleItems = filterItems(group.items);
             if (visibleItems.length === 0) return null;
 
-            const isCollapsed = collapsedGroups[group.id];
+            // ✅ FIXED: Use getGroupId() — guaranteed string, never undefined
+            const groupId = getGroupId(group);
+            const isCollapsed = collapsedGroups[groupId];
 
             return (
-              <div key={group.id}>
+              <div key={groupId}>
                 {/* Group header — clickable to collapse/expand */}
                 <button
-                  onClick={() => toggleGroup(group.id)}
+                  onClick={() => toggleGroup(groupId)}
                   className="flex items-center justify-between w-full px-2 py-1 text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
                 >
                   <span>{group.label}</span>
@@ -227,7 +273,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
                   )}
                 </button>
 
-                {/* Group items */}
+                {/* Group items — only show if not collapsed */}
                 {!isCollapsed && (
                   <div className="mt-1 space-y-0.5">
                     {visibleItems.map((item) => {
