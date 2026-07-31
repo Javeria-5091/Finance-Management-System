@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { getPeriodByDate } from '@/types/services/fiscal-year.service'; 
+import { getPeriodByDate } from '../../../../services/fiscal-year.service'; 
 
 export async function POST(req: Request) {
   try {

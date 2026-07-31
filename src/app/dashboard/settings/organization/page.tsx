@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Building2, Save, Check } from 'lucide-react';
-import { getOrgConfig, updateOrgConfig } from '@/types/services/org-config.service';
+import { getOrgConfig, updateOrgConfig } from '../../../../services/org-config.service';
 import type { OrganizationConfig } from '@/types/accounting.types';
 
 const TIMEZONES = ['Asia/Karachi', 'Asia/Dubai', 'America/New_York', 'UTC'];

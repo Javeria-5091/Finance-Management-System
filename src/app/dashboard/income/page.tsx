@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
-import { usePermissions } from "@/hooks/usePermissions";
+import { usePermissions } from "@/context/PermissionContext";
 import { Income, IncomeFormData, Project } from "@/types";
 import IncomeForm from "@/components/sections/IncomeForm";
 import StatusActions from "@/components/finance/StatusActions";

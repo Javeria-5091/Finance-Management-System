@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { Ban, Link2, Unlink, Sparkles, Copy } from 'lucide-react';
 import { useExcludeLine, useUnmatchLine, useDetectDuplicates } from '@/hooks/useBanking';
 import ReasonModal from '@/components/finance/ReasonModal';
-import type { StatementLine } from '@/types/services/bank.service';
+import type { StatementLine } from '../../services/bank.service';
 
 const STATUS_STYLES: Record<string, string> = {
   UNRECONCILED: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400',

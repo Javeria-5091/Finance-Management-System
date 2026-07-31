@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { usePermissions } from '@/hooks/usePermissions';
+import { usePermissions } from "@/context/PermissionContext";
 import {
   useTaxpayerProfile,
   useUpdateTaxpayerProfile,
@@ -238,7 +238,7 @@ export default function TaxConfigurationPage() {
         if (slabError) throw new Error('Failed to save slabs: ' + slabError.message);
       }
 
-      // ✅ Refetch rule sets so new entry appears immediately
+      //  Refetch rule sets so new entry appears immediately
       refetchRuleSets();
 
       setShowRuleModal(false);
@@ -286,7 +286,7 @@ export default function TaxConfigurationPage() {
       { id: rsId, status: 'APPROVED', userId: user?.id },
       {
         onSuccess: () => {
-          // ✅ Refetch to update status from DRAFT → APPROVED
+          //  Refetch to update status from DRAFT → APPROVED
           refetchRuleSets();
           showToast('Rule set approved successfully');
         },
@@ -303,7 +303,7 @@ export default function TaxConfigurationPage() {
       { id: rsId, status: 'LOCKED', userId: user?.id },
       {
         onSuccess: () => {
-          // ✅ Refetch to update status from APPROVED → LOCKED
+          //  Refetch to update status from APPROVED → LOCKED
           refetchRuleSets();
           showToast('Rule set locked — now usable in tax reconciliation');
         },

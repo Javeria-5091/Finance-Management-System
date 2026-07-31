@@ -4,7 +4,7 @@ import { Plus, ChevronDown, ChevronRight, X, Search } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAccounts } from "@/hooks/useAccounts"; 
 import { useFiscalPeriod } from "@/hooks/useFiscalPeriod"; 
-import { usePermissions } from "@/hooks/usePermissions"; 
+import { usePermissions } from "@/context/PermissionContext"; 
 
 export default function JournalEntriesPage() {
   

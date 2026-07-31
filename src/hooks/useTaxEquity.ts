@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import * as svc from '@/types/services/tax-equity.service';
+import * as svc from '../services/tax-equity.service';
 
 // ===== TAX PROFILE =====
 export const useTaxpayerProfile = () => useQuery({

@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
-import { usePermissions } from "@/hooks/usePermissions";
+import { usePermissions } from "@/context/PermissionContext";
 import { Plus, Pencil, Building2, Trash2, X, Loader2, Search } from "lucide-react";
 import ReasonModal from "@/components/finance/ReasonModal";
 

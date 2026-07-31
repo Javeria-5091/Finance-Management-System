@@ -59,7 +59,7 @@ export default function ReceivableAgingPage() {
             {loading ? (
               <tr><td colSpan={7} className="text-center py-10 text-gray-400">Calculating aging...</td></tr>
             ) : agingData.length === 0 ? (
-              <tr><td colSpan={7} className="text-center py-10 text-gray-400">No outstanding receivables! 🎉</td></tr>
+              <tr><td colSpan={7} className="text-center py-10 text-gray-400">No outstanding receivables! </td></tr>
             ) : (
               agingData.map(row => (
                 <tr key={row.invoice_id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">

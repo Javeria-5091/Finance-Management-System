@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Download, FileText } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
-import { usePermissions } from '@/hooks/usePermissions'; 
+import { usePermissions } from "@/context/PermissionContext"; 
 import type { TrialBalanceRow, AccountingPeriod, FiscalYearSummary } from '@/types/accounting.types';
 
 export default function TrialBalancePage() {

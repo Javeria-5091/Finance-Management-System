@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { usePermissions } from '@/hooks/usePermissions';
+import { usePermissions } from "@/context/PermissionContext";
 import { useFinancialAccounts, useBankStatements, useStatementLines, useAutoMatch } from '@/hooks/useBanking';
 import ReconciliationTable from '@/components/banking/ReconciliationTable';
 import StatementImport from '@/components/banking/StatementImport';

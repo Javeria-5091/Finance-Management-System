@@ -1,14 +1,18 @@
+// app/(dashboard)/finance/fiscal-calendar/page.tsx
+
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
 import {
   Plus, Calendar, Lock, Unlock, AlertTriangle, X,
   ChevronDown, ChevronUp, AlertCircle, CheckCircle2, ShieldCheck, Sparkles,
+  Play, Clock, 
 } from 'lucide-react';
 import {
   getFiscalYears, getPeriods, createFiscalYear,
-  closePeriod, reopenPeriod, softCloseFiscalYear, hardCloseFiscalYear,
-} from '@/types/services/fiscal-year.service';
+  closePeriod, reopenPeriod, openPeriod, 
+  softCloseFiscalYear, hardCloseFiscalYear,
+} from '../../../../services/fiscal-year.service';
 import type { FiscalYearSummary, AccountingPeriod, CreateFiscalYearInput } from '@/types/accounting.types';
 
 /* ═══════ UTILITIES ═══════ */
@@ -26,7 +30,8 @@ const parseError = (err: unknown): string => {
     [/overlapping|overlaps/, 'Overlaps with an existing fiscal year.'],
     [/already_closed/, 'Already closed.'], [/already_open/, 'Already open.'],
     [/cannot_reopen_hard/, 'Hard closed periods cannot be reopened.'],
-    [/has_unclosed_periods/, 'Close all periods first.'],
+    [/not in PENDING status/, 'Only pending periods can be opened.'],
+    [/has_unclosed_periods/, 'Close all periods first (including pending ones).'],
     [/fy_already_closed/, 'Fiscal year is already closed.'],
     [/permission|unauthorized|forbidden/i, 'No permission for this action.'],
     [/network|failed to fetch/i, 'Network error. Check connection.'],
@@ -36,7 +41,6 @@ const parseError = (err: unknown): string => {
     ? m[0].toUpperCase() + m.slice(1) : 'An unexpected error occurred.';
 };
 
-// Auto-suggest name from dates: "FY 2028" or "FY 2028-29", with duplicate handling
 const suggestName = (start: string, end: string, existing: string[]): string => {
   if (!start || !end) return '';
   const sy = new Date(start).getFullYear(), ey = new Date(end).getFullYear();
@@ -53,8 +57,11 @@ const inputCls = (err?: string) => cn(
 );
 
 /* ═══════ SMALL COMPONENTS ═══════ */
+
+// UPDATED: Added PENDING status
 const Badge = ({ status }: { status: string }) => {
   const map: Record<string, { bg: string; tx: string; dot: string; l: string }> = {
+    PENDING:      { bg: 'bg-gray-100 dark:bg-gray-700/50', tx: 'text-gray-600 dark:text-gray-400', dot: 'bg-gray-400', l: 'Pending' },
     OPEN:         { bg: 'bg-emerald-50 dark:bg-emerald-900/20', tx: 'text-emerald-700 dark:text-emerald-400', dot: 'bg-emerald-500', l: 'Open' },
     SOFT_CLOSED:  { bg: 'bg-amber-50 dark:bg-amber-900/20',   tx: 'text-amber-700 dark:text-amber-400',   dot: 'bg-amber-500',   l: 'Soft Closed' },
     HARD_CLOSED:  { bg: 'bg-red-50 dark:bg-red-900/20',       tx: 'text-red-700 dark:text-red-400',       dot: 'bg-red-500',     l: 'Hard Closed' },
@@ -78,7 +85,6 @@ const Field = ({ label, req, err, children }: { label: string; req?: boolean; er
   </div>
 );
 
-// Reusable modal shell — eliminates ~120 lines of repeated HTML
 const Modal = ({ open, onClose, error, onClearError, children, footer }: {
   open: boolean; onClose: () => void; error?: string | null;
   onClearError?: () => void; children: React.ReactNode; footer?: React.ReactNode;
@@ -153,6 +159,11 @@ export default function FiscalCalendarPage() {
   const [cfyReason, setCfyReason] = useState('');
   const [cfyErr, setCfyErr] = useState<string | null>(null);
 
+  //  NEW: Open period modal
+  const [showOpen, setShowOpen] = useState(false);
+  const [openTgt, setOpenTgt] = useState<{ id: string; name: string; fyId: string } | null>(null);
+  const [openErr, setOpenErr] = useState<string | null>(null);
+
   const toast = (type: 'success' | 'error', msg: string) => {
     const id = Date.now() + '' + Math.random();
     setToasts(p => [...p, { id, type, msg }]);
@@ -172,14 +183,14 @@ export default function FiscalCalendarPage() {
 
   useEffect(() => { loadFYs(); }, []);
 
-const loadPeriods = async (fyId: string) => {
-  if (pMap[fyId]) return;
-  try {
-    const data = await getPeriods(fyId); 
-    setPMap(p => ({ ...p, [fyId]: data })); 
-  }
-  catch (e) { toast('error', `Periods: ${parseError(e)}`); }
-};
+  const loadPeriods = async (fyId: string) => {
+    if (pMap[fyId]) return;
+    try {
+      const data = await getPeriods(fyId); 
+      setPMap(p => ({ ...p, [fyId]: data })); 
+    }
+    catch (e) { toast('error', `Periods: ${parseError(e)}`); }
+  };
 
   const toggleFY = (fyId: string) => setExp(p => {
     const n = new Set(p); n.has(fyId) ? n.delete(fyId) : (n.add(fyId), loadPeriods(fyId)); return n;
@@ -213,20 +224,26 @@ const loadPeriods = async (fyId: string) => {
   };
 
   /* ─── Actions ─── */
-  const handleCreate = async () => {
+    const handleCreate = async () => {
     if (!validate()) return;
     try {
       setSaving(true); setCErr(null);
       const name = form.name;
+      const monthCount = form.start_date && form.end_date
+        ? (() => {
+            const s = new Date(form.start_date), d = new Date(form.end_date);
+            return (d.getFullYear() - s.getFullYear()) * 12 + d.getMonth() - s.getMonth() + 1;
+          })()
+        : 0;
+
       await createFiscalYear(form);
       setShowCreate(false);
       setForm({ name: '', start_date: '', end_date: '', description: '' });
       setFErrs({}); nameEdited.current = false;
-      toast('success', `"${name}" created successfully.`);
+      toast('success', `"${name}" created with ${monthCount} pending periods.`);
       await loadFYs();
     } catch (e) { setCErr(parseError(e)); } finally { setSaving(false); }
   };
-
   const handleClosePeriod = async () => {
     if (!cpTgt || !cpReason.trim()) return;
     try {
@@ -249,6 +266,19 @@ const loadPeriods = async (fyId: string) => {
       toast('success', `"${roTgt.name}" reopened.`);
       await loadFYs();
     } catch (e) { setRoErr(parseError(e)); } finally { setSaving(false); }
+  };
+
+  //  NEW: Open period handler
+  const handleOpenPeriod = async () => {
+    if (!openTgt) return;
+    try {
+      setSaving(true); setOpenErr(null);
+      await openPeriod({ period_id: openTgt.id });
+      setPMap(p => { const n = { ...p }; delete n[openTgt.fyId]; return n; });
+      setShowOpen(false);
+      toast('success', `"${openTgt.name}" is now open for entries.`);
+      await loadFYs();
+    } catch (e) { setOpenErr(parseError(e)); } finally { setSaving(false); }
   };
 
   const handleCloseFY = async () => {
@@ -286,6 +316,15 @@ const loadPeriods = async (fyId: string) => {
         </button>
       </div>
 
+      {/* Info Banner */}
+      <div className="mb-6 flex items-start gap-3 p-4 bg-blue-50 dark:bg-blue-900/15 border border-blue-200 dark:border-blue-800/60 rounded-lg">
+        <Sparkles className="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5" />
+        <div className="text-sm text-blue-700 dark:text-blue-300">
+          <strong>New:</strong> Periods are now created with <span className="font-semibold">Pending</span> status. 
+          Open them individually when ready to accept entries.
+        </div>
+      </div>
+
       {/* List */}
       {loading ? (
         <div className="flex flex-col items-center justify-center py-20 gap-3">
@@ -316,9 +355,11 @@ const loadPeriods = async (fyId: string) => {
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
+                    {/*  UPDATED: Show pending count */}
                     <div className="text-xs text-gray-500 dark:text-gray-400 hidden sm:block">
-                      <span className="text-emerald-600 dark:text-emerald-400 font-medium">{fy.open_periods} open</span> /{' '}
-                      <span className="text-amber-600 dark:text-amber-400">{fy.soft_closed_periods} soft</span> /{' '}
+                      <span className="text-gray-500 dark:text-gray-400 font-medium">{fy.pending_periods} pending</span>{' / '}
+                      <span className="text-emerald-600 dark:text-emerald-400 font-medium">{fy.open_periods} open</span>{' / '}
+                      <span className="text-amber-600 dark:text-amber-400">{fy.soft_closed_periods} soft</span>{' / '}
                       <span className="text-red-600 dark:text-red-400">{fy.hard_closed_periods} hard</span>
                     </div>
                     <Badge status={fy.status} />
@@ -326,11 +367,11 @@ const loadPeriods = async (fyId: string) => {
                       <div className="flex items-center gap-1.5 ml-2" onClick={e => e.stopPropagation()}>
                         <button onClick={() => { setCfyTgt({ id: fy.id, name: fy.name }); setCfyType('soft'); setCfyReason(''); setCfyErr(null); setShowCFY(true); }}
                           className={btnCls('bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400 border-amber-200 dark:border-amber-800/40 hover:bg-amber-100 dark:hover:bg-amber-900/40')}>
-                          <Lock className="w-3 h-3 inline mr-1" />Soft Close
+                          <Lock className="w-3 h-3 inline mr-1" />Soft
                         </button>
                         <button onClick={() => { setCfyTgt({ id: fy.id, name: fy.name }); setCfyType('hard'); setCfyReason(''); setCfyErr(null); setShowCFY(true); }}
                           className={btnCls('bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400 border-red-200 dark:border-red-800/40 hover:bg-red-100 dark:hover:bg-red-900/40')}>
-                          <ShieldCheck className="w-3 h-3 inline mr-1" />Hard Close
+                          <ShieldCheck className="w-3 h-3 inline mr-1" />Hard
                         </button>
                       </div>
                     )}
@@ -353,13 +394,21 @@ const loadPeriods = async (fyId: string) => {
                         {!per.length ? (
                           <tr><td colSpan={5} className="text-center py-10 text-gray-400 dark:text-gray-500"><Spin cls="w-5 h-5 mx-auto mb-2" />Loading periods...</td></tr>
                         ) : per.map(p => (
-                          <tr key={p.id} className="border-t border-gray-100 dark:border-gray-700/50 hover:bg-gray-50/50 dark:hover:bg-gray-700/20 bg-white dark:bg-gray-800 transition-colors">
+                          <tr key={p.id} className={`border-t border-gray-100 dark:border-gray-700/50 hover:bg-gray-50/50 dark:hover:bg-gray-700/20 transition-colors
+                            ${p.status === 'PENDING' ? 'bg-gray-50/30 dark:bg-gray-900/20' : 'bg-white dark:bg-gray-800'}`}>
                             <td className="px-4 py-3 text-sm font-medium text-gray-600 dark:text-gray-300">{p.period_number}</td>
                             <td className="px-4 py-3 text-sm text-gray-900 dark:text-white font-medium">{p.name}</td>
                             <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 hidden md:table-cell">{fmtDate(p.start_date, 'short')} – {fmtDate(p.end_date, 'short')}</td>
                             <td className="px-4 py-3"><Badge status={p.status} /></td>
                             <td className="px-4 py-3 text-right">
-                              {p.status === 'OPEN' ? (
+                              {/*  UPDATED: Handle PENDING status */}
+                              {p.status === 'PENDING' ? (
+                                <button 
+                                  onClick={() => { setOpenTgt({ id: p.id, name: p.name, fyId: fy.id }); setOpenErr(null); setShowOpen(true); }}
+                                  className={btnCls('bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-400 border-blue-200 dark:border-blue-800/40 hover:bg-blue-100 dark:hover:bg-blue-900/40')}>
+                                  <Play className="w-3 h-3 inline mr-1" />Open
+                                </button>
+                              ) : p.status === 'OPEN' ? (
                                 <div className="flex items-center justify-end gap-1.5">
                                   <button onClick={() => { setCpTgt({ id: p.id, name: p.name, fyId: fy.id }); setCpType('SOFT_CLOSED'); setCpReason(''); setCpErr(null); setShowCP(true); }}
                                     className={btnCls('bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-400 border-amber-200 dark:border-amber-800/40 hover:bg-amber-100 dark:hover:bg-amber-900/40')}>
@@ -419,7 +468,7 @@ const loadPeriods = async (fyId: string) => {
           </>
         }>
         <ModalHeader icon={<div className="p-2 rounded-lg bg-blue-50 dark:bg-blue-900/20"><Plus className="w-5 h-5 text-blue-600 dark:text-blue-400" /></div>}
-          title="Create Fiscal Year" subtitle="Define date range — name auto-suggests" onClose={() => setShowCreate(false)} />
+          title="Create Fiscal Year" subtitle="Periods will be created as Pending" onClose={() => setShowCreate(false)} />
 
         <Field label="Fiscal Year Name" req err={fErrs.name}>
           <div className="relative">
@@ -450,7 +499,7 @@ const loadPeriods = async (fyId: string) => {
         })() >= 1 && (
           <div className="flex items-center gap-2.5 p-3 bg-blue-50 dark:bg-blue-900/15 border border-blue-200 dark:border-blue-800/60 rounded-lg text-sm text-blue-700 dark:text-blue-400">
             <Calendar className="w-4 h-4 flex-shrink-0" />
-            <span>Duration: <strong>{(() => { const s = new Date(form.start_date), d = new Date(form.end_date); const m = (d.getFullYear() - s.getFullYear()) * 12 + d.getMonth() - s.getMonth(); return `${m} month${m > 1 ? 's' : ''}`; })()}</strong> → {(() => { const s = new Date(form.start_date), d = new Date(form.end_date); const m = (d.getFullYear() - s.getFullYear()) * 12 + d.getMonth() - s.getMonth(); return `${m} period${m > 1 ? 's' : ''}`; })()} will be created</span>
+            <span>Duration: <strong>{(() => { const s = new Date(form.start_date), d = new Date(form.end_date); const m = (d.getFullYear() - s.getFullYear()) * 12 + d.getMonth() - s.getMonth() + 1; return `${m} month${m > 1 ? 's' : ''}`; })()}</strong> → All periods will be <strong>Pending</strong></span>
           </div>
         )}
 
@@ -458,6 +507,33 @@ const loadPeriods = async (fyId: string) => {
           <textarea value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} rows={2}
             className={inputCls()} placeholder="Optional..." />
         </Field>
+      </Modal>
+
+      {/* ═══  NEW: OPEN PERIOD MODAL ═══ */}
+      <Modal open={showOpen} onClose={() => setShowOpen(false)} error={openErr} onClearError={() => setOpenErr(null)}
+        footer={
+          <>
+            <button onClick={() => setShowOpen(false)} className="px-4 py-2.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">Cancel</button>
+            <button onClick={handleOpenPeriod} disabled={saving}
+              className="px-5 py-2.5 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm flex items-center gap-2">
+              {saving ? <><Spin />Opening...</> : <><Play className="w-4 h-4" />Open Period</>}
+            </button>
+          </>
+        }>
+        <ModalHeader
+          icon={<div className="p-2 rounded-lg bg-blue-50 dark:bg-blue-900/20"><Play className="w-5 h-5 text-blue-600 dark:text-blue-400" /></div>}
+          title="Open Period" subtitle="Allow journal entries in this period"
+          onClose={() => setShowOpen(false)} />
+
+        <div className="p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
+          <p className="text-sm text-gray-600 dark:text-gray-300">You are about to open:</p>
+          <p className="text-base font-semibold text-gray-900 dark:text-white mt-1">&quot;{openTgt?.name}&quot;</p>
+        </div>
+
+        <div className="flex items-start gap-2.5 p-3 bg-blue-50 dark:bg-blue-900/15 border border-blue-200 dark:border-blue-800/60 rounded-lg">
+          <AlertCircle className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
+          <p className="text-sm text-blue-700 dark:text-blue-400">Once opened, this period will accept journal entries until it is closed.</p>
+        </div>
       </Modal>
 
       {/* ═══ CLOSE PERIOD MODAL ═══ */}
@@ -562,8 +638,8 @@ const loadPeriods = async (fyId: string) => {
           <p className={`text-sm ${cfyType === 'hard' ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400'}`}>
             <strong>{cfyType === 'hard' ? 'Critical:' : 'Note:'}</strong>{' '}
             {cfyType === 'hard'
-              ? 'This is permanent. All periods must be closed first. Cannot be undone.'
-              : 'All periods must be closed before soft closing the year.'}
+              ? 'This is permanent. All periods (including pending) must be closed first.'
+              : 'All periods (including pending) must be closed before soft closing the year.'}
           </p>
         </div>
 

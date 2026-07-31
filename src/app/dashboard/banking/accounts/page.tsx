@@ -1,7 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { usePermissions } from '@/hooks/usePermissions';
+import { usePermissions } from "@/context/PermissionContext";
 import { useFinancialAccounts, useReconciliationSummary, useAssetAccounts, useCreateAccount } from '@/hooks/useBanking';
 import AccountCard from '@/components/banking/AccountCard';
 import ReasonModal from '@/components/finance/ReasonModal';
@@ -90,7 +90,7 @@ export default function AccountsPage() {
   setForm((prev) => {
     const next = { ...prev, [field]: value };
     if (field === 'institution_type') {
-      // ✅ "as keyof typeof ACCOUNT_TYPES" lagao
+      //  "as keyof typeof ACCOUNT_TYPES" lagao
       const types = ACCOUNT_TYPES[value as keyof typeof ACCOUNT_TYPES] || ['CURRENT' as const];
       next.account_type = types[0];
     }

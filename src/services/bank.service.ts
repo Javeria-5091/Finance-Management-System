@@ -1,6 +1,6 @@
 import { supabase } from '@/lib/supabase';
 
-// ✅ Finance schema reference
+//  Finance schema reference
 const db = supabase.schema('finance');
 const rpt = supabase.schema('reporting');
 

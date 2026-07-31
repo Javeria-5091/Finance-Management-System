@@ -1,6 +1,6 @@
 'use client';
 import { Building2, Wallet, CreditCard, Landmark, Banknote, Layers } from 'lucide-react';
-import type { ReconciliationSummary } from '@/types/services/bank.service';
+import type { ReconciliationSummary } from '../../services/bank.service';
 
 const getIcon = (type: string) => {
   switch (type) {

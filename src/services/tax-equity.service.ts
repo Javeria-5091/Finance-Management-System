@@ -95,12 +95,13 @@ export interface TaxAdjustment {
   updated_at: string | null;
 }
 
-// ✅ FIXED: Matched to your SQL — contact_info instead of separate fields
+//  FIXED: Matched to your SQL — contact_info instead of separate fields
 export interface Owner {
   id: string;
   name: string;
   partner_class: string | null;
-  contact_info: string | null;
+  cnic_number?: string | null;      
+  contact_info?: string | null;
   status: 'ACTIVE' | 'INACTIVE' | 'EXITED';
   notes: string | null;
   created_at: string;
@@ -121,7 +122,7 @@ export interface OwnershipHistory {
   owners?: { name: string };
 }
 
-// ✅ FIXED: Removed 'notes' — not in your SQL
+//  FIXED: Removed 'notes' — not in your SQL
 export interface ReservePolicy {
   id: string;
   policy_type: string;
@@ -135,7 +136,7 @@ export interface ReservePolicy {
   updated_at: string | null;
 }
 
-// ✅ FIXED: Removed reserve_policy_id, cancellation_reason — not in your SQL
+//  FIXED: Removed reserve_policy_id, cancellation_reason — not in your SQL
 export interface ProfitDistribution {
   id: string;
   fiscal_year_id: string;
@@ -158,7 +159,7 @@ export interface ProfitDistribution {
   lines?: DistributionLine[];
 }
 
-// ✅ FIXED: overridden_amount + final_amount + no override_reason + CANCELLED instead of PARTIALLY_PAID
+//  FIXED: overridden_amount + final_amount + no override_reason + CANCELLED instead of PARTIALLY_PAID
 export interface DistributionLine {
   id: string;
   profit_distribution_id: string;

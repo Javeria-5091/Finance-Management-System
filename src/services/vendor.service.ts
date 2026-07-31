@@ -13,12 +13,12 @@ export const vendorService = {
   }) {
     let query = db.from('vendors').select('*', { count: 'exact' });
 
-    // ✅ is_active is boolean, not status enum
+    //  is_active is boolean, not status enum
     if (filters?.is_active !== undefined) {
       query = query.eq('is_active', filters.is_active);
     }
     
-    // ✅ Use actual DB columns for search
+    //  Use actual DB columns for search
     if (filters?.search) {
       query = query.or(`name.ilike.%${filters.search}%,vendor_code.ilike.%${filters.search}%,tax_registration.ilike.%${filters.search}%,email.ilike.%${filters.search}%`);
     }

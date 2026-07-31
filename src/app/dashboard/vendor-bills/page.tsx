@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
-import { usePermissions } from "@/hooks/usePermissions";
+import { usePermissions } from "@/context/PermissionContext";
 import { FileText, Plus, Pencil, Eye, X, Loader2 } from "lucide-react";
 import LineItemsEditor from "@/components/finance/LineItemsEditor";
 import StatusActions from "@/components/finance/StatusActions";

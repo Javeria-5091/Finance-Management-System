@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { usePermissions } from '@/hooks/usePermissions';
+import { usePermissions } from "@/context/PermissionContext";
 import {
   useProfitDistributions,
   useProfitDistributionDetail,

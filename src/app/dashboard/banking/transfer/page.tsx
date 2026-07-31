@@ -1,12 +1,12 @@
 'use client';
 import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { usePermissions } from '@/hooks/usePermissions';
+import { usePermissions } from "@/context/PermissionContext";
 import { useBankTransfers, useFinancialAccounts, useCreateTransfer, useUpdateTransferStatus, usePostTransfer, useOpenPeriod } from '@/hooks/useBanking';
 import StatusActions from '@/components/finance/StatusActions';
 import ReasonModal from '@/components/finance/ReasonModal';
 import { Plus, ArrowLeftRight, Loader2, X, ShieldCheck } from 'lucide-react';
-import type { BankTransfer } from '@/types/services/bank.service';
+import type { BankTransfer } from '../../../../services/bank.service';
 
 const STATUS_STYLES: Record<string, string> = {
   DRAFT: 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300',

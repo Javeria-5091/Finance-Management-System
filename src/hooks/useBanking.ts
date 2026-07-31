@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import * as bankService from '@/types/services/bank.service';
+import * as bankService from '../services/bank.service';
 
 // ==================== ACCOUNTS ====================
 

@@ -83,11 +83,15 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
           </button> 
           <h1 className={`text-lg font-semibold ${isDark ? "text-white" : "text-gray-900"}`}>{title}</h1>
           
-          {/*  FISCAL PERIOD INDICATOR BADGE */}
+          {/* FISCAL PERIOD INDICATOR BADGE - UPDATED */}
           <div className={`hidden md:flex items-center gap-2 ml-4 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
-            currentPeriod?.period_status === 'OPEN' 
-              ? (isDark ? "border-green-500/30 bg-green-500/10 text-green-400" : "border-green-200 bg-green-50 text-green-700")
-              : (isDark ? "border-red-500/30 bg-red-500/10 text-red-400" : "border-red-200 bg-red-50 text-red-700")
+            !currentPeriod
+              ? (isDark ? "border-red-500/30 bg-red-500/10 text-red-400" : "border-red-200 bg-red-50 text-red-700")
+              : currentPeriod.period_status === 'OPEN'
+                ? (isDark ? "border-green-500/30 bg-green-500/10 text-green-400" : "border-green-200 bg-green-50 text-green-700")
+                : currentPeriod.period_status === 'PENDING'
+                  ? (isDark ? "border-amber-500/30 bg-amber-500/10 text-amber-400" : "border-amber-200 bg-amber-50 text-amber-700")
+                  : (isDark ? "border-red-500/30 bg-red-500/10 text-red-400" : "border-red-200 bg-red-50 text-red-700")
           }`}>
             <CalendarDays size={14} />
             {periodLoading ? (
@@ -95,12 +99,23 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
             ) : currentPeriod ? (
               <>
                 <span>{currentPeriod.period_name}</span>
-                <span className={`w-2 h-2 rounded-full ${currentPeriod.period_status === 'OPEN' ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
+                {currentPeriod.period_status === 'OPEN' && (
+                  <span className="w-2 h-2 rounded-full bg-green-500" />
+                )}
+                {currentPeriod.period_status === 'PENDING' && (
+                  <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                )}
+                {currentPeriod.period_status !== 'OPEN' && currentPeriod.period_status !== 'PENDING' && (
+                  <span className="w-2 h-2 rounded-full bg-red-500" />
+                )}
+                {currentPeriod.period_status === 'PENDING' && (
+                  <span className="text-[10px] opacity-75">(not open)</span>
+                )}
               </>
             ) : (
               <div className="flex items-center gap-1">
                 <AlertTriangle size={12} />
-                <span>No Open Period</span>
+                <span>No Period Found</span>
               </div>
             )}
           </div>

@@ -1,7 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { usePermissions } from '@/hooks/usePermissions';
+import { usePermissions } from "@/context/PermissionContext";
 import { useOwners, useCreateOwner, useOwnershipHistory, useAddOwnershipEntry, useReservePolicies, useCreateReservePolicy, useUpdateReservePolicy } from '@/hooks/useTaxEquity';
 import ReasonModal from '@/components/finance/ReasonModal';
 import { Users, Shield, History, Plus, Loader2, AlertCircle } from 'lucide-react';
@@ -27,7 +27,7 @@ export default function OwnershipReservesPage() {
   const { data: owners, isLoading: loadingOwners } = useOwners();
   const createOwner = useCreateOwner();
   const [showOwnerModal, setShowOwnerModal] = useState(false);
-  // ✅ FIXED: contact_info instead of contact_email/contact_phone
+  //  FIXED: contact_info instead of contact_email/contact_phone
   const [ownerForm, setOwnerForm] = useState({ name: '', partner_class: '', cnic_number: '', contact_info: '' });
 
   const { data: history, isLoading: loadingHistory } = useOwnershipHistory();
@@ -179,7 +179,7 @@ export default function OwnershipReservesPage() {
               <div><label className={labelCls}>Partner Class</label><input value={ownerForm.partner_class} onChange={e => setOwnerForm(p => ({ ...p, partner_class: e.target.value }))} className={inputCls} placeholder="e.g., FOUNDING_PARTNER" /></div>
               <div><label className={labelCls}>CNIC</label><input value={ownerForm.cnic_number} onChange={e => setOwnerForm(p => ({ ...p, cnic_number: e.target.value }))} className={`${inputCls} font-mono`} /></div>
             </div>
-            {/* ✅ FIXED: contact_info instead of separate fields */}
+            {/*  FIXED: contact_info instead of separate fields */}
             <div><label className={labelCls}>Contact Info</label><input value={ownerForm.contact_info} onChange={e => setOwnerForm(p => ({ ...p, contact_info: e.target.value }))} className={inputCls} placeholder="Email, phone, or any contact info" /></div>
             <div className="flex justify-end gap-3"><button onClick={() => setShowOwnerModal(false)} className="px-4 py-2.5 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-white rounded-xl text-sm">Cancel</button><button onClick={handleCreateOwner} disabled={createOwner.isPending} className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm disabled:opacity-50">{createOwner.isPending ? 'Saving...' : 'Add Owner'}</button></div>
           </div>

@@ -13,8 +13,8 @@ import {
   AlertTriangle,
   X,
 } from 'lucide-react';
-import { getCOATree, getPostableAccounts, createAccount, updateAccount, deactivateAccount, reactivateAccount } from '@/types/services/coa.service';
-import { getParentAccounts } from '@/types/services/coa.service';
+import { getCOATree, getPostableAccounts, createAccount, updateAccount, deactivateAccount, reactivateAccount } from '../../../../services/coa.service';
+import { getParentAccounts } from '../../../../services/coa.service';
 import type { ChartOfAccountTree, AccountType, NormalBalance, CreateAccountInput } from '@/types/accounting.types';
 
 // ==========================================
