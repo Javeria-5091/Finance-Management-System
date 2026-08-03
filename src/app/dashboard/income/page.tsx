@@ -9,6 +9,7 @@ import StatusActions from "@/components/finance/StatusActions";
 import ReasonModal from "@/components/finance/ReasonModal";
 import { Plus, AlertTriangle } from "lucide-react";
 import { logAction } from "@/lib/logAction";
+import toast from "react-hot-toast";
 
 const STATUS_STYLES: Record<string, string> = {
   DRAFT: "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
@@ -41,26 +42,41 @@ export default function IncomePage() {
 
   const fetchIncomes = useCallback(async () => {
     if (!user) return;
-    const { data } = await supabase.from("incomes").select("*").order("income_date", { ascending: false });
-    if (data) setIncomes(data);
+    const { data, error } = await supabase.from("incomes").select("*").order("income_date", { ascending: false });
+    if (error) toast.error("Failed to load incomes: " + error.message);
+    else setIncomes(data || []);
     setLoading(false);
   }, [user]);
 
   const fetchProjects = useCallback(async () => {
     if (!user) return;
-    const { data } = await supabase.from("projects").select("*");
-    if (data) setProjects(data);
+    const { data, error } = await supabase.from("projects").select("*");
+    if (error) toast.error("Failed to load projects: " + error.message);
+    else setProjects(data || []);
   }, [user]);
 
   useEffect(() => { fetchIncomes(); fetchProjects(); }, [fetchIncomes, fetchProjects]);
 
   async function handleSubmit(data: IncomeFormData) {
-    if (editingData) {
-      await supabase.from("incomes").update(data).eq("id", editingData.id);
-    } else {
-      await supabase.from("incomes").insert({ ...data, user_id: user?.id, status: "DRAFT" });
+    try {
+      let error;
+      if (editingData) {
+        const res = await supabase.from("incomes").update(data).eq("id", editingData.id);
+        error = res.error;
+      } else {
+        const res = await supabase.from("incomes").insert({ ...data, user_id: user?.id, status: "DRAFT" });
+        error = res.error;
+      }
+
+      if (error) {
+        toast.error("Failed to save income: " + error.message);
+      } else {
+        toast.success(editingData ? "Income updated" : "Income created");
+        setShowForm(false); setEditingData(null); fetchIncomes();
+      }
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown error"));
     }
-    setShowForm(false); setEditingData(null); fetchIncomes();
   }
 
   // MASTER ACTION HANDLER (Handles everything from StatusActions)
@@ -84,37 +100,69 @@ export default function IncomePage() {
       return;
     }
 
-    if (action === "post") {
-      await fetch('/api/finance/post-income', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ incomeId: selectedInc.id, action: 'POST' })
-      });
-    } else {
-      const updateData: any = { status: action.toUpperCase() === "REOPEN" ? "DRAFT" : action.toUpperCase() };
-      if (action.toUpperCase() === "REJECT" || action.toUpperCase() === "REVERSE") {
-        updateData.rejection_reason = "Pending";
+    try {
+      if (action === "post") {
+        const res = await fetch('/api/finance/post-income', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ incomeId: selectedInc.id, action: 'POST' })
+        });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          toast.error("Posting failed: " + (errData.error || res.statusText));
+          return;
+        }
+        toast.success("Income posted to General Ledger");
+      } else {
+        const updateData: any = { status: action.toUpperCase() === "REOPEN" ? "DRAFT" : action.toUpperCase() };
+        if (action.toUpperCase() === "REJECT" || action.toUpperCase() === "REVERSE") {
+          updateData.rejection_reason = "Pending";
+        }
+        const { error } = await supabase.from("incomes").update(updateData).eq("id", selectedInc.id);
+        if (error) {
+          toast.error("Action failed: " + error.message);
+          return;
+        }
+        toast.success(`Income ${action.toUpperCase()} successfully`);
       }
-      await supabase.from("incomes").update(updateData).eq("id", selectedInc.id);
+      fetchIncomes();
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown error"));
     }
-    
-    fetchIncomes();
   }
 
   async function confirmReason() {
     if (!selectedInc || !reason.trim()) return;
-    const updateData: any = { 
-      status: pendingAction === "REOPEN" ? "DRAFT" : pendingAction.toUpperCase(), 
-      rejection_reason: reason 
-    };
-    await supabase.from("incomes").update(updateData).eq("id", selectedInc.id);
-    setShowReasonModal(false); setReason(""); fetchIncomes();
+    try {
+      const updateData: any = { 
+        status: pendingAction === "REOPEN" ? "DRAFT" : pendingAction.toUpperCase(), 
+        rejection_reason: reason 
+      };
+      const { error } = await supabase.from("incomes").update(updateData).eq("id", selectedInc.id);
+      if (error) {
+        toast.error("Action failed: " + error.message);
+        return;
+      }
+      toast.success(`Income ${pendingAction.toUpperCase()} successfully`);
+      setShowReasonModal(false); setReason(""); fetchIncomes();
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown error"));
+    }
   }
 
   async function confirmDelete() {
     if (!selectedInc) return;
-    await supabase.from("incomes").delete().eq("id", selectedInc.id);
-    setShowDeleteModal(false); fetchIncomes();
+    try {
+      const { error } = await supabase.from("incomes").delete().eq("id", selectedInc.id);
+      if (error) {
+        toast.error("Delete failed: " + error.message);
+        return;
+      }
+      toast.success("Income deleted");
+      setShowDeleteModal(false); fetchIncomes();
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown error"));
+    }
   }
 
   function formatCurrency(amount: number) {
@@ -128,7 +176,6 @@ export default function IncomePage() {
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Income Management</h2>
           <p className="text-gray-500 text-sm">Double-entry workflow enabled</p>
         </div>
-        {/*  HOOK USED HERE: Sirf dikhao agar permission hai */}
         {canAdd && (
           <button onClick={() => { setEditingData(null); setShowForm(true); }} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-medium w-fit">
             <Plus size={18} /> Add Income
@@ -149,6 +196,7 @@ export default function IncomePage() {
           </thead>
           <tbody className="divide-y dark:divide-gray-700">
             {loading && <tr><td colSpan={5} className="p-8 text-center text-gray-400">Loading...</td></tr>}
+            {!loading && incomes.length === 0 && <tr><td colSpan={5} className="p-8 text-center text-gray-400">No income records found.</td></tr>}
             {incomes.map(inc => (
               <tr key={inc.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                 <td className="px-4 py-3">
@@ -160,7 +208,7 @@ export default function IncomePage() {
                 </td>
                 <td className="px-4 py-3 text-right font-semibold text-green-600">{formatCurrency(inc.amount)}</td>
                 <td className="px-4 py-3 text-center">
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_STYLES[inc.status]}`}>{inc.status}</span>
+                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_STYLES[inc.status] || STATUS_STYLES.DRAFT}`}>{inc.status}</span>
                 </td>
                 <td className="px-4 py-3 text-right">
                   <div onClick={() => setSelectedInc(inc)}>

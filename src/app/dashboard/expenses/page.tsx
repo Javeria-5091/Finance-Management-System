@@ -9,6 +9,7 @@ import StatusActions from "@/components/finance/StatusActions";
 import ReasonModal from "@/components/finance/ReasonModal";
 import { Plus, AlertTriangle } from "lucide-react";
 import { logAction } from "@/lib/logAction";
+import toast from "react-hot-toast";
 
 const STATUS_STYLES: Record<string, string> = {
   DRAFT: "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
@@ -39,26 +40,40 @@ export default function ExpensesPage() {
 
   const fetchExpenses = useCallback(async () => {
     if (!user) return;
-    const { data } = await supabase.from("expenses").select("*").order("expense_date", { ascending: false });
-    if (data) setExpenses(data);
+    const { data, error } = await supabase.from("expenses").select("*").order("expense_date", { ascending: false });
+    if (error) toast.error("Failed to load expenses: " + error.message);
+    else setExpenses(data || []);
     setLoading(false);
   }, [user]);
 
   const fetchProjects = useCallback(async () => {
     if (!user) return;
-    const { data } = await supabase.from("projects").select("*");
-    if (data) setProjects(data);
+    const { data, error } = await supabase.from("projects").select("*");
+    if (error) toast.error("Failed to load projects: " + error.message);
+    else setProjects(data || []);
   }, [user]);
 
   useEffect(() => { fetchExpenses(); fetchProjects(); }, [fetchExpenses, fetchProjects]);
 
   async function handleSubmit(data: ExpenseFormData) {
-    if (editingData) {
-      await supabase.from("expenses").update(data).eq("id", editingData.id);
-    } else {
-      await supabase.from("expenses").insert({ ...data, user_id: user?.id, status: "DRAFT" });
+    try {
+      let error;
+      if (editingData) {
+        const res = await supabase.from("expenses").update(data).eq("id", editingData.id);
+        error = res.error;
+      } else {
+        const res = await supabase.from("expenses").insert({ ...data, user_id: user?.id, status: "DRAFT" });
+        error = res.error;
+      }
+      if (error) {
+        toast.error("Failed to save expense: " + error.message);
+      } else {
+        toast.success(editingData ? "Expense updated" : "Expense created");
+        setShowForm(false); setEditingData(null); fetchExpenses();
+      }
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown error"));
     }
-    setShowForm(false); setEditingData(null); fetchExpenses();
   }
 
   async function handleAction(action: string, needsReason?: boolean) {
@@ -81,37 +96,48 @@ export default function ExpensesPage() {
       return;
     }
 
-    if (action === "post") {
-    const res = await fetch('/api/finance/post-expense', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expenseId: selectedExp.id })
-    });
-    const result = await res.json();
-    if (!res.ok) {
-      alert('Posting failed: ' + (result.error || 'Unknown error'));
-      return;
+    try {
+      if (action === "post") {
+        const { error } = await supabase.from("expenses").update({ status: 'POSTED', posted_at: new Date().toISOString() }).eq("id", selectedExp.id);
+        if (error) { toast.error("Posting failed: " + error.message); return; }
+        toast.success("Expense posted to General Ledger");
+      } else {
+        const updateData: any = { status: action.toUpperCase() === "REOPEN" ? "DRAFT" : action.toUpperCase() };
+        const { error } = await supabase.from("expenses").update(updateData).eq("id", selectedExp.id);
+        if (error) { toast.error("Action failed: " + error.message); return; }
+        toast.success(`Expense ${action.toUpperCase()} successfully`);
+      }
+      fetchExpenses();
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown error"));
     }
-  } else {
-      const updateData: any = { status: action.toUpperCase() === "REOPEN" ? "DRAFT" : action.toUpperCase() };
-      await supabase.from("expenses").update(updateData).eq("id", selectedExp.id);
-    }
-    fetchExpenses();
   }
 
   async function confirmReason() {
     if (!selectedExp || !reason.trim()) return;
-    await supabase.from("expenses").update({ 
-      status: pendingAction === "REOPEN" ? "DRAFT" : pendingAction.toUpperCase(), 
-      rejection_reason: reason 
-    }).eq("id", selectedExp.id);
-    setShowReasonModal(false); setReason(""); fetchExpenses();
+    try {
+      const { error } = await supabase.from("expenses").update({ 
+        status: pendingAction === "REOPEN" ? "DRAFT" : pendingAction.toUpperCase(), 
+        rejection_reason: reason 
+      }).eq("id", selectedExp.id);
+      if (error) { toast.error("Action failed: " + error.message); return; }
+      toast.success(`Expense ${pendingAction.toUpperCase()} successfully`);
+      setShowReasonModal(false); setReason(""); fetchExpenses();
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown error"));
+    }
   }
 
   async function confirmDelete() {
     if (!selectedExp) return;
-    await supabase.from("expenses").delete().eq("id", selectedExp.id);
-    setShowDeleteModal(false); fetchExpenses();
+    try {
+      const { error } = await supabase.from("expenses").delete().eq("id", selectedExp.id);
+      if (error) { toast.error("Delete failed: " + error.message); return; }
+      toast.success("Expense deleted");
+      setShowDeleteModal(false); fetchExpenses();
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown error"));
+    }
   }
 
   function formatCurrency(amount: number) {
@@ -125,7 +151,6 @@ export default function ExpensesPage() {
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Expense Management</h2>
           <p className="text-gray-500 text-sm">Double-entry workflow enabled</p>
         </div>
-        {/*  HOOK USED HERE: Sirf dikhao agar permission hai */}
         {canAdd && (
           <button onClick={() => { setEditingData(null); setShowForm(true); }} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-medium w-fit">
             <Plus size={18} /> Add Expense
@@ -146,6 +171,7 @@ export default function ExpensesPage() {
           </thead>
           <tbody className="divide-y dark:divide-gray-700">
             {loading && <tr><td colSpan={5} className="p-8 text-center text-gray-400">Loading...</td></tr>}
+            {!loading && expenses.length === 0 && <tr><td colSpan={5} className="p-8 text-center text-gray-400">No expense records found.</td></tr>}
             {expenses.map(exp => (
               <tr key={exp.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                 <td className="px-4 py-3">
@@ -157,7 +183,7 @@ export default function ExpensesPage() {
                 </td>
                 <td className="px-4 py-3 text-right font-semibold text-red-600">{formatCurrency(exp.amount)}</td>
                 <td className="px-4 py-3 text-center">
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_STYLES[exp.status]}`}>{exp.status}</span>
+                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_STYLES[exp.status] || STATUS_STYLES.DRAFT}`}>{exp.status}</span>
                 </td>
                 <td className="px-4 py-3 text-right">
                   <div onClick={() => setSelectedExp(exp)}>

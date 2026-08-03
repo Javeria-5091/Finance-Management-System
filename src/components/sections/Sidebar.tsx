@@ -1,4 +1,3 @@
-// src/components/sections/Sidebar.tsx
 "use client";
 
 import { useState, useMemo } from "react";
@@ -39,6 +38,15 @@ import {
   CheckCircle,
   PiggyBank,
   UserCircle,
+  UserPlus,
+  Bell,
+  FileSpreadsheet,
+  Hash,
+  BookCheck,
+  FileBarChart,
+  UsersRound,
+  FileCheck,
+  CircleDollarSign,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -78,6 +86,15 @@ const ICONS: Record<string, any> = {
   CheckCircle,
   PiggyBank,
   UserCircle,
+  UserPlus,
+  Bell,
+  FileSpreadsheet,
+  Hash,
+  BookCheck,
+  FileBarChart,
+  UsersRound,
+  FileCheck,
+  CircleDollarSign,
 };
 
 interface NavItem {
@@ -103,7 +120,6 @@ const navGroups: NavGroup[] = [
     label: "Overview",
     items: [
       { id: "dashboard", label: "Dashboard", icon: "LayoutDashboard", path: "/dashboard" },
-      { id: "transactions", label: "Transactions", icon: "FileText", path: "/dashboard/transactions", perm: "INCOME_READ" },
     ],
   },
   {
@@ -116,10 +132,11 @@ const navGroups: NavGroup[] = [
     ],
   },
   {
-    id: "projects",
-    label: "Projects",
+    id: "projects-clients",
+    label: "Projects & Clients",
     items: [
       { id: "projects", label: "All Projects", icon: "FolderKanban", path: "/dashboard/projects", perm: "PROJECT_READ" },
+      { id: "clients", label: "Clients", icon: "UsersRound", path: "/dashboard/clients", perm: "PROJECT_READ" },
     ],
   },
   {
@@ -155,6 +172,8 @@ const navGroups: NavGroup[] = [
     items: [
       { id: "coa", label: "Chart of Accounts", icon: "BookOpen", path: "/dashboard/accounting/chart-of-accounts", perm: "COA_READ" },
       { id: "journals", label: "Journal Entries", icon: "ScrollText", path: "/dashboard/accounting/journal-entries", perm: "JOURNAL_READ" },
+      { id: "general-ledger", label: "General Ledger", icon: "BookCheck", path: "/dashboard/reports/general-ledger", perm: "GL_READ" },
+      { id: "trial-balance", label: "Trial Balance", icon: "FileBarChart", path: "/dashboard/reports/trial-balance", perm: "GL_READ" },
       { id: "fiscal", label: "Fiscal Calendar", icon: "CalendarDays", path: "/dashboard/accounting/fiscal-calendar", perm: "PERIOD_READ" },
     ],
   },
@@ -164,18 +183,22 @@ const navGroups: NavGroup[] = [
     items: [
       { id: "tax-config", label: "Tax Configuration", icon: "Shield", path: "/dashboard/tax-equity/tax-configuration", perm: "TAX_READ" },
       { id: "tax-recon", label: "Tax Reconciliation", icon: "Calculator", path: "/dashboard/tax-equity/tax-reconciliation", perm: "TAX_READ" },
+      { id: "tax-returns", label: "Tax Returns", icon: "FileCheck", path: "/dashboard/tax-equity/tax-returns", perm: "TAX_READ" },
       { id: "profit-dist", label: "Profit Distribution", icon: "TrendingUp", path: "/dashboard/tax-equity/profit-distribution", perm: "EQUITY_READ" },
+      { id: "ownership-reserves", label: "Ownership & Reserves", icon: "PiggyBank", path: "/dashboard/tax-equity/ownership-reserves", perm: "EQUITY_READ" },
     ],
   },
   {
     id: "reports",
     label: "Reports",
     items: [
-      { id: "all-reports", label: "All Reports", icon: "BarChart3", path: "/dashboard/reports", perm: "REPORT_READ" },
-      { id: "finance", label: "Financial Statements", path: "/dashboard/reports", icon: "BarChart3", perm: "REPORT_READ" },
-      { id: "aging", label: "Aging Reports", path: "/dashboard/reports/aging-reports", icon: "Clock", perm: "REPORT_READ" },
-      { id: "profit", label: "Project Profitability", path: "/dashboard/reports/project-profitability", icon: "Target", perm: "REPORT_READ" },
-      { id: "tax-report", label: "Tax Report", path: "/dashboard/reports/tax", icon: "Calculator", perm: "REPORT_READ" },
+      { id: "all-reports", label: "Basic Reports", icon: "BarChart3", path: "/dashboard/reports", perm: "REPORT_READ" },
+      { id: "tax-reports", label: "Tax Reports", icon: "FileCheck", path: "/dashboard/reports/tax-reports", perm: "REPORT_READ" },
+      { id: "balance-sheet", label: "Balance Sheet", icon: "FileSpreadsheet", path: "/dashboard/reports/balance-sheet", perm: "REPORT_READ" },
+      { id: "profit-loss", label: "Profit & Loss", icon: "CircleDollarSign", path: "/dashboard/reports/profit-loss", perm: "REPORT_READ" },
+      { id: "cash-flow", label: "Cash Flow", icon: "ArrowLeftRight", path: "/dashboard/reports/cash-flow", perm: "REPORT_READ" },
+      { id: "receivable-aging", label: "Receivable Aging", icon: "Receipt", path: "/dashboard/reports/receivable-aging", perm: "REPORT_READ" },
+      { id: "project-profitability", label: "Project Profitability", icon: "TrendingUp", path: "/dashboard/reports/project-profitability", perm: "REPORT_READ" },
     ],
   },
   {
@@ -183,8 +206,10 @@ const navGroups: NavGroup[] = [
     label: "Settings",
     items: [
       { id: "organization", label: "Organization", icon: "Building2", path: "/dashboard/settings/organization", perm: "SETTINGS_READ" },
+      { id: "financial-accounts", label: "Financial Accounts", icon: "CircleDollarSign", path: "/dashboard/settings/financial-accounts", perm: "SETTINGS_READ" },
+      { id: "numbering", label: "Numbering Sequences", icon: "Hash", path: "/dashboard/settings/numbering", perm: "SETTINGS_READ" },
       { id: "exchange-rates", label: "Exchange Rates", icon: "Scale", path: "/dashboard/settings/exchange-rates", perm: "SETTINGS_READ" },
-      { id: "ownership-reserves", label: "Ownership & Reserves", icon: "PiggyBank", path: "/dashboard/settings/ownership-reserves", perm: "EQUITY_READ" },
+      { id: "notifications", label: "Notifications", icon: "Bell", path: "/dashboard/settings/notifications", perm: "SETTINGS_READ" },
     ],
   },
   {
@@ -200,11 +225,8 @@ const navGroups: NavGroup[] = [
 
 export default function Sidebar({ open, onClose }: SidebarProps) {
   const pathname = usePathname();
-  const { profile, signOut } = useAuth();
-  const { hasPermission, role: rbacRole, isLoading: permLoading } = usePermissions();
-  const { role: authRole } = useAuth();
-  // Prefer RBAC role from PermissionContext over legacy profiles.role
-  const displayRole = rbacRole && rbacRole !== 'VIEWER' ? rbacRole : authRole;
+  const { role, profile, signOut } = useAuth();
+  const { hasPermission, isLoading: permLoading } = usePermissions();
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
   const toggleGroup = (groupId: string) => {
@@ -291,7 +313,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
                   {profile.full_name || profile.email?.split('@')[0]}
                 </p>
                 <span className="inline-flex items-center w-fit px-2 py-0.5 rounded mt-1 text-[10px] font-bold uppercase tracking-wider bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
-                  {displayRole}
+                  {role}
                 </span>
               </div>
             </div>

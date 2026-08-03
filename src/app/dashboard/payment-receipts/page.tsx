@@ -121,21 +121,24 @@ export default function PaymentReceiptsPage() {
         await supabase.from("payment_allocations").insert(allocInserts);
       }
 
-      // 3. Post to Ledger
-      // WARNING: Yeh ID aapki accounting period ki ID honi chahiye. Isse dynamically fetch karein ya ensure karein k sahi hai.
-      const PERIOD_ID = "YOUR_CURRENT_PERIOD_UUID_HERE"; 
+      // 3. Post to Ledger — dynamically fetch current open period
+      const { data: periodId } = await supabase.rpc('get_current_open_period_id');
+      if (!periodId) {
+        alert('No open accounting period found. Please open a period in Fiscal Calendar first.');
+        // Still save the receipt as DRAFT, just don't post to GL
+      } else {
+        await supabase.rpc('post_payment_receipt', {
+          p_receipt_id: receipt.id,
+          p_period_id: periodId,
+          p_transaction_date: form.payment_date
+        });
 
-      await supabase.rpc("post_payment_receipt", {
-        p_receipt_id: receipt.id,
-        p_period_id: PERIOD_ID,
-        p_transaction_date: form.payment_date
-      });
-
-      // 4. Update receipt status
-      await supabase
-        .from("payment_receipts")
-        .update({ status: "POSTED" })
-        .eq("id", receipt.id);
+        // 4. Update receipt status to POSTED
+        await supabase
+          .from('payment_receipts')
+          .update({ status: 'POSTED' })
+          .eq('id', receipt.id);
+      }
 
       alert("Payment Received & Allocated Successfully!");
       setShowModal(false);

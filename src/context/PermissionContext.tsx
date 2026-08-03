@@ -1,4 +1,3 @@
-// src/context/PermissionContext.tsx
 "use client";
 
 import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from "react";
@@ -26,10 +25,13 @@ export type PermCode =
   | "SETTINGS_READ" | "SETTINGS_MANAGE"
   | "ADMIN_USERS" | "ADMIN_AUDIT" | "ADMIN_MIGRATION"
   | "APPROVE_INCOME" | "APPROVE_EXPENSE" | "APPROVE_INVOICE"
-  | "APPROVE_VENDOR_BILL" | "APPROVE_PAYMENT" | "APPROVE_JOURNAL";
+  | "APPROVE_VENDOR_BILL" | "APPROVE_PAYMENT" | "APPROVE_JOURNAL"
+  | "CLIENT_READ" | "CLIENT_CREATE" | "CLIENT_UPDATE" | "CLIENT_DELETE"
+  | "GL_READ"
+  | "TAX_CREATE";
 
 // Valid permission codes for validation
-const VALID_PERM_CODES: string[] = [
+const VALID_PERM_CODES: PermCode[] = [
   "INCOME_READ", "INCOME_CREATE", "INCOME_UPDATE", "INCOME_DELETE",
   "EXPENSE_READ", "EXPENSE_CREATE", "EXPENSE_UPDATE", "EXPENSE_DELETE",
   "INVOICE_READ", "INVOICE_CREATE", "INVOICE_UPDATE", "INVOICE_DELETE",
@@ -51,6 +53,9 @@ const VALID_PERM_CODES: string[] = [
   "ADMIN_USERS", "ADMIN_AUDIT", "ADMIN_MIGRATION",
   "APPROVE_INCOME", "APPROVE_EXPENSE", "APPROVE_INVOICE",
   "APPROVE_VENDOR_BILL", "APPROVE_PAYMENT", "APPROVE_JOURNAL",
+  "CLIENT_READ", "CLIENT_CREATE", "CLIENT_UPDATE", "CLIENT_DELETE",
+  "GL_READ",
+  "TAX_CREATE",
 ];
 
 // Fallback permissions
@@ -78,6 +83,9 @@ const FALLBACK_PERMISSIONS: Record<string, PermCode[]> = {
     "ADMIN_USERS", "ADMIN_AUDIT", "ADMIN_MIGRATION",
     "APPROVE_INCOME", "APPROVE_EXPENSE", "APPROVE_INVOICE",
     "APPROVE_VENDOR_BILL", "APPROVE_PAYMENT", "APPROVE_JOURNAL",
+    "CLIENT_READ", "CLIENT_CREATE", "CLIENT_UPDATE", "CLIENT_DELETE",
+    "GL_READ",
+    "TAX_CREATE",
   ],
   FINANCE_HEAD: [
     "INCOME_READ", "INCOME_CREATE", "INCOME_UPDATE", "INCOME_DELETE",
@@ -343,8 +351,8 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
             if (!Array.isArray(rpcPerms) && typeof rpcPerms === 'object') {
               dbPermissions = Object.keys(rpcPerms)
                 .filter((key: string) =>
-                  VALID_PERM_CODES.includes(key) && rpcPerms[key] === true
-                );
+                  VALID_PERM_CODES.includes(key as PermCode) && rpcPerms[key] === true
+                ) as PermCode[];
               console.log("[PermCtx] Perm RPC-JSON:", dbPermissions.length, "permissions");
             }
             // Case B: RPC returns table [{permission_code: '...'}, ...]
