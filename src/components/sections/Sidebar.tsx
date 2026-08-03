@@ -136,7 +136,7 @@ const navGroups: NavGroup[] = [
     label: "Projects & Clients",
     items: [
       { id: "projects", label: "All Projects", icon: "FolderKanban", path: "/dashboard/projects", perm: "PROJECT_READ" },
-      { id: "clients", label: "Clients", icon: "UsersRound", path: "/dashboard/clients", perm: "PROJECT_READ" },
+      { id: "clients", label: "Clients", icon: "UsersRound", path: "/dashboard/clients", perm: "CLIENT_READ" },
     ],
   },
   {

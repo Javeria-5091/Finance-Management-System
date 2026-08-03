@@ -1,8 +1,10 @@
 'use client';
 
 import { useState } from 'react';
+import { usePermissions } from '@/context/PermissionContext';
 
 export default function AiChat() {
+  const { role, can } = usePermissions();
   const [messages, setMessages] = useState<{role: string, content: string}[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -38,13 +40,25 @@ export default function AiChat() {
     }
   };
 
+  // EMPLOYEE and VIEWER roles have no finance AI access
+  const hasAiAccess = can('REPORT_READ') || can('BANK_READ') || can('EXPENSE_READ') || can('PROJECT_READ');
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
-          <p className="text-center text-gray-400 dark:text-gray-500 mt-20 text-sm">
-            Ask me anything about your finances...
-          </p>
+          <div className="text-center mt-20">
+            <p className="text-gray-400 dark:text-gray-500 text-sm">
+              {hasAiAccess 
+                ? 'Ask about reports, balances, budgets, or project profitability...'
+                : 'Your role does not have finance data access through AI.'}
+            </p>
+            {hasAiAccess && (
+              <p className="text-gray-300 dark:text-gray-600 text-xs mt-2">
+                Role: {role} | Read-only access to authorized reports
+              </p>
+            )}
+          </div>
         )}
 
         {messages.map((m, i) => (
@@ -64,7 +78,7 @@ export default function AiChat() {
         {isLoading && (
           <div className="flex justify-start">
             <div className="bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 p-3 rounded-lg text-sm animate-pulse">
-              Analyzing database...
+              Querying authorized reports...
             </div>
           </div>
         )}
@@ -74,14 +88,14 @@ export default function AiChat() {
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Send a Message"
+          placeholder={hasAiAccess ? 'Ask about your finance data...' : 'No AI access for your role'}
           className="flex-1 border border-gray-300 dark:border-gray-600 rounded-lg px-4 py-2 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          disabled={isLoading}
+          disabled={isLoading || !hasAiAccess}
         />
         <button 
           type="submit" 
           className="bg-blue-600 text-white px-6 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
-          disabled={isLoading}
+          disabled={isLoading || !hasAiAccess}
         >
           Send
         </button>

@@ -20,9 +20,18 @@ const STATUS_STYLES: Record<string, string> = {
   REVERSED: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
 };
 
+// ─── APPROVAL LIMITS (PKR) by role ───
+const APPROVAL_LIMITS: Record<string, number> = {
+  CEO: Infinity,
+  FINANCE_HEAD: 500000,
+  ACCOUNTANT: 100000,
+  HOD: 50000,
+  PROJECT_MANAGER: 25000,
+};
+
 export default function ExpensesPage() {
   const { user } = useAuth();
-  const { hasPermission } = usePermissions(); 
+  const { hasPermission, role } = usePermissions(); 
   const canAdd = hasPermission("EXPENSE_CREATE"); 
   
   const [expenses, setExpenses] = useState<any[]>([]);
@@ -37,6 +46,7 @@ export default function ExpensesPage() {
   const [showReasonModal, setShowReasonModal] = useState(false);
   const [pendingAction, setPendingAction] = useState<string>("");
   const [reason, setReason] = useState("");
+  const [postingId, setPostingId] = useState<string | null>(null);
 
   const fetchExpenses = useCallback(async () => {
     if (!user) return;
@@ -62,7 +72,7 @@ export default function ExpensesPage() {
         const res = await supabase.from("expenses").update(data).eq("id", editingData.id);
         error = res.error;
       } else {
-        const res = await supabase.from("expenses").insert({ ...data, user_id: user?.id, status: "DRAFT" });
+        const res = await supabase.from("expenses").insert({ ...data, user_id: user?.id, created_by: user?.id, status: "DRAFT" });
         error = res.error;
       }
       if (error) {
@@ -96,17 +106,66 @@ export default function ExpensesPage() {
       return;
     }
 
-    try {
-      if (action === "post") {
-        const { error } = await supabase.from("expenses").update({ status: 'POSTED', posted_at: new Date().toISOString() }).eq("id", selectedExp.id);
-        if (error) { toast.error("Posting failed: " + error.message); return; }
-        toast.success("Expense posted to General Ledger");
-      } else {
-        const updateData: any = { status: action.toUpperCase() === "REOPEN" ? "DRAFT" : action.toUpperCase() };
-        const { error } = await supabase.from("expenses").update(updateData).eq("id", selectedExp.id);
-        if (error) { toast.error("Action failed: " + error.message); return; }
-        toast.success(`Expense ${action.toUpperCase()} successfully`);
+    // ═══════════════════════════════════════════════════════
+    // FIX 2: POST now calls the API route (creates journal)
+    // ═══════════════════════════════════════════════════════
+    if (action === "post") {
+      setPostingId(selectedExp.id);
+      try {
+        const res = await fetch('/api/finance/post-expense', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ expenseId: selectedExp.id }),
+        });
+        const result = await res.json();
+        if (res.ok) {
+          toast.success(result.message || "Expense posted to General Ledger");
+          fetchExpenses();
+        } else {
+          toast.error(result.error || "Posting failed");
+        }
+      } catch (err: any) {
+        toast.error("Posting error: " + (err.message || "Network error"));
+      } finally {
+        setPostingId(null);
       }
+      return;
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // FIX 4: MAKER-CHECKER — approve/reject enforce creator ≠ approver
+    // ═══════════════════════════════════════════════════════
+    if (action === "approve") {
+      if (selectedExp.created_by === user?.id) {
+        toast.error("Maker-checker violation: You cannot approve your own expense.");
+        return;
+      }
+      // FIX 6: Approval amount limit check
+      const myLimit = APPROVAL_LIMITS[role] ?? 0;
+      if (selectedExp.amount > myLimit) {
+        toast.error(`Amount PKR ${selectedExp.amount.toLocaleString()} exceeds your approval limit of PKR ${myLimit.toLocaleString()}. Requires higher authority.`);
+        return;
+      }
+    }
+
+    if (action === "verify") {
+      if (selectedExp.created_by === user?.id) {
+        toast.error("Maker-checker violation: You cannot verify your own expense.");
+        return;
+      }
+    }
+
+    try {
+      const updateData: any = {
+        status: action.toUpperCase() === "REOPEN" ? "DRAFT" : action.toUpperCase(),
+      };
+      // Track who approved/verified
+      if (action === "approve") updateData.approved_by = user?.id;
+      if (action === "verify") updateData.verified_by = user?.id;
+
+      const { error } = await supabase.from("expenses").update(updateData).eq("id", selectedExp.id);
+      if (error) { toast.error("Action failed: " + error.message); return; }
+      toast.success(`Expense ${action.toUpperCase()} successfully`);
       fetchExpenses();
     } catch (err: any) {
       toast.error("Error: " + (err.message || "Unknown error"));
@@ -116,10 +175,14 @@ export default function ExpensesPage() {
   async function confirmReason() {
     if (!selectedExp || !reason.trim()) return;
     try {
-      const { error } = await supabase.from("expenses").update({ 
+      const updateData: any = { 
         status: pendingAction === "REOPEN" ? "DRAFT" : pendingAction.toUpperCase(), 
-        rejection_reason: reason 
-      }).eq("id", selectedExp.id);
+        rejection_reason: reason,
+      };
+      if (pendingAction === "approve") updateData.approved_by = user?.id;
+      if (pendingAction === "verify") updateData.verified_by = user?.id;
+
+      const { error } = await supabase.from("expenses").update(updateData).eq("id", selectedExp.id);
       if (error) { toast.error("Action failed: " + error.message); return; }
       toast.success(`Expense ${pendingAction.toUpperCase()} successfully`);
       setShowReasonModal(false); setReason(""); fetchExpenses();
@@ -130,6 +193,12 @@ export default function ExpensesPage() {
 
   async function confirmDelete() {
     if (!selectedExp) return;
+    // Only DRAFT expenses can be deleted
+    if (selectedExp.status !== 'DRAFT') {
+      toast.error("Only DRAFT expenses can be deleted.");
+      setShowDeleteModal(false);
+      return;
+    }
     try {
       const { error } = await supabase.from("expenses").delete().eq("id", selectedExp.id);
       if (error) { toast.error("Delete failed: " + error.message); return; }
@@ -149,7 +218,7 @@ export default function ExpensesPage() {
       <div className="flex justify-between mb-6">
         <div>
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Expense Management</h2>
-          <p className="text-gray-500 text-sm">Double-entry workflow enabled</p>
+          <p className="text-gray-500 text-sm">Double-entry workflow with maker-checker</p>
         </div>
         {canAdd && (
           <button onClick={() => { setEditingData(null); setShowForm(true); }} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-medium w-fit">
@@ -187,7 +256,12 @@ export default function ExpensesPage() {
                 </td>
                 <td className="px-4 py-3 text-right">
                   <div onClick={() => setSelectedExp(exp)}>
-                    <StatusActions record={exp} module="expense" onAction={handleAction} />
+                    <StatusActions 
+                      record={exp} 
+                      module="expense" 
+                      onAction={handleAction}
+                      isPosting={postingId === exp.id}
+                    />
                   </div>
                 </td>
               </tr>
@@ -204,7 +278,7 @@ export default function ExpensesPage() {
           <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-xl p-6 w-full max-w-sm text-center">
             <AlertTriangle className="w-10 h-10 text-red-500 mx-auto mb-3" />
             <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">Delete DRAFT Expense?</h3>
-            <p className="text-gray-500 text-sm mb-6">This cannot be undone.</p>
+            <p className="text-gray-500 text-sm mb-6">Only DRAFT expenses can be deleted.</p>
             <div className="flex gap-3">
               <button onClick={() => setShowDeleteModal(false)} className="flex-1 px-4 py-2 bg-gray-100 dark:bg-gray-700 rounded-lg">Cancel</button>
               <button onClick={confirmDelete} className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg">Delete</button>

@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { requirePermission } from '@/lib/api-auth';
 
-// Helper — Supabase version agla bhi ho, yeh kaam karega
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
 
 export async function POST(req: NextRequest) {
+  // ─── AUTH CHECK ───
+  const auth = await requirePermission('INCOME_CREATE');
+  if (auth instanceof NextResponse) return auth;
+
   try {
     const { incomeId } = await req.json();
     if (!incomeId) {
@@ -109,6 +113,7 @@ export async function POST(req: NextRequest) {
         source_id: incomeId,
         total_debit: income.amount,
         total_credit: income.amount,
+        created_by: auth.userId,
       })
       .select()
       .single());
@@ -144,13 +149,14 @@ export async function POST(req: NextRequest) {
       status: 'POSTED',
       posted_at: new Date().toISOString(),
       journal_entry_id: journal.id,
+      posted_by: auth.userId,
     }).eq("id", incomeId);
 
     return NextResponse.json({
       success: true,
       journalId: journal.id,
       reference,
-      message: `Posted ${reference} — Debit: ${receivableAccount?.name || 'Asset'}, Credit: ${revenueAccount?.name}`,
+      message: `Posted ${reference}`,
     });
 
   } catch (err: any) {

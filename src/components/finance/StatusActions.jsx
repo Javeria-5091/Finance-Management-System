@@ -2,40 +2,55 @@
 
 import { usePermissions } from '@/context/PermissionContext';
 import { useAuth } from '@/context/AuthContext';
-import { Pencil, Trash2, Send, CheckCircle, RotateCcw, XCircle } from 'lucide-react';
+import { Pencil, Trash2, Send, CheckCircle, RotateCcw, XCircle, Loader2 } from 'lucide-react';
 
-export default function StatusActions({ record, module, onAction }) {
-  const { hasPermission } = usePermissions();
+export default function StatusActions({ record, module, onAction, isPosting }) {
+  const { hasPermission, role } = usePermissions();
   const { user } = useAuth();
   
-  const mod = module.toUpperCase(); // e.g., 'INCOME'
+  const mod = module.toUpperCase();
   const status = record.status;
-  const isCreator = record.created_by === user?.id;
+  const isCreator = record.created_by === user?.id || record.user_id === user?.id;
   const actions = [];
 
+  // ═══════════════════════════════════════════════════════
+  // DRAFT: edit, delete, submit
+  // ═══════════════════════════════════════════════════════
   if (status === 'DRAFT') {
     if (isCreator && hasPermission(`${mod}_UPDATE`)) actions.push({ key: 'edit', label: 'Edit', icon: Pencil, variant: 'secondary' });
     if (isCreator && hasPermission(`${mod}_DELETE`)) actions.push({ key: 'delete', label: 'Delete', icon: Trash2, variant: 'danger' });
-    if (hasPermission(`${mod}_SUBMIT`)) actions.push({ key: 'submit', label: 'Submit', icon: Send, variant: 'primary' });
+    if (hasPermission(`${mod}_UPDATE`)) actions.push({ key: 'submit', label: 'Submit', icon: Send, variant: 'primary' });
   }
 
+  // ═══════════════════════════════════════════════════════
+  // SUBMITTED: verify (not creator), approve (not creator), reject
+  // ═══════════════════════════════════════════════════════
   if (status === 'SUBMITTED') {
-    if (hasPermission(`${mod}_VERIFY`) && !isCreator) actions.push({ key: 'verify', label: 'Verify', icon: CheckCircle, variant: 'primary' });
-    if (hasPermission(`${mod}_APPROVE`) && !isCreator) actions.push({ key: 'approve', label: 'Approve', icon: CheckCircle, variant: 'primary' });
-    if (hasPermission(`${mod}_REVERSE`) || hasPermission('ADMIN_CONFIG')) actions.push({ key: 'reject', label: 'Reject', icon: XCircle, variant: 'danger', needsReason: true });
+    if (hasPermission(`APPROVE_${mod}`) && !isCreator) actions.push({ key: 'verify', label: 'Verify', icon: CheckCircle, variant: 'primary' });
+    if (hasPermission(`APPROVE_${mod}`) && !isCreator) actions.push({ key: 'approve', label: 'Approve', icon: CheckCircle, variant: 'primary' });
+    if (hasPermission(`${mod}_UPDATE`) || hasPermission('ADMIN_CONFIG')) actions.push({ key: 'reject', label: 'Reject', icon: XCircle, variant: 'danger', needsReason: true });
   }
 
+  // ═══════════════════════════════════════════════════════
+  // VERIFIED / APPROVED: approve (not creator), post
+  // ═══════════════════════════════════════════════════════
   if (status === 'VERIFIED' || status === 'APPROVED') {
-    if (hasPermissionWithLimit(`${mod}_APPROVE`, record.amount) && !isCreator && status === 'VERIFIED') 
+    if (status === 'VERIFIED' && hasPermission(`APPROVE_${mod}`) && !isCreator) 
       actions.push({ key: 'approve', label: 'Approve', icon: CheckCircle, variant: 'primary' });
-    if (hasPermission(`${mod}_POST`)) 
+    if (hasPermission(`${mod}_UPDATE`)) 
       actions.push({ key: 'post', label: 'Post', icon: CheckCircle, variant: 'success' });
   }
 
+  // ═══════════════════════════════════════════════════════
+  // POSTED: reverse
+  // ═══════════════════════════════════════════════════════
   if (status === 'POSTED') {
-    if (hasPermission(`${mod}_REVERSE`)) actions.push({ key: 'reverse', label: 'Reverse', icon: RotateCcw, variant: 'warning', needsReason: true });
+    if (hasPermission(`${mod}_UPDATE`)) actions.push({ key: 'reverse', label: 'Reverse', icon: RotateCcw, variant: 'warning', needsReason: true });
   }
 
+  // ═══════════════════════════════════════════════════════
+  // REJECTED: reopen by creator only
+  // ═══════════════════════════════════════════════════════
   if (status === 'REJECTED') {
     if (isCreator) actions.push({ key: 'reopen', label: 'Reopen', icon: RotateCcw, variant: 'secondary' });
   }
@@ -52,9 +67,16 @@ export default function StatusActions({ record, module, onAction }) {
     <div className="flex items-center justify-end gap-1">
       {actions.map((action) => {
         const Icon = action.icon;
+        const disabled = action.key === 'post' && isPosting;
         return action.key === 'post' ? (
-          <button key={action.key} onClick={() => onAction(action.key)} title={action.label} className={`flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md transition-colors ${variantStyles[action.variant]}`}>
-            <Icon size={14} /> {action.label}
+          <button 
+            key={action.key} 
+            onClick={() => !disabled && onAction(action.key)} 
+            title={action.label} 
+            disabled={disabled}
+            className={`flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md transition-colors ${variantStyles[action.variant]} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            {disabled ? <Loader2 size={14} className="animate-spin" /> : <Icon size={14} />} {action.label}
           </button>
         ) : (
           <button key={action.key} onClick={() => onAction(action.key, action.needsReason)} title={action.label} className={`p-1.5 rounded transition-colors ${variantStyles[action.variant]}`}>

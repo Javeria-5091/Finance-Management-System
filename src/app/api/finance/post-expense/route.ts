@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { getAuthUser, requirePermission, enforceMakerChecker } from '@/lib/api-auth';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
 
 export async function POST(req: NextRequest) {
+  // ─── AUTH CHECK ───
+  const auth = await requirePermission('EXPENSE_CREATE');
+  if (auth instanceof NextResponse) return auth;
+
   try {
     const { expenseId } = await req.json();
     if (!expenseId) {
@@ -44,7 +49,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
     }
 
-    // 4. Find expense account — try category match first
+    // 4. Find expense account
     let expenseAccountId: string | null = null;
     if (expense.category) {
       const matched = getData(await supabase
@@ -58,7 +63,6 @@ export async function POST(req: NextRequest) {
       expenseAccountId = matched?.id || null;
     }
 
-    // Fallback: any operating expense account
     if (!expenseAccountId) {
       const opex = getData(await supabase
         .from('finance.chart_of_accounts')
@@ -124,6 +128,7 @@ export async function POST(req: NextRequest) {
         source_id: expenseId,
         total_debit: expense.amount,
         total_credit: expense.amount,
+        created_by: auth.userId,
       })
       .select()
       .single());
@@ -159,6 +164,7 @@ export async function POST(req: NextRequest) {
       status: 'POSTED',
       posted_at: new Date().toISOString(),
       journal_entry_id: journal.id,
+      posted_by: auth.userId,
     }).eq("id", expenseId);
 
     return NextResponse.json({

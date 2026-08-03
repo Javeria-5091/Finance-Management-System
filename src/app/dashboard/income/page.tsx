@@ -39,6 +39,7 @@ export default function IncomePage() {
   const [showReasonModal, setShowReasonModal] = useState(false);
   const [pendingAction, setPendingAction] = useState<string>("");
   const [reason, setReason] = useState("");
+  const [postingId, setPostingId] = useState<string | null>(null);
 
   const fetchIncomes = useCallback(async () => {
     if (!user) return;
@@ -100,13 +101,24 @@ export default function IncomePage() {
       return;
     }
 
+    // MAKER-CHECKER: approve/verify
+    if (action === 'approve' || action === 'verify') {
+      const creatorId = selectedInc.created_by || selectedInc.user_id;
+      if (creatorId === user?.id) {
+        toast.error('Maker-checker violation: You cannot approve your own income.');
+        return;
+      }
+    }
+
     try {
       if (action === "post") {
+        setPostingId(selectedInc.id);
         const res = await fetch('/api/finance/post-income', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ incomeId: selectedInc.id, action: 'POST' })
         });
+        setPostingId(null);
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           toast.error("Posting failed: " + (errData.error || res.statusText));
@@ -116,8 +128,10 @@ export default function IncomePage() {
       } else {
         const updateData: any = { status: action.toUpperCase() === "REOPEN" ? "DRAFT" : action.toUpperCase() };
         if (action.toUpperCase() === "REJECT" || action.toUpperCase() === "REVERSE") {
-          updateData.rejection_reason = "Pending";
+          updateData.rejection_reason = reason || 'Pending';
         }
+        if (action === 'approve') updateData.approved_by = user?.id;
+        if (action === 'verify') updateData.verified_by = user?.id;
         const { error } = await supabase.from("incomes").update(updateData).eq("id", selectedInc.id);
         if (error) {
           toast.error("Action failed: " + error.message);
@@ -138,6 +152,8 @@ export default function IncomePage() {
         status: pendingAction === "REOPEN" ? "DRAFT" : pendingAction.toUpperCase(), 
         rejection_reason: reason 
       };
+      if (pendingAction === 'approve') updateData.approved_by = user?.id;
+      if (pendingAction === 'verify') updateData.verified_by = user?.id;
       const { error } = await supabase.from("incomes").update(updateData).eq("id", selectedInc.id);
       if (error) {
         toast.error("Action failed: " + error.message);
@@ -152,6 +168,11 @@ export default function IncomePage() {
 
   async function confirmDelete() {
     if (!selectedInc) return;
+    if (selectedInc.status !== 'DRAFT') {
+      toast.error('Only DRAFT incomes can be deleted.');
+      setShowDeleteModal(false);
+      return;
+    }
     try {
       const { error } = await supabase.from("incomes").delete().eq("id", selectedInc.id);
       if (error) {
@@ -212,7 +233,7 @@ export default function IncomePage() {
                 </td>
                 <td className="px-4 py-3 text-right">
                   <div onClick={() => setSelectedInc(inc)}>
-                    <StatusActions record={inc} module="income" onAction={handleAction} />
+                    <StatusActions record={inc} module="income" onAction={handleAction} isPosting={postingId === inc.id} />
                   </div>
                 </td>
               </tr>

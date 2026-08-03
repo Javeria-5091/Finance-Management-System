@@ -5,9 +5,10 @@ import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/context/PermissionContext";
 import { 
   Plus, Pencil, Eye, Send, CheckCircle, XCircle, 
-  AlertTriangle, ArrowUpCircle, FileText, RefreshCw, X 
+  AlertTriangle, ArrowUpCircle, FileText, RefreshCw, X, ShieldCheck
 } from "lucide-react";
 import ReasonModal from "@/components/finance/ReasonModal";
+import toast from "react-hot-toast";
 
 // ==========================================
 // STATUS STYLES & CONSTANTS
@@ -27,7 +28,7 @@ type InvoiceStatus = keyof typeof STATUS_CONFIG;
 
 export default function InvoicesPage() {
   const { user } = useAuth();
-  const { hasPermission, isFinanceUser } = usePermissions();
+  const { hasPermission, isFinanceUser, role } = usePermissions();
   const [invoices, setInvoices] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
@@ -48,16 +49,15 @@ export default function InvoicesPage() {
     onConfirm: () => {} 
   });
 
-  // ✅ PERIOD CHECK STATE
+  // PERIOD CHECK STATE
   const [periodWarning, setPeriodWarning] = useState<string | null>(null);
   const [hasOpenPeriod, setHasOpenPeriod] = useState<boolean>(true);
 
-  // Check for open period on mount
   useEffect(() => {
     const checkPeriod = async () => {
       const { data: periodId } = await supabase.rpc('get_current_open_period_id');
       if (!periodId) {
-        setPeriodWarning("⚠️ No Open Accounting Period found for today. Please open Fiscal Calendar to create invoices.");
+        setPeriodWarning("No Open Accounting Period found. Go to Accounting > Fiscal Calendar to open current month.");
         setHasOpenPeriod(false);
       } else {
         setPeriodWarning(null);
@@ -82,7 +82,18 @@ export default function InvoicesPage() {
   useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
 
   // ==========================================
-  // STATUS CHANGE HANDLER
+  // APPROVAL LIMITS
+  // ==========================================
+  const APPROVAL_LIMITS: Record<string, number> = {
+    CEO: Infinity,
+    FINANCE_HEAD: 1000000,
+    ACCOUNTANT: 500000,
+    HOD: 100000,
+    PROJECT_MANAGER: 50000,
+  };
+
+  // ==========================================
+  // STATUS CHANGE HANDLER with MAKER-CHECKER
   // ==========================================
   const handleStatusChange = async (invoiceId: string, newStatus: string, reason?: string) => {
     setSaving(invoiceId);
@@ -96,22 +107,47 @@ export default function InvoicesPage() {
       updateData.issued_by = user?.id;
       updateData.issued_at = new Date().toISOString();
     }
+    if (newStatus === 'APPROVED') {
+      updateData.approved_by = user?.id;
+      updateData.approved_at = new Date().toISOString();
+    }
 
     try {
+      // Maker-checker for approve: fetch invoice first
+      if (newStatus === 'APPROVED' || newStatus === 'SUBMITTED') {
+        const { data: inv } = await supabase.from("invoices").select("created_by, total_amount, user_id").eq("id", invoiceId).single() as { data: { created_by?: string; total_amount?: number; user_id?: string } | null };
+        const creatorId = inv?.created_by || inv?.user_id;
+        
+        if (creatorId === user?.id) {
+          toast.error("Maker-checker violation: You cannot approve your own invoice.");
+          setSaving(null);
+          return;
+        }
+
+        // Amount limit check
+        const invAmount = inv?.total_amount ?? 0;
+        const myLimit = APPROVAL_LIMITS[role] ?? 0;
+        if (invAmount > myLimit) {
+          toast.error(`Amount PKR ${invAmount.toLocaleString()} exceeds your approval limit of PKR ${myLimit.toLocaleString()}.`);
+          setSaving(null);
+          return;
+        }
+      }
+
       const { error } = await supabase.from("invoices")
         .update(updateData)
         .eq("id", invoiceId);
       
       if (error) throw error;
       
-      // ✅ FIX 1: Check reason exists before calling onConfirm
       if (reason && reasonModal.recordId === invoiceId) {
         reasonModal.onConfirm(reason);
       }
       
+      toast.success(`Invoice ${newStatus} successfully`);
       fetchInvoices();
     } catch (error: any) {
-      alert(`Error: ${error.message}`);
+      toast.error(`Error: ${error.message}`);
     } finally {
       setSaving(null);
     }
@@ -119,29 +155,41 @@ export default function InvoicesPage() {
 
   const handleDelete = async () => {
     if (!deleteId) return;
+    // Only DRAFT invoices can be deleted
+    const { data: inv } = await supabase.from("invoices").select("status").eq("id", deleteId).single();
+    if (inv?.status !== 'DRAFT') {
+      toast.error("Only DRAFT invoices can be deleted.");
+      setDeleteId(null);
+      return;
+    }
     setSaving(deleteId);
     try {
       const { error } = await supabase.from("invoices")
         .update({ status: 'VOID', void_reason: 'Deleted by user' })
         .eq("id", deleteId);
       if (error) throw error;
+      toast.success("Invoice voided");
       setDeleteId(null);
       fetchInvoices();
     } catch (error: any) {
-      alert(`Error: ${error.message}`);
+      toast.error(`Error: ${error.message}`);
     } finally {
       setSaving(null);
     }
   };
 
   const handleSubmit = async (formData: any) => {
-    setSaving('submit'); // Temporary ID for saving state
+    setSaving('submit');
     
     try {
-      // ✅ FIX 2: Separate insert and update queries (can't chain .update() on .insert())
       let result;
       
       if (editingInvoice) {
+        if (editingInvoice.status !== 'DRAFT') {
+          toast.error("Only DRAFT invoices can be edited.");
+          setSaving(null);
+          return;
+        }
         result = await supabase.from("invoices")
           .update({ ...formData })
           .eq("id", editingInvoice.id)
@@ -152,10 +200,10 @@ export default function InvoicesPage() {
           .insert({
             ...formData,
             user_id: user?.id,
+            created_by: user?.id,
             status: 'DRAFT',
             outstanding_amount: formData.total_amount,
             base_outstanding_amount: formData.total_amount,
-            created_by: user?.id,
           })
           .select()
           .single();
@@ -164,12 +212,13 @@ export default function InvoicesPage() {
       const { data, error } = result;
       if (error) throw error;
       
+      toast.success(editingInvoice ? "Invoice updated" : "Invoice created as DRAFT");
       setShowForm(false);
       setEditingInvoice(null);
       fetchInvoices();
       return data?.id;
     } catch (error: any) {
-      alert(`Failed to save: ${error.message}`);
+      toast.error(`Failed to save: ${error.message}`);
     } finally {
       setSaving(null);
     }
@@ -190,12 +239,8 @@ export default function InvoicesPage() {
     return <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${config.color}`}>{config.label}</span>;
   };
 
-  const canCreate = hasPermission('INCOME_CREATE');
-  const canEdit = isFinanceUser;
+  const canCreate = hasPermission('INVOICE_CREATE');
 
-  // ==========================================
-  // UI RENDER
-  // ==========================================
   return (
     <div className="p-6">
       {/* Header */}
@@ -214,14 +259,11 @@ export default function InvoicesPage() {
         )}
       </div>
 
-      {/* ⚠️ NO OPEN PERIOD WARNING */}
+      {/* Period Warning */}
       {periodWarning && (
         <div className="mb-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg flex items-center gap-3">
           <AlertTriangle size={18} className="text-amber-600 dark:text-amber-400 flex-shrink-0" />
-          <div>
-            <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">{periodWarning}</p>
-            <p className="text-xs text-amber-600 dark:text-amber-400 mt-0.5">Go to Accounting → Fiscal Calendar to open current month.</p>
-          </div>
+          <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">{periodWarning}</p>
         </div>
       )}
 
@@ -245,10 +287,10 @@ export default function InvoicesPage() {
               {loading ? (
                 <tr><td colSpan={8} className="p-12 text-center text-gray-400">Loading...</td></tr>
               ) : invoices.length === 0 ? (
-                <tr><td colSpan={8} className="p-12 text-center text-gray-400">No invoices yet. Click "Create Invoice" to start.</td></tr>
+                <tr><td colSpan={8} className="p-12 text-center text-gray-400">No invoices yet.</td></tr>
               ) : (
                 invoices.map(inv => {
-                  const isOwner = inv.user_id === user?.id;
+                  const isCreator = (inv.created_by || inv.user_id) === user?.id;
                   const isDraft = inv.status === 'DRAFT';
                   const isVoid = inv.status === 'VOID';
                   
@@ -259,31 +301,66 @@ export default function InvoicesPage() {
                       </td>
                       <td className="p-3 font-medium text-gray-900 dark:text-white">{inv.client_name || 'No Client'}</td>
                       <td className="p-3 text-right font-semibold text-gray-900 dark:text-white">{formatCurrency(inv.total_amount)}</td>
-                      <td className="p-3 text-right text-green-600 dark:text-green-400">{formatCurrency(inv.amount_paid)}</td>
-                      <td className="p-3 text-right text-red-600 dark:text-red-400 font-semibold">{formatCurrency(inv.outstanding_amount)}</td>
+                      <td className="p-3 text-right text-green-600 dark:text-green-400">{formatCurrency(inv.amount_paid || 0)}</td>
+                      <td className="p-3 text-right text-red-600 dark:text-red-400 font-semibold">{formatCurrency(inv.outstanding_amount || 0)}</td>
                       <td className="p-3 text-center">{getStatusBadge(inv.status)}</td>
                       <td className="p-3 text-gray-600 dark:text-gray-400 text-xs">{formatDate(inv.due_date)}</td>
                       <td className="p-3 text-right">
                         <div className="flex items-center justify-end gap-1">
-                          {isDraft && canEdit && (
+                          {/* DRAFT actions */}
+                          {isDraft && isCreator && hasPermission('INVOICE_UPDATE') && (
                             <button 
                               onClick={() => { setEditingInvoice(inv); setShowForm(true); }} 
-                              title="Edit Invoice" 
+                              title="Edit" 
                               className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded-lg transition-colors"
                             >
                               <Pencil size={14} />
                             </button>
                           )}
-                          {isDraft && (
+                          {isDraft && isCreator && hasPermission('INVOICE_DELETE') && (
                             <button 
                               onClick={() => setDeleteId(inv.id)} 
-                              title="Delete (Void)" 
+                              title="Void" 
                               className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors"
                             >
                               <XCircle size={14} />
                             </button>
                           )}
-                          {!isDraft && !isVoid && (
+                          {isDraft && hasPermission('INVOICE_UPDATE') && (
+                            <button 
+                              onClick={() => handleStatusChange(inv.id, 'SUBMITTED')} 
+                              title="Submit for Approval" 
+                              className="p-1.5 text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded-lg transition-colors"
+                            >
+                              <Send size={14} />
+                            </button>
+                          )}
+                          {/* SUBMITTED: approve/reject (not creator) */}
+                          {inv.status === 'SUBMITTED' && !isCreator && hasPermission('APPROVE_INVOICE') && (
+                            <button 
+                              onClick={() => handleStatusChange(inv.id, 'APPROVED')} 
+                              title="Approve" 
+                              className="p-1.5 text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 rounded-lg transition-colors"
+                            >
+                              <ShieldCheck size={14} />
+                            </button>
+                          )}
+                          {inv.status === 'SUBMITTED' && !isCreator && hasPermission('INVOICE_UPDATE') && (
+                            <button 
+                              onClick={() => {
+                                setReasonModal({
+                                  open: true, title: 'Reject Invoice', action: 'REJECTED', recordId: inv.id,
+                                  onConfirm: (r) => handleStatusChange(inv.id, 'REJECTED', r),
+                                });
+                              }} 
+                              title="Reject" 
+                              className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors"
+                            >
+                              <XCircle size={14} />
+                            </button>
+                          )}
+                          {/* APPROVED: issue */}
+                          {inv.status === 'APPROVED' && hasPermission('INVOICE_UPDATE') && (
                             <button 
                               onClick={() => handleStatusChange(inv.id, 'ISSUED', 'Issued to client')} 
                               title="Issue Invoice" 
@@ -292,24 +369,7 @@ export default function InvoicesPage() {
                               <Send size={14} />
                             </button>
                           )}
-                          {inv.status === 'ISSUED' && (
-                            <button 
-                              onClick={() => handleStatusChange(inv.id, 'PAID', 'Mark as paid')} 
-                              title="Mark as Paid" 
-                              className="p-1.5 text-green-600 hover:bg-green-50 dark:hover:bg-green-500/10 rounded-lg transition-colors"
-                            >
-                              <CheckCircle size={14} />
-                            </button>
-                          )}
-                          {inv.status === 'OVERDUE' && (
-                            <button 
-                              onClick={() => handleStatusChange(inv.id, 'ISSUED', 'Re-activate invoice')} 
-                              title="Mark as Issued (Not overdue)" 
-                              className="p-1.5 text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-500/10 rounded-lg transition-colors"
-                            >
-                              <RefreshCw size={14} />
-                            </button>
-                          )}
+                          {/* ISSUED → mark paid (via payment receipt, not direct) */}
                           {saving === inv.id && <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent border-b-transparent animate-spin rounded-full" />}
                         </div>
                       </td>
@@ -358,7 +418,6 @@ export default function InvoicesPage() {
                     disabled
                     className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 text-sm cursor-not-allowed"
                   />
-                  <p className="text-[10px] text-gray-400 mt-1">Auto-generated when issued</p>
                 </div>
               </div>
 
@@ -369,7 +428,7 @@ export default function InvoicesPage() {
                     type="number" 
                     defaultValue={editingInvoice?.amount || ''} 
                     placeholder="0.00" 
-                    min ="0"
+                    min="0"
                     className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
                   />
                 </div>
@@ -379,7 +438,7 @@ export default function InvoicesPage() {
                     type="number" 
                     defaultValue={editingInvoice?.tax_amount || '0'} 
                     placeholder="0.00" 
-                    min ="0"
+                    min="0"
                     className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
                   />
                 </div>
@@ -397,13 +456,13 @@ export default function InvoicesPage() {
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
                 <textarea 
                   defaultValue={editingInvoice?.notes || ''} 
-                  placeholder="Invoice details, terms, conditions..." 
+                  placeholder="Invoice details..." 
                   rows={3}
                   className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm resize-none"
                 />
               </div>
 
-              <div className="flex justify-end gap-3 pt-4 border-t dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/30 rounded-b-2xl">
+              <div className="flex justify-end gap-3 pt-4 border-t dark:border-gray-700">
                 <button 
                   onClick={() => { setShowForm(false); setEditingInvoice(null); }} 
                   className="px-5 py-2.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-800 dark:text-white rounded-xl text-sm font-medium"
@@ -413,16 +472,11 @@ export default function InvoicesPage() {
                 <button 
                   onClick={() => handleSubmit(editingInvoice ? 
                     { ...editingInvoice, total_amount: parseFloat(editingInvoice.amount || 0) + parseFloat(editingInvoice.tax_amount || 0) } : {
-                      client_name: '', 
-                      amount: 0, 
-                      tax_amount: 0, 
-                      outstanding_amount: 0, 
-                      base_outstanding_amount: 0 
+                      client_name: '', amount: 0, tax_amount: 0, outstanding_amount: 0, base_outstanding_amount: 0 
                     }
                   )} 
-                  // ✅ FIX 3: Convert string | null to boolean using !!
                   disabled={!!saving}
-                  className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium disabled:opacity-50 flex items-center gap-2"
+                  className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium disabled:opacity-50"
                 >
                   {saving ? "Saving..." : "Save as Draft"}
                 </button>
@@ -432,39 +486,23 @@ export default function InvoicesPage() {
         </div>
       )}
 
-      {/* Delete Confirmation Modal */}
+      {/* Delete Confirmation */}
       {deleteId && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-2xl w-full max-w-sm shadow-2xl p-6">
             <div className="text-center">
-              <div className="mx-auto w-12 h-12 bg-red-100 dark:bg-red-900/30 rounded-full flex items-center justify-center mb-4">
-                <AlertTriangle size={24} className="text-red-600 dark:text-red-400" />
-              </div>
-              <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">Delete Invoice?</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
-                This will void the invoice. This action cannot be undone.
-              </p>
+              <AlertTriangle size={24} className="text-red-600 dark:text-red-400 mx-auto mb-3" />
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">Void DRAFT Invoice?</h3>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">This cannot be undone.</p>
               <div className="flex gap-3">
-                <button 
-                  onClick={() => setDeleteId(null)} 
-                  className="flex-1 px-4 py-2.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-800 dark:text-white rounded-xl text-sm font-medium"
-                >
-                  Cancel
-                </button>
-                <button 
-                  onClick={handleDelete} 
-                  disabled={!!saving}
-                  className="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-medium disabled:opacity-50"
-                >
-                  {saving ? "Deleting..." : "Delete"}
-                </button>
+                <button onClick={() => setDeleteId(null)} className="flex-1 px-4 py-2.5 bg-gray-200 dark:bg-gray-700 rounded-xl text-sm font-medium">Cancel</button>
+                <button onClick={handleDelete} disabled={!!saving} className="flex-1 px-4 py-2.5 bg-red-600 text-white rounded-xl text-sm font-medium disabled:opacity-50">Void</button>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Reason Modal (For Void/Re-activate) */}
       <ReasonModal 
         open={reasonModal.open}
         title={reasonModal.title}
