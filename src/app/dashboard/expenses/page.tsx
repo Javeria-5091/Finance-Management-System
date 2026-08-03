@@ -82,8 +82,17 @@ export default function ExpensesPage() {
     }
 
     if (action === "post") {
-      await supabase.from("expenses").update({ status: 'POSTED', posted_at: new Date().toISOString() }).eq("id", selectedExp.id);
-    } else {
+    const res = await fetch('/api/finance/post-expense', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expenseId: selectedExp.id })
+    });
+    const result = await res.json();
+    if (!res.ok) {
+      alert('Posting failed: ' + (result.error || 'Unknown error'));
+      return;
+    }
+  } else {
       const updateData: any = { status: action.toUpperCase() === "REOPEN" ? "DRAFT" : action.toUpperCase() };
       await supabase.from("expenses").update(updateData).eq("id", selectedExp.id);
     }

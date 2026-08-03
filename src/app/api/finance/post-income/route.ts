@@ -1,87 +1,159 @@
-import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-import { getPeriodByDate } from '../../../../services/fiscal-year.service'; 
+import { NextRequest, NextResponse } from 'next/server';
+import { supabase } from '@/lib/supabase';
 
-export async function POST(req: Request) {
+// Helper — Supabase version agla bhi ho, yeh kaam karega
+function getData<T = any>(res: any): T | null {
+  return res?.data ?? null;
+}
+
+export async function POST(req: NextRequest) {
   try {
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY! // Use service role for backend logic
-    );
-
-    const { incomeId, action } = await req.json();
-    const user = await supabase.auth.getUser();
-    if (!user.data.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    // 1. Fetch Income
-    const { data: income, error: fetchError } = await supabase
-      .from('incomes')
-      .select('*, projects(name)')
-      .eq('id', incomeId)
-      .single();
-
-    if (fetchError || !income) throw new Error('Income not found');
-
-    // 2. Handle Status Transitions
-    if (action === 'SUBMIT') {
-      const { error } = await supabase.from('incomes').update({
-        status: 'SUBMITTED', submitted_by: user.data.user.id, submitted_at: new Date().toISOString()
-      }).eq('id', incomeId);
-      if (error) throw error;
-      return NextResponse.json({ success: true, status: 'SUBMITTED' });
+    const { incomeId } = await req.json();
+    if (!incomeId) {
+      return NextResponse.json({ error: 'incomeId required' }, { status: 400 });
     }
 
-    if (action === 'APPROVE') {
-      const { error } = await supabase.from('incomes').update({
-        status: 'APPROVED', approved_by: user.data.user.id, approved_at: new Date().toISOString()
-      }).eq('id', incomeId);
-      if (error) throw error;
-      return NextResponse.json({ success: true, status: 'APPROVED' });
+    // 1. Fetch income
+    const income = getData(await supabase.from("incomes").select("*").eq("id", incomeId).single());
+    if (!income) {
+      return NextResponse.json({ error: 'Income not found' }, { status: 404 });
+    }
+    if (income.status !== 'APPROVED') {
+      return NextResponse.json({ error: 'Only APPROVED incomes can be posted' }, { status: 400 });
     }
 
-    // 3. POST ACTION (The Double-Entry Magic)
-    if (action === 'POST') {
-      // Get Period from date
-      const { data: periodData } = await supabase.rpc('get_period_by_date', { p_date: income.income_date });
-      if (!periodData || periodData.length === 0) throw new Error('No open period found for this date');
-      const period = periodData[0];
+    // 2. Already posted?
+    const existingJournal = getData(await supabase
+      .from('finance.journal_entries')
+      .select('id')
+      .eq('source_type', 'INCOME')
+      .eq('source_id', incomeId)
+      .maybeSingle());
+    if (existingJournal) {
+      return NextResponse.json({ error: 'Already posted to GL' }, { status: 400 });
+    }
 
-      // Default Accounts (In production, these come from income.account_id or config)
-      const bankAccountId = '1110-uuid-here'; // Replace with actual logic to find Bank Account UUID
-      const revenueAccountId = income.account_id || '4110-uuid-here'; 
+    // 3. Open period
+    const period = getData(await supabase
+      .from('finance.accounting_periods')
+      .select('id')
+      .eq('status', 'OPEN')
+      .order('start_date', { ascending: false })
+      .limit(1)
+      .single());
+    if (!period) {
+      return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
+    }
 
-      // Call Posting Engine
-      const { data: journalId, error: postError } = await supabase.rpc('post_journal_entry', {
-        p_description: `Income: ${income.title}`,
-        p_transaction_date: income.income_date,
-        p_period_id: period.id,
-        p_currency: income.currency || 'PKR',
-        p_exchange_rate: income.exchange_rate || 1,
-        p_source_type: 'INCOME',
-        p_source_id: incomeId,
-        p_project_id: income.project_id,
-        p_lines: [
-          { account_id: bankAccountId, debit_amount: income.amount, credit_amount: 0, description: 'Cash/Bank Received' },
-          { account_id: revenueAccountId, debit_amount: 0, credit_amount: income.amount, description: income.title }
-        ]
-      });
+    // 4. Revenue account
+    const revenueAccount = getData(await supabase
+      .from('finance.chart_of_accounts')
+      .select('id, code, name')
+      .eq('account_type', 'REVENUE')
+      .eq('is_active', true)
+      .limit(1)
+      .single());
 
-      if (postError) throw postError;
+    // 5. Receivable / Asset account
+    const receivableAccount = getData(await supabase
+      .from('finance.chart_of_accounts')
+      .select('id, code, name')
+      .eq('account_type', 'ASSET')
+      .eq('is_active', true)
+      .like('code', '12%')
+      .limit(1)
+      .single());
 
-      // Update Income with Journal Link
-      await supabase.from('incomes').update({
+    let fallbackAsset = null;
+    if (!receivableAccount) {
+      fallbackAsset = getData(await supabase
+        .from('finance.chart_of_accounts')
+        .select('id, code, name')
+        .eq('account_type', 'ASSET')
+        .eq('is_active', true)
+        .limit(1)
+        .single());
+    }
+
+    const debitAccountId = receivableAccount?.id || fallbackAsset?.id;
+    const creditAccountId = revenueAccount?.id;
+
+    if (!debitAccountId || !creditAccountId) {
+      return NextResponse.json({
+        error: 'Required accounts not found. Set up REVENUE and ASSET accounts in Chart of Accounts.'
+      }, { status: 400 });
+    }
+
+    // 6. Reference number
+    const lastJournal = getData(await supabase
+      .from('finance.journal_entries')
+      .select('reference')
+      .like('reference', 'JE-IN-%')
+      .order('reference', { ascending: false })
+      .limit(1)
+      .single());
+    const nextNum = lastJournal ? parseInt(lastJournal.reference.replace('JE-IN-', '')) + 1 : 1;
+    const reference = `JE-IN-${String(nextNum).padStart(5, '0')}`;
+
+    // 7. Create journal header
+    const journal = getData(await supabase
+      .from('finance.journal_entries')
+      .insert({
+        reference,
+        description: `Income: ${income.title}${income.project_id ? ' (Project)' : ''}`,
         status: 'POSTED',
-        journal_entry_id: journalId,
+        entry_date: income.income_date,
         period_id: period.id,
-        posted_at: new Date().toISOString(),
-        posted_by: user.data.user.id
-      }).eq('id', incomeId);
-
-      return NextResponse.json({ success: true, status: 'POSTED', journal_id: journalId });
+        project_id: income.project_id,
+        source_type: 'INCOME',
+        source_id: incomeId,
+        total_debit: income.amount,
+        total_credit: income.amount,
+      })
+      .select()
+      .single());
+    if (!journal) {
+      return NextResponse.json({ error: 'Failed to create journal entry' }, { status: 500 });
     }
 
-    return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    // 8. Create journal lines (double entry)
+    const linesError = (await supabase.from('finance.journal_lines').insert([
+      {
+        journal_entry_id: journal.id,
+        account_id: debitAccountId,
+        debit_amount: income.amount,
+        credit_amount: 0,
+        description: `Receivable for: ${income.title}`,
+      },
+      {
+        journal_entry_id: journal.id,
+        account_id: creditAccountId,
+        debit_amount: 0,
+        credit_amount: income.amount,
+        description: `Revenue from: ${income.title}`,
+      },
+    ])).error;
+
+    if (linesError) {
+      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
+      return NextResponse.json({ error: 'Failed to create journal lines' }, { status: 500 });
+    }
+
+    // 9. Update income status
+    await supabase.from("incomes").update({
+      status: 'POSTED',
+      posted_at: new Date().toISOString(),
+      journal_entry_id: journal.id,
+    }).eq("id", incomeId);
+
+    return NextResponse.json({
+      success: true,
+      journalId: journal.id,
+      reference,
+      message: `Posted ${reference} — Debit: ${receivableAccount?.name || 'Asset'}, Credit: ${revenueAccount?.name}`,
+    });
+
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }

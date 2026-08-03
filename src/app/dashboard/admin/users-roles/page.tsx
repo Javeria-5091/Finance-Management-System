@@ -6,7 +6,8 @@ import { usePermissions } from "@/context/PermissionContext";
 import { 
   ShieldCheck, Users, Key, Save, X, Plus, Trash2, 
   Loader2, AlertCircle, CheckCircle2, AlertTriangle, 
-  Info, Crown, ArrowRightLeft, UserPlus, Calendar, UsersRound
+  Info, Crown, ArrowRightLeft, UserPlus, Calendar, UsersRound,
+  Search
 } from "lucide-react";
 
 const SCOPE_OPTIONS = ['ALL', 'DEPARTMENT', 'PROJECT', 'OWN'];
@@ -141,7 +142,13 @@ export default function UsersRolesPage() {
     effective_from: new Date().toISOString().split('T')[0],
     effective_to: null as string | null,
     delegated_from: null as string | null
-  }); 
+  });
+  // Search state for Assign Modal
+  const [userSearch, setUserSearch] = useState('');
+  const [emailManualInput, setEmailManualInput] = useState('');
+  const [showManualInput, setShowManualInput] = useState(false);
+  const [searchingEmail, setSearchingEmail] = useState(false);
+  const [emailSearchResults, setEmailSearchResults] = useState<any[]>([]); 
 
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog | null>(null);
@@ -236,12 +243,21 @@ export default function UsersRolesPage() {
       const { data: rpData, error: rpErr } = await supabase.from("role_permissions").select("role_id, permission_id");
       if (rpErr) throw new Error(`Failed to fetch role permissions: ${rpErr.message}`);
 
-      const { data: allProfiles, error: profilesErr } = await supabase
-        .from("profiles")
-        .select("user_id, full_name, email, role")
-        .order("full_name", { ascending: true });
-
-      if (profilesErr) throw new Error(`Failed to fetch profiles: ${profilesErr.message}`);
+      // Fetch ALL users (including those without profiles) via RPC
+      let allAuthUsers: any[] = [];
+      const { data: rpcUsers, error: rpcUsersErr } = await supabase.rpc("get_all_system_users");
+      if (rpcUsersErr) {
+        // Fallback to profiles table if RPC not available yet
+        console.warn("RPC get_all_system_users not available, falling back to profiles table:", rpcUsersErr.message);
+        const { data: allProfiles, error: profilesErr } = await supabase
+          .from("profiles")
+          .select("user_id, full_name, email, role")
+          .order("full_name", { ascending: true });
+        if (profilesErr) throw new Error(`Failed to fetch profiles: ${profilesErr.message}`);
+        allAuthUsers = (allProfiles || []).map(p => ({ ...p, has_profile: true }));
+      } else {
+        allAuthUsers = rpcUsers || [];
+      }
 
       const userRolesMap: Record<string, any> = {};
       if (urData) {
@@ -250,13 +266,15 @@ export default function UsersRolesPage() {
         });
       }
 
-      const mergedUsers = (allProfiles || []).map(profile => {
-        const roleAssignment = userRolesMap[profile.user_id];
+      const mergedUsers = allAuthUsers.map((u: any) => {
+        const roleAssignment = userRolesMap[u.user_id];
         return {
-          user_id: profile.user_id,
-          full_name: profile.full_name,
-          email: profile.email,
-          profiles: { full_name: profile.full_name, email: profile.email },
+          user_id: u.user_id,
+          full_name: u.full_name || '',
+          email: u.email || '',
+          has_profile: u.has_profile || false,
+          profile_role: u.profile_role || null,
+          profiles: { full_name: u.full_name || '', email: u.email || '' },
           id: roleAssignment?.id || null,
           role_id: roleAssignment?.role_id || null,
           roles: roleAssignment?.roles || null,
@@ -478,7 +496,24 @@ export default function UsersRolesPage() {
       effective_to: null,
       delegated_from: null
     });
+    setUserSearch('');
+    setEmailManualInput('');
+    setShowManualInput(false);
+    setEmailSearchResults([]);
     setShowAssignModal(true);
+  };
+
+  const searchUserByEmail = async () => {
+    if (!emailManualInput.trim()) return;
+    setSearchingEmail(true);
+    try {
+      const { data, error } = await supabase.rpc('find_auth_user_by_email', { search_email: emailManualInput.trim() });
+      if (error) throw error;
+      setEmailSearchResults(data || []);
+    } catch (err: any) {
+      addToast('error', `Email search failed: ${err.message}`);
+      setEmailSearchResults([]);
+    } finally { setSearchingEmail(false); }
   };
 
   const handleAssignRole = async () => {
@@ -498,9 +533,25 @@ export default function UsersRolesPage() {
 
     setSaving(true);
     try {
+      // Auto-create profile if user doesn't have one
+      const targetUser = allUsers.find(u => u.user_id === assignForm.user_id);
+      if (targetUser && !targetUser.has_profile) {
+        const { error: profileErr } = await supabase.rpc('ensure_profile_exists', { target_user_id: assignForm.user_id });
+        if (profileErr) {
+          console.warn('Auto-create profile failed, trying manual insert:', profileErr.message);
+          // Fallback: manual insert
+          const userEmail = targetUser.email || emailManualInput;
+          await supabase.from('profiles').insert({
+            user_id: assignForm.user_id,
+            email: userEmail,
+            full_name: '',
+            role: 'EMPLOYEE'
+          });
+        }
+      }
+
       // Check if user already has a role
-      const existingAssignment = allUsers.find(u => u.user_id === assignForm.user_id);
-      if (existingAssignment?.hasRole) {
+      if (targetUser?.hasRole) {
         await supabase.from("user_roles").delete().eq("user_id", assignForm.user_id);
       }
 
@@ -516,8 +567,8 @@ export default function UsersRolesPage() {
       const roleName = roles.find(r => r.id === assignForm.role_id)?.name || 'EMPLOYEE';
       await supabase.from("profiles").update({ role: roleName }).eq("user_id", assignForm.user_id);
 
-      const userName = allUsers.find(u => u.user_id === assignForm.user_id)?.full_name || "User";
-      addToast("success", `Role assigned to "${userName}"`);
+      const userName = targetUser?.full_name || targetUser?.email || emailManualInput || "User";
+      addToast("success", `Role assigned to "${userName}"${!targetUser?.has_profile ? ' (profile auto-created)' : ''}`);
       setShowAssignModal(false);
       fetchInitialData();
     } catch (err: any) { addToast("error", `Failed: ${err.message}`); }
@@ -552,6 +603,21 @@ export default function UsersRolesPage() {
       variant: "warning",
       onConfirm: async () => {
         try {
+          // Auto-create profile if user doesn't have one
+          const targetUser = allUsers.find(u => u.user_id === userId);
+          if (targetUser && !targetUser.has_profile) {
+            const { error: profileErr } = await supabase.rpc('ensure_profile_exists', { target_user_id: userId });
+            if (profileErr) {
+              console.warn('Auto-create profile failed, trying manual insert:', profileErr.message);
+              await supabase.from('profiles').insert({
+                user_id: userId,
+                email: targetUser.email || '',
+                full_name: '',
+                role: 'EMPLOYEE'
+              });
+            }
+          }
+
           if (hasExistingRole) {
             await supabase.from("user_roles").delete().eq("user_id", userId);
           }
@@ -692,24 +758,159 @@ export default function UsersRolesPage() {
 </div>
 
 <div className="p-6 space-y-5">
-{/* Select User */}
+{/* Select User — Searchable + Manual Email */}
 <div>
 <label className="flex items-center gap-2 text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">
 <UsersRound size={14} />
 Select User *
 </label>
-<select
-value={assignForm.user_id}
-onChange={(e) => setAssignForm({...assignForm, user_id: e.target.value})}
-className="w-full px-4 py-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500"
+
+{/* Search input to filter users */}
+<input
+type="text"
+placeholder="Type name or email to search..."
+value={userSearch}
+onChange={(e) => { setUserSearch(e.target.value); setShowManualInput(false); }}
+className="w-full px-4 py-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 mb-2"
+/>
+
+{/* Default: show unassigned users */}
+{!showManualInput && userSearch.length === 0 && (
+<div className="max-h-40 overflow-y-auto border dark:border-gray-600 rounded-lg mb-2">
+{allUsers.filter(u => !u.hasRole).length === 0 ? (
+<div className="p-3 text-xs text-gray-400 text-center">No unassigned users</div>
+) : (
+allUsers.filter(u => !u.hasRole).map(u => (
+<button
+key={u.user_id}
+type="button"
+onClick={() => { setAssignForm({...assignForm, user_id: u.user_id}); setUserSearch(u.full_name || u.email || ''); }}
+className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors flex items-center justify-between ${assignForm.user_id === u.user_id ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' : 'text-gray-700 dark:text-gray-300'}`}
 >
-<option value="">-- Select User --</option>
-{allUsers.filter(u => !u.hasRole).map(u => (
-<option key={u.user_id} value={u.user_id}>
-{u.full_name || "Unknown"} ({u.email || "N/A"})
-</option>
-))}
-</select>
+<div className="flex items-center gap-2 min-w-0">
+<div className="w-6 h-6 rounded-full bg-gray-200 dark:bg-gray-600 flex items-center justify-center text-[10px] font-bold flex-shrink-0">
+{(u.full_name || u.email || 'U').charAt(0).toUpperCase()}
+</div>
+<div className="min-w-0">
+<span className="truncate block text-sm">{u.full_name || 'No name'}</span>
+<span className="text-xs text-gray-400 truncate block">{u.email || ''}</span>
+</div>
+</div>
+{!u.has_profile && <span className="text-[9px] bg-amber-100 dark:bg-amber-900/30 text-amber-600 px-1.5 py-0.5 rounded flex-shrink-0">No Profile</span>}
+</button>
+))
+)}
+</div>
+)}
+
+{/* Search results */}
+{!showManualInput && userSearch.length > 0 && (
+<div className="max-h-40 overflow-y-auto border dark:border-gray-600 rounded-lg mb-2">
+{allUsers
+  .filter(u => {
+    if (u.hasRole && u.user_id !== assignForm.user_id) return false;
+    const s = userSearch.toLowerCase();
+    return (u.full_name || '').toLowerCase().includes(s) || (u.email || '').toLowerCase().includes(s);
+  })
+  .map(u => (
+    <button
+    key={u.user_id}
+    type="button"
+    onClick={() => { setAssignForm({...assignForm, user_id: u.user_id}); setUserSearch(u.full_name || u.email || ''); }}
+    className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors flex items-center justify-between ${assignForm.user_id === u.user_id ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' : 'text-gray-700 dark:text-gray-300'}`}
+    >
+    <div className="flex items-center gap-2 min-w-0">
+      <div className="w-6 h-6 rounded-full bg-gray-200 dark:bg-gray-600 flex items-center justify-center text-[10px] font-bold flex-shrink-0">
+        {(u.full_name || u.email || 'U').charAt(0).toUpperCase()}
+      </div>
+      <div className="min-w-0">
+        <span className="truncate block text-sm">{u.full_name || 'No name'}</span>
+        <span className="text-xs text-gray-400 truncate block">{u.email || ''}</span>
+      </div>
+    </div>
+    {!u.has_profile && <span className="text-[9px] bg-amber-100 dark:bg-amber-900/30 text-amber-600 px-1.5 py-0.5 rounded flex-shrink-0">No Profile</span>}
+    </button>
+  ))}
+{allUsers.filter(u => {
+  if (u.hasRole && u.user_id !== assignForm.user_id) return false;
+  const s = userSearch.toLowerCase();
+  return (u.full_name || '').toLowerCase().includes(s) || (u.email || '').toLowerCase().includes(s);
+}).length === 0 && (
+  <div className="p-3 text-xs text-gray-400 text-center">No users match "{userSearch}"</div>
+)}
+</div>
+)}
+
+{/* Selected user indicator */}
+{assignForm.user_id && (
+<div className="flex items-center gap-2 mb-2 px-3 py-2 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50 rounded-lg">
+<CheckCircle2 size={14} className="text-green-600 flex-shrink-0" />
+<span className="text-xs text-green-700 dark:text-green-400 truncate">
+  Selected: {allUsers.find(u => u.user_id === assignForm.user_id)?.full_name || allUsers.find(u => u.user_id === assignForm.user_id)?.email || assignForm.user_id}
+</span>
+<button type="button" onClick={() => { setAssignForm({...assignForm, user_id: ''}); setUserSearch(''); }} className="ml-auto text-green-500 hover:text-red-500 transition-colors">
+  <X size={14} />
+</button>
+</div>
+)}
+
+{/* Toggle: Manual Email Search */}
+<button
+  type="button"
+  onClick={() => setShowManualInput(!showManualInput)}
+  className="w-full text-left text-xs text-blue-600 dark:text-blue-400 hover:underline mb-2 flex items-center gap-1"
+>
+  {showManualInput ? <X size={12} /> : <UserPlus size={12} />}
+  {showManualInput ? 'Hide email search' : 'User not in list? Search by email...'}
+</button>
+
+{/* Manual Email Search */}
+{showManualInput && (
+<div className="border dark:border-gray-600 rounded-lg p-3 bg-gray-50 dark:bg-gray-900/30 space-y-2">
+  <div className="flex gap-2">
+    <input
+      type="email"
+      placeholder="Enter email address..."
+      value={emailManualInput}
+      onChange={(e) => setEmailManualInput(e.target.value)}
+      onKeyDown={(e) => e.key === 'Enter' && searchUserByEmail()}
+      className="flex-1 px-3 py-2 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500"
+    />
+    <button
+      type="button"
+      onClick={searchUserByEmail}
+      disabled={searchingEmail || !emailManualInput.trim()}
+      className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium disabled:opacity-50 flex items-center gap-1"
+    >
+      {searchingEmail ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />} Search
+    </button>
+  </div>
+  {emailSearchResults.length > 0 && (
+    <div className="max-h-32 overflow-y-auto">
+      {emailSearchResults.map((r: any) => (
+        <button
+          key={r.user_id}
+          type="button"
+          onClick={() => {
+            setAssignForm({...assignForm, user_id: r.user_id});
+            setUserSearch(r.email);
+            setEmailSearchResults([]);
+          }}
+          className={`w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors ${assignForm.user_id === r.user_id ? 'bg-blue-50 dark:bg-blue-900/30' : ''}`}
+        >
+          {r.email}
+          {allUsers.find(u => u.user_id === r.user_id)?.has_profile
+            ? <span className="ml-2 text-[9px] bg-gray-100 dark:bg-gray-700 text-gray-500 px-1.5 py-0.5 rounded">Has Profile</span>
+            : <span className="ml-2 text-[9px] bg-amber-100 dark:bg-amber-900/30 text-amber-600 px-1.5 py-0.5 rounded">No Profile</span>}
+        </button>
+      ))}
+    </div>
+  )}
+  {emailManualInput && emailSearchResults.length === 0 && !searchingEmail && (
+    <p className="text-xs text-gray-400">No results. Make sure the email is registered in the system.</p>
+  )}
+</div>
+)}
 </div>
 
 {/* Select Role */}
@@ -1066,6 +1267,10 @@ Assigned: <strong>{allUsers.filter(u => u.hasRole).length}</strong>
 <span className="text-amber-600 dark:text-amber-400">
 Unassigned: <strong>{allUsers.filter(u => !u.hasRole).length}</strong>
 </span>
+<span className="text-gray-300 dark:text-gray-600">|</span>
+<span className="text-red-500 dark:text-red-400">
+No Profile: <strong>{allUsers.filter(u => !u.has_profile).length}</strong>
+</span>
 </div>
 
 {/*  NEW: Assign Role to User Button */}
@@ -1106,6 +1311,7 @@ return (
 <div className="font-medium text-gray-900 dark:text-white flex items-center gap-1.5">
 {u.full_name || 'Unknown'}
 {isMe && <span className="text-[10px] bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400 px-1.5 py-0.5 rounded font-medium">(You)</span>}
+{!u.has_profile && <span className="text-[10px] bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-1.5 py-0.5 rounded font-medium">No Profile</span>}
 {!u.hasRole && <span className="text-[10px] bg-amber-100 dark:bg-amber-900/40 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded font-medium">No Role</span>}
 </div>
 <div className="text-xs text-gray-500 dark:text-gray-400">{u.email || 'N/A'}</div>

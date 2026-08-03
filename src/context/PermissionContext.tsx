@@ -55,6 +55,7 @@ const VALID_PERM_CODES: string[] = [
 
 // Fallback permissions
 const FALLBACK_PERMISSIONS: Record<string, PermCode[]> = {
+  Admin: null as any,
   CEO: [
     "INCOME_READ", "INCOME_CREATE", "INCOME_UPDATE", "INCOME_DELETE",
     "EXPENSE_READ", "EXPENSE_CREATE", "EXPENSE_UPDATE", "EXPENSE_DELETE",
@@ -138,7 +139,7 @@ interface PermissionContextType {
   permissions: Set<PermCode>;
   can: (perm: PermCode) => boolean;
   hasPermission: (perm: string) => boolean;
-  isFinanceUser :boolean,
+  isFinanceUser: boolean;
   isLoading: boolean;
   error: string | null;
   refreshPermissions: () => Promise<void>;
@@ -157,7 +158,6 @@ const PermissionContext = createContext<PermissionContextType>({
 
 export function PermissionProvider({ children }: { children: ReactNode }) {
   const auth = useAuth();
-  
   const user = (auth as any).user ?? null;
   const authLoading = (auth as any).isLoading ?? (auth as any).loading ?? false;
 
@@ -184,60 +184,106 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
       let assignedRole: string | null = null;
       let roleId: string | null = null;
 
-      // ✅ METHOD 1: Try RPC function (most secure - uses JWT)
+      // ========== METHOD 1: RPC get_my_user_roles ==========
       try {
         const { data: rpcData, error: rpcError } = await supabase.rpc("get_my_user_roles");
-        
-        if (!rpcError && rpcData && rpcData.length > 0) {
-          // Get the active, effective role
-          const activeRole = rpcData
-            .filter((r: any) => r.is_active && r.effective_from <= today && (!r.effective_to || r.effective_to >= today))
-            .sort((a: any, b: any) => b.effective_from?.localeCompare(a.effective_from))[0];
-          
+
+        // RPC can return array or single object
+        const rpcArray = Array.isArray(rpcData) ? rpcData : (rpcData ? [rpcData] : []);
+
+        if (!rpcError && rpcArray.length > 0) {
+          const activeRole = rpcArray
+            .filter((r: any) =>
+              r.is_active !== false &&
+              r.effective_from <= today &&
+              (!r.effective_to || r.effective_to >= today)
+            )
+            .sort((a: any, b: any) =>
+              (b.effective_from || '').localeCompare(a.effective_from || '')
+            )[0];
+
           if (activeRole) {
-            assignedRole = activeRole.role;
-            roleId = activeRole.role_id;
+            // Support both 'role' and 'role_name' column names
+            assignedRole = activeRole.role || activeRole.role_name || null;
+            roleId = activeRole.role_id || null;
+            console.log("[PermCtx] METHOD 1 (RPC) role:", assignedRole, "roleId:", roleId);
           }
+        } else if (rpcError) {
+          console.warn("[PermCtx] RPC get_my_user_roles error:", rpcError.message);
         }
       } catch (e) {
-        console.warn("RPC get_my_user_roles failed, trying view:", e);
+        console.warn("[PermCtx] RPC get_my_user_roles exception:", e);
       }
 
-      // ✅ METHOD 2: Fallback to view with client-side filter
+      // ========== METHOD 2: View v_user_roles ==========
       if (!assignedRole) {
-        const { data: viewData, error: viewError } = await supabase
-          .from("v_user_roles")
-          .select("role, role_id, is_active, effective_from, effective_to")
-          .eq("user_id", user.id)
-          .eq("is_active", true)
-          .lte("effective_from", today)
-          .or(`effective_to.is.null,effective_to.gte.${today}`)
-          .order("effective_from", { ascending: false })
-          .limit(1)
-          .maybeSingle();
+        try {
+          const { data: viewData, error: viewError } = await supabase
+            .from("v_user_roles")
+            .select("role, role_name, role_id, is_active, effective_from, effective_to")
+            .eq("user_id", user.id)
+            .eq("is_active", true)
+            .lte("effective_from", today)
+            .or(`effective_to.is.null,effective_to.gte.${today}`)
+            .order("effective_from", { ascending: false })
+            .limit(1)
+            .maybeSingle();
 
-        if (!viewError && viewData) {
-          assignedRole = viewData.role;
-          roleId = viewData.role_id;
+          if (!viewError && viewData) {
+            // Support both 'role' and 'role_name' column names
+            assignedRole = (viewData as any).role || (viewData as any).role_name || null;
+            roleId = viewData.role_id;
+            console.log("[PermCtx] METHOD 2 (View) role:", assignedRole, "roleId:", roleId);
+          } else if (viewError) {
+            console.warn("[PermCtx] v_user_roles query error:", viewError.message);
+          }
+        } catch (e) {
+          console.warn("[PermCtx] v_user_roles query exception:", e);
         }
       }
 
-      // ✅ METHOD 3: Fallback to profiles.role
+      // ========== METHOD 3: profiles.role fallback ==========
       if (!assignedRole) {
-        const { data: profileData } = await supabase
-          .from("profiles")
-          .select("role")
-          .eq("id", user.id)
-          .maybeSingle();
-
-        if (profileData?.role) {
-          assignedRole = profileData.role;
-          const { data: roleMatch } = await supabase
-            .from("v_roles")
-            .select("id")
-            .eq("name", assignedRole)
+        try {
+          // Try user_id first (correct FK column)
+          let { data: pData } = await supabase
+            .from("profiles")
+            .select("role")
+            .eq("user_id", user.id)
             .maybeSingle();
-          roleId = roleMatch?.id ?? null;
+
+          // Fallback to id column
+          if (!pData) {
+            const result = await supabase
+              .from("profiles")
+              .select("role")
+              .eq("id", user.id)
+              .maybeSingle();
+            pData = result.data;
+          }
+
+          let profileRole = pData?.role;
+
+          // Map legacy role names
+          if (profileRole === "Admin") {
+            console.warn("[PermCtx] Legacy 'Admin' role found in profile. Mapping to CEO.");
+            profileRole = "CEO";
+          } else if (profileRole === "Program Manager") {
+            profileRole = "ACCOUNTANT";
+          }
+
+          if (profileRole) {
+            assignedRole = profileRole;
+            const { data: roleMatch } = await supabase
+              .from("v_roles")
+              .select("id")
+              .eq("name", assignedRole)
+              .maybeSingle();
+            roleId = roleMatch?.id ?? null;
+            console.log("[PermCtx] METHOD 3 (Profile) role:", assignedRole, "roleId:", roleId);
+          }
+        } catch (e) {
+          console.warn("[PermCtx] Profile fallback exception:", e);
         }
       }
 
@@ -246,79 +292,121 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
         assignedRole = "VIEWER";
       }
 
-      // ✅ CEO uniqueness check
+      // ========== CEO uniqueness check (skip if view column mismatch) ==========
       if (assignedRole === "CEO") {
         try {
-          const { count } = await supabase
+          const { count, error: ceoErr } = await supabase
             .from("v_user_roles")
             .select("*", { count: "exact", head: true })
-            .eq("role", "CEO")
             .eq("is_active", true)
             .neq("user_id", user.id);
 
-          if (count && count > 0) {
-            console.warn("Another CEO exists. Using FINANCE_HEAD.");
-            assignedRole = "FINANCE_HEAD";
-            const { data: fhRole } = await supabase
-              .from("v_roles")
-              .select("id")
-              .eq("name", "FINANCE_HEAD")
-              .maybeSingle();
-            roleId = fhRole?.id ?? null;
+          if (!ceoErr && count && count > 0) {
+            // Check if any of those are actually CEO role
+            const { data: otherCEOs } = await supabase
+              .from("v_user_roles")
+              .select("role, role_name, user_id")
+              .eq("is_active", true)
+              .neq("user_id", user.id);
+
+            const isReallyCEO = (otherCEOs || []).some(
+              (r: any) => r.role === "CEO" || r.role_name === "CEO"
+            );
+
+            if (isReallyCEO) {
+              console.warn("[PermCtx] Another CEO exists. Downgrading to FINANCE_HEAD.");
+              assignedRole = "FINANCE_HEAD";
+              const { data: fhRole } = await supabase
+                .from("v_roles")
+                .select("id")
+                .eq("name", "FINANCE_HEAD")
+                .maybeSingle();
+              roleId = fhRole?.id ?? null;
+            }
           }
         } catch (e) {
-          console.warn("CEO check failed:", e);
+          console.warn("[PermCtx] CEO check exception:", e);
         }
       }
 
-      // ✅ Fetch permissions
+      // ========== FETCH PERMISSIONS ==========
       let dbPermissions: PermCode[] = [];
 
-      // Try RPC first
+      // --- Permission METHOD 1: RPC get_my_permissions ---
+      // Handles both JSON object return and table return
       if (roleId) {
         try {
           const { data: rpcPerms, error: rpcPermError } = await supabase.rpc("get_my_permissions");
-          
-          if (!rpcPermError && rpcPerms && rpcPerms.length > 0) {
-            dbPermissions = rpcPerms
-              .map((p: any) => p.permission_code)
-              .filter((code: any): code is PermCode => code && VALID_PERM_CODES.includes(code));
+
+          if (!rpcPermError && rpcPerms) {
+            // Case A: RPC returns JSON object {role: 'CEO', ADMIN_USERS: true, ...}
+            if (!Array.isArray(rpcPerms) && typeof rpcPerms === 'object') {
+              dbPermissions = Object.keys(rpcPerms)
+                .filter((key: string) =>
+                  VALID_PERM_CODES.includes(key) && rpcPerms[key] === true
+                );
+              console.log("[PermCtx] Perm RPC-JSON:", dbPermissions.length, "permissions");
+            }
+            // Case B: RPC returns table [{permission_code: '...'}, ...]
+            else if (Array.isArray(rpcPerms) && rpcPerms.length > 0) {
+              dbPermissions = rpcPerms
+                .map((p: any) => p.permission_code || p.perm_code || p.code)
+                .filter((code: any): code is PermCode =>
+                  code && VALID_PERM_CODES.includes(code)
+                );
+              console.log("[PermCtx] Perm RPC-Table:", dbPermissions.length, "permissions");
+            }
+          } else if (rpcPermError) {
+            console.warn("[PermCtx] RPC get_my_permissions error:", rpcPermError.message);
           }
         } catch (e) {
-          console.warn("RPC get_my_permissions failed:", e);
+          console.warn("[PermCtx] RPC get_my_permissions exception:", e);
         }
       }
 
-      // Fallback to view query
+      // --- Permission METHOD 2: View v_role_permissions ---
+      // Handles both 'permission_code' and 'perm_code' column names
       if (dbPermissions.length === 0 && roleId) {
         try {
-          const { data: permData } = await supabase
+          const { data: permData, error: permError } = await supabase
             .from("v_role_permissions")
-            .select("permission_code")
+            .select("permission_code, perm_code")
             .eq("role_id", roleId)
             .lte("effective_from", today)
             .or(`effective_to.is.null,effective_to.gte.${today}`);
 
-          if (permData && permData.length > 0) {
+          if (!permError && permData && permData.length > 0) {
             dbPermissions = permData
-              .map(p => p.permission_code)
-              .filter((code): code is PermCode => code && VALID_PERM_CODES.includes(code));
+              .map((p: any) => p.permission_code || p.perm_code)
+              .filter((code): code is PermCode =>
+                code && VALID_PERM_CODES.includes(code)
+              );
+            console.log("[PermCtx] Perm View:", dbPermissions.length, "permissions");
+          } else if (permError) {
+            console.warn("[PermCtx] v_role_permissions error:", permError.message);
           }
         } catch (e) {
-          console.warn("v_role_permissions query failed:", e);
+          console.warn("[PermCtx] v_role_permissions exception:", e);
         }
       }
 
-      // Use DB or fallback
+      // ========== FINAL RESOLVE ==========
+      const resolvedRole = assignedRole === "Admin" ? "CEO"
+        : assignedRole === "Program Manager" ? "ACCOUNTANT"
+        : assignedRole;
+
       const finalPermissions = dbPermissions.length > 0
         ? dbPermissions
-        : (FALLBACK_PERMISSIONS[assignedRole] || FALLBACK_PERMISSIONS.VIEWER);
+        : (FALLBACK_PERMISSIONS[resolvedRole] || FALLBACK_PERMISSIONS.VIEWER);
+
+      console.log("[PermCtx] FINAL role:", assignedRole, "permissions:", finalPermissions.length,
+        "source:", dbPermissions.length > 0 ? "database" : "fallback");
 
       setRole(assignedRole);
       setPermissions(new Set(finalPermissions));
 
     } catch (err) {
-      console.error("Permission fetch error:", err);
+      console.error("[PermCtx] Permission fetch error:", err);
       setError(err instanceof Error ? err.message : "Failed to load permissions");
       setRole("VIEWER");
       setPermissions(new Set(FALLBACK_PERMISSIONS.VIEWER));
@@ -338,17 +426,18 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
   const hasPermission = (perm: string): boolean => {
     return permissions.has(perm as PermCode);
   };
-  const isFinanceUser = permissions.has('JOURNAL_CREATE') ||  permissions.has('INCOME_CREATE');
+  const isFinanceUser = permissions.has('JOURNAL_CREATE') || permissions.has('INCOME_CREATE');
+
   return (
-    <PermissionContext.Provider value={{ 
-      role, 
-      permissions, 
-      can, 
-      hasPermission, 
-      isLoading, 
+    <PermissionContext.Provider value={{
+      role,
+      permissions,
+      can,
+      hasPermission,
+      isLoading,
       isFinanceUser,
       error,
-      refreshPermissions: fetchUserRole 
+      refreshPermissions: fetchUserRole
     }}>
       {children}
     </PermissionContext.Provider>

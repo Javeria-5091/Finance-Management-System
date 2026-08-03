@@ -1,53 +1,57 @@
 import { supabase } from '@/lib/supabase';
-import type { 
-  CEODashboardMetrics, 
-  ProfitAndLossRow, 
-  BalanceSheetRow, 
-  CashFlowRow, 
-  ProjectProfitabilityRow 
-} from '@/types/accounting.types';
+import type { PLData, BSData, CFData, AgingData, ProjectProfitRow, TaxReportData } from '@/types/reports.types';
 
-const db = () => supabase.schema('reporting');
+export const getProfitAndLoss = async (start?: string, end?: string) => {
+  const { data, error } = await supabase.rpc('profit_and_loss', {
+    p_start: start || null, p_end: end || null
+  });
+  if (error) throw new Error(error.message);
+  return data as PLData;
+};
 
-export const reportService = {
-  getCEOMetrics: async (): Promise<CEODashboardMetrics> => {
-    const { data, error } = await db().rpc('get_ceo_metrics');
-    if (error) throw error;
-    return data[0];
-  },
+export const getBalanceSheet = async () => {
+  const { data, error } = await supabase.rpc('balance_sheet');
+  if (error) throw new Error(error.message);
+  return data as BSData;
+};
 
-  getProfitAndLoss: async (startDate: string, endDate: string): Promise<ProfitAndLossRow[]> => {
-    const { data, error } = await db().rpc('get_profit_and_loss', {
-      p_start_date: startDate,
-      p_end_date: endDate,
-    });
-    if (error) throw error;
-    return data ?? [];
-  },
+export const getCashFlow = async (start?: string, end?: string) => {
+  const { data, error } = await supabase.rpc('cash_flow', {
+    p_start: start || null, p_end: end || null
+  });
+  if (error) throw new Error(error.message);
+  return data as CFData;
+};
 
-  getBalanceSheet: async (asOfDate: string): Promise<BalanceSheetRow[]> => {
-    const { data, error } = await db().rpc('get_balance_sheet', {
-      p_as_of_date: asOfDate,
-    });
-    if (error) throw error;
-    return data ?? [];
-  },
+export const getAgingReport = async () => {
+  const { data, error } = await supabase.rpc('aging_report');
+  if (error) throw new Error(error.message);
+  return data as AgingData;
+};
 
-  getCashFlow: async (startDate: string, endDate: string): Promise<CashFlowRow[]> => {
-    const { data, error } = await db().rpc('get_cash_flow', {
-      p_start_date: startDate,
-      p_end_date: endDate,
-    });
-    if (error) throw error;
-    return data ?? [];
-  },
+// ... existing functions remain ...
 
-  getProjectProfitability: async (startDate: string, endDate: string): Promise<ProjectProfitabilityRow[]> => {
-    const { data, error } = await db().rpc('get_project_profitability', {
-      p_start_date: startDate,
-      p_end_date: endDate,
-    });
-    if (error) throw error;
-    return data ?? [];
-  }
+export const getProjectProfitability = async (start?: string, end?: string) => {
+  const { data, error } = await supabase.rpc('project_profitability_report', {
+    p_start: start || null, p_end: end || null
+  });
+  if (error) throw new Error(error.message);
+  return (data || []) as ProjectProfitRow[];
+};
+
+export const getTaxReport = async (taxYear?: string) => {
+  const { data, error } = await supabase.rpc('tax_report', {
+    p_tax_year: taxYear || null
+  });
+  if (error) throw new Error(error.message);
+  return data as TaxReportData;
+};
+
+export default {
+  getProfitAndLoss,
+  getBalanceSheet,
+  getCashFlow,
+  getAgingReport,
+  getProjectProfitability,
+  getTaxReport,
 };

@@ -5,7 +5,7 @@ import { useAuth } from '@/context/AuthContext';
 import { Pencil, Trash2, Send, CheckCircle, RotateCcw, XCircle } from 'lucide-react';
 
 export default function StatusActions({ record, module, onAction }) {
-  const { hasPermission, hasPermissionWithLimit } = usePermissions();
+  const { hasPermission } = usePermissions();
   const { user } = useAuth();
   
   const mod = module.toUpperCase(); // e.g., 'INCOME'

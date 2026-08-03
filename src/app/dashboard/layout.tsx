@@ -14,18 +14,23 @@ const ADMIN_ONLY_ROUTES = [
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { user, isAdmin } = useAuth();
+  const { user, isAdmin, loading: authLoading } = useAuth();
   const { isDark, toggleTheme } = useTheme(); // THEME HOOK
   const router = useRouter();
   const pathname = usePathname();
 
   useEffect(() => {
-    if (!user) {
+    if (!user && !authLoading) {
       router.push("/login");
     }
-  }, [user, router]);
+  }, [user, authLoading, router]);
 
-  if (!user) return null;
+  // Wait for auth + profile to fully load before checking access
+  if (authLoading || !user) return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
+      <div className="animate-spin w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full"></div>
+    </div>
+  );
 
   const isAdminRoute = ADMIN_ONLY_ROUTES.some((route) => pathname.startsWith(route));
 

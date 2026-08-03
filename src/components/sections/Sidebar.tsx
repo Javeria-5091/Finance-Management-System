@@ -110,7 +110,7 @@ const navGroups: NavGroup[] = [
     id: "income-expense",
     label: "Income & Expenses",
     items: [
-      { id: "incomes", label: "Income", icon: "ArrowDownCircle", path: "/dashboard/incomes", perm: "INCOME_READ" },
+      { id: "incomes", label: "Income", icon: "ArrowDownCircle", path: "/dashboard/income", perm: "INCOME_READ" },
       { id: "expenses", label: "Expenses", icon: "ArrowUpCircle", path: "/dashboard/expenses", perm: "EXPENSE_READ" },
       { id: "budgets", label: "Budgets", icon: "PieChart", path: "/dashboard/budgets", perm: "BUDGET_READ" },
     ],
@@ -127,7 +127,7 @@ const navGroups: NavGroup[] = [
     label: "Accounts Receivable",
     items: [
       { id: "invoices", label: "Invoices", icon: "FileText", path: "/dashboard/invoices", perm: "INVOICE_READ" },
-      { id: "payment-receipts", label: "Payment Receipts", icon: "Download", path: "/dashboard/payments-receipts", perm: "PAYMENT_RECEIPT_READ" },
+      { id: "payment-receipts", label: "Payment Receipts", icon: "Download", path: "/dashboard/payment-receipts", perm: "PAYMENT_RECEIPT_READ" },
       { id: "credit-notes", label: "Credit Notes", icon: "RotateCcw", path: "/dashboard/credit-notes", perm: "CREDIT_NOTE_READ" },
     ],
   },
@@ -135,7 +135,7 @@ const navGroups: NavGroup[] = [
     id: "payables",
     label: "Accounts Payable",
     items: [
-      { id: "vendor", label: "Vendors", icon: "Building2", path: "/dashboard/vendor", perm: "VENDOR_READ" },
+      { id: "vendor", label: "Vendors", icon: "Building2", path: "/dashboard/vendors", perm: "VENDOR_READ" },
       { id: "vendor-bills", label: "Vendor Bills", icon: "FileText", path: "/dashboard/vendor-bills", perm: "VENDOR_BILL_READ" },
       { id: "vendor-payments", label: "Vendor Payments", icon: "CreditCard", path: "/dashboard/vendor-payments", perm: "VENDOR_PAYMENT_READ" },
     ],
@@ -172,6 +172,10 @@ const navGroups: NavGroup[] = [
     label: "Reports",
     items: [
       { id: "all-reports", label: "All Reports", icon: "BarChart3", path: "/dashboard/reports", perm: "REPORT_READ" },
+      { id: "finance", label: "Financial Statements", path: "/dashboard/reports", icon: "BarChart3", perm: "REPORT_READ" },
+      { id: "aging", label: "Aging Reports", path: "/dashboard/reports/aging-reports", icon: "Clock", perm: "REPORT_READ" },
+      { id: "profit", label: "Project Profitability", path: "/dashboard/reports/project-profitability", icon: "Target", perm: "REPORT_READ" },
+      { id: "tax-report", label: "Tax Report", path: "/dashboard/reports/tax", icon: "Calculator", perm: "REPORT_READ" },
     ],
   },
   {
@@ -196,8 +200,11 @@ const navGroups: NavGroup[] = [
 
 export default function Sidebar({ open, onClose }: SidebarProps) {
   const pathname = usePathname();
-  const { role, profile, signOut } = useAuth();
-  const { hasPermission, isLoading: permLoading } = usePermissions();
+  const { profile, signOut } = useAuth();
+  const { hasPermission, role: rbacRole, isLoading: permLoading } = usePermissions();
+  const { role: authRole } = useAuth();
+  // Prefer RBAC role from PermissionContext over legacy profiles.role
+  const displayRole = rbacRole && rbacRole !== 'VIEWER' ? rbacRole : authRole;
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
   const toggleGroup = (groupId: string) => {
@@ -284,7 +291,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
                   {profile.full_name || profile.email?.split('@')[0]}
                 </p>
                 <span className="inline-flex items-center w-fit px-2 py-0.5 rounded mt-1 text-[10px] font-bold uppercase tracking-wider bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
-                  {role}
+                  {displayRole}
                 </span>
               </div>
             </div>
