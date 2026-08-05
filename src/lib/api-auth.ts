@@ -29,6 +29,7 @@ const APPROVAL_ROLES: Record<string, number> = {
   ACCOUNTANT: 60,
   HOD: 40,
   PROJECT_MANAGER: 20,
+  TECHNICAL_ADMIN: 15,
   EMPLOYEE: 10,
   VIEWER: 0,
 };

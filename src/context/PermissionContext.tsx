@@ -28,7 +28,9 @@ export type PermCode =
   | "APPROVE_VENDOR_BILL" | "APPROVE_PAYMENT" | "APPROVE_JOURNAL"
   | "CLIENT_READ" | "CLIENT_CREATE" | "CLIENT_UPDATE" | "CLIENT_DELETE"
   | "GL_READ"
-  | "TAX_CREATE";
+  | "TAX_CREATE"
+  | "APPROVE_BUDGET"             
+  | "ADMIN_MFA"; 
 
 // Valid permission codes for validation
 const VALID_PERM_CODES: PermCode[] = [
@@ -56,6 +58,8 @@ const VALID_PERM_CODES: PermCode[] = [
   "CLIENT_READ", "CLIENT_CREATE", "CLIENT_UPDATE", "CLIENT_DELETE",
   "GL_READ",
   "TAX_CREATE",
+  "APPROVE_BUDGET",             
+  "ADMIN_MFA",
 ];
 
 // Fallback permissions
@@ -86,6 +90,7 @@ const FALLBACK_PERMISSIONS: Record<string, PermCode[]> = {
     "CLIENT_READ", "CLIENT_CREATE", "CLIENT_UPDATE", "CLIENT_DELETE",
     "GL_READ",
     "TAX_CREATE",
+    "APPROVE_BUDGET",
   ],
   FINANCE_HEAD: [
     "INCOME_READ", "INCOME_CREATE", "INCOME_UPDATE", "INCOME_DELETE",
@@ -108,6 +113,7 @@ const FALLBACK_PERMISSIONS: Record<string, PermCode[]> = {
     "SETTINGS_READ", "SETTINGS_MANAGE",
     "APPROVE_INCOME", "APPROVE_EXPENSE", "APPROVE_INVOICE",
     "APPROVE_VENDOR_BILL", "APPROVE_PAYMENT", "APPROVE_JOURNAL",
+    "APPROVE_BUDGET",
   ],
   ACCOUNTANT: [
     "INCOME_READ", "INCOME_CREATE", "INCOME_UPDATE",
@@ -133,6 +139,11 @@ const FALLBACK_PERMISSIONS: Record<string, PermCode[]> = {
     "INVOICE_READ",
     "PROJECT_READ", "PROJECT_UPDATE",
     "REPORT_READ",
+  ],
+  TECHNICAL_ADMIN: [
+    // System/infrastructure access ONLY - no finance data
+    "SETTINGS_READ",
+    "ADMIN_AUDIT",
   ],
   EMPLOYEE: [
     "EXPENSE_READ", "EXPENSE_CREATE",

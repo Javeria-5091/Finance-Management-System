@@ -1,0 +1,355 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============ P0 FOUNDATION ============
+
+model Organization {
+  id            String   @id @default(cuid())
+  name          String
+  baseCurrency  String   @default("PKR")
+  fiscalYearStart Int    @default(7) // July = 7
+  fiscalYearEnd Int      @default(6) // June = 6
+  timezone      String   @default("Asia/Karachi")
+  address       String?
+  phone         String?
+  email         String?
+  website       String?
+  logoUrl       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  accounts      Account[]
+  assets        FixedAsset[]
+  subscriptions Subscription[]
+  payrollRecords PayrollRecord[]
+  contractors   Contractor[]
+  auditLogs     AuditLog[]
+  journalEntries JournalEntry[]
+}
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String
+  role          String   @default("accountant") // ceo, finance_head, accountant, project_manager, admin
+  department    String?
+  isActive      Boolean  @default(true)
+  lastLogin     DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  auditLogs       AuditLog[]
+  createdEntries  JournalEntry[] @relation("EntryCreator")
+  approvedEntries JournalEntry[] @relation("EntryApprover")
+}
+
+model Account {
+  id            String   @id @default(cuid())
+  code          String
+  name          String
+  type          String   // Asset, Liability, Equity, Revenue, CostOfSales, OperatingExpense, OtherIncome, OtherExpense
+  parentCode    String?
+  normalBalance String   @default("debit") // debit or credit
+  currency      String   @default("PKR")
+  isActive      Boolean  @default(true)
+  isControl     Boolean  @default(false)
+  postingAllowed Boolean @default(true)
+  reportMapping String?
+  organizationId String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  organization  Organization @relation(fields: [organizationId], references: [id])
+  journalLines  JournalLine[]
+
+  @@unique([organizationId, code])
+}
+
+model JournalEntry {
+  id              String   @id @default(cuid())
+  entryNumber     String
+  date            DateTime
+  description     String
+  reference       String?
+  status          String   @default("draft") // draft, submitted, verified, approved, posted, reversed
+  totalDebit      Float
+  totalCredit     Float
+  currency        String   @default("PKR")
+  periodId        String?
+  createdById     String?
+  approvedById    String?
+  organizationId  String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  organization    Organization @relation(fields: [organizationId], references: [id])
+  lines           JournalLine[]
+  createdBy       User?       @relation("EntryCreator", fields: [createdById], references: [id])
+  approvedBy      User?       @relation("EntryApprover", fields: [approvedById], references: [id])
+}
+
+model JournalLine {
+  id              String   @id @default(cuid())
+  journalEntryId  String
+  accountId       String
+  description     String?
+  debit           Float    @default(0)
+  credit          Float    @default(0)
+  projectId       String?
+  costCenterId    String?
+
+  journalEntry    JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account         Account      @relation(fields: [accountId], references: [id])
+}
+
+// ============ P1: FIXED ASSETS & DEPRECIATION ============
+
+model FixedAsset {
+  id                String   @id @default(cuid())
+  assetTag          String   @unique
+  name              String
+  category          String   // Technology, Office Equipment, Furniture, Vehicle, Other
+  description       String?
+  serialNumber      String?
+  vendor            String?
+  purchaseDate      DateTime
+  purchaseCost      Float
+  currency          String   @default("PKR")
+  usefulLifeYears   Int
+  residualValue     Float    @default(0)
+  currentNetBookValue Float
+  accumulatedDepreciation Float @default(0)
+  depreciationMethod String   @default("straight_line") // straight_line, declining_balance
+  location          String?
+  assignedUserId    String?
+  status            String   @default("active") // active, under_maintenance, disposed, sold, impaired
+  warrantyExpiry    DateTime?
+  lastVerifiedDate  DateTime?
+  physicalVerificationStatus String @default("pending") // pending, verified, discrepancy
+  notes             String?
+  organizationId    String
+  createdById       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  organization      Organization @relation(fields: [organizationId], references: [id])
+  depreciationEntries DepreciationEntry[]
+
+  @@index([organizationId])
+  @@index([category])
+  @@index([status])
+}
+
+model DepreciationEntry {
+  id                String   @id @default(cuid())
+  assetId           String
+  periodDate        DateTime
+  fiscalYear        String
+  depreciationAmount Float
+  accumulatedDepreciation Float
+  netBookValue      Float
+  journalEntryId    String?
+  status            String   @default("calculated") // calculated, posted, reversed
+  createdAt         DateTime @default(now())
+
+  asset             FixedAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([assetId, periodDate])
+  @@index([fiscalYear])
+}
+
+// ============ P1: RECURRING COSTS & SUBSCRIPTIONS ============
+
+model Subscription {
+  id                String   @id @default(cuid())
+  name              String
+  category          String   // Hosting, Domain, AI_API, Supabase, Email, Internet, Rent, Utility, Software, Other
+  vendor            String?
+  vendorContact     String?
+  amount            Float
+  currency          String   @default("PKR")
+  billingFrequency  String   // monthly, quarterly, annually, one_time, custom
+  customDays        Int?
+  startDate         DateTime
+  renewalDate       DateTime
+  cancellationNoticeDays Int @default(30)
+  autoRenew         Boolean  @default(true)
+  status            String   @default("active") // active, cancelled, expired, paused
+  ownerUserId       String?
+  projectId         String?
+  costCenterId      String?
+  paymentMethod     String?
+  lastPaidDate      DateTime?
+  nextDueDate       DateTime?
+  totalPaidToDate   Float    @default(0)
+  annualizedCost    Float
+  notes             String?
+  organizationId    String
+  createdById       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  organization      Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@index([category])
+  @@index([status])
+  @@index([renewalDate])
+}
+
+model SubscriptionPayment {
+  id                String   @id @default(cuid())
+  subscriptionId    String
+  amount            Float
+  currency          String   @default("PKR")
+  periodStartDate   DateTime
+  periodEndDate     DateTime
+  paymentDate       DateTime?
+  paymentMethod     String?
+  reference         String?
+  status            String   @default("pending") // pending, paid, failed, refunded
+  journalEntryId    String?
+  createdAt         DateTime @default(now())
+
+  @@index([subscriptionId])
+}
+
+// ============ P1: PAYROLL, CONTRACTORS & COMMISSIONS ============
+
+enum CompensationType {
+  SALARY
+  HOURLY
+  PROJECT_BASED
+  COMMISSION_ONLY
+  RETAINER
+}
+
+enum PaymentStatus {
+  PENDING
+  APPROVED
+  PROCESSING
+  PAID
+  FAILED
+  CANCELLED
+}
+
+model Contractor {
+  id                String   @id @default(cuid())
+  name              String
+  email             String?
+  phone             String?
+  cnic              String?
+  bankName          String?
+  bankAccount       String?
+  compensationType  String   @default("PROJECT_BASED")
+  rate              Float?
+  currency          String   @default("PKR")
+  specialty         String?
+  vendorId          String?
+  taxWithholdingPercent Float @default(0)
+  isActive          Boolean  @default(true)
+  startDate         DateTime?
+  endDate           DateTime?
+  notes             String?
+  organizationId    String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  organization      Organization @relation(fields: [organizationId], references: [id])
+  payrollRecords    PayrollRecord[]
+  commissions       Commission[]
+
+  @@index([organizationId])
+  @@index([isActive])
+}
+
+model PayrollRecord {
+  id                String   @id @default(cuid())
+  contractorId      String?
+  employeeRefId     String?  // Future HR system integration reference
+  payrollPeriod     String   // e.g. "2025-07"
+  grossAmount       Float
+  currency          String   @default("PKR")
+  taxWithholding    Float    @default(0)
+  otherDeductions   Float    @default(0)
+  netAmount         Float
+  paymentMethod     String?
+  paymentDate       DateTime?
+  paymentReference  String?
+  status            String   @default("pending")
+  projectId         String?
+  costCenterId      String?
+  journalEntryId    String?
+  approvedById      String?
+  notes             String?
+  organizationId    String
+  createdById       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  organization      Organization @relation(fields: [organizationId], references: [id])
+  contractor       Contractor?  @relation(fields: [contractorId], references: [id])
+
+  @@index([organizationId])
+  @@index([payrollPeriod])
+  @@index([status])
+}
+
+model Commission {
+  id                String   @id @default(cuid())
+  contractorId      String
+  projectId         String?
+  invoiceId         String?
+  commissionBasis   String   // revenue, profit, fixed
+  commissionRate    Float
+  commissionAmount  Float
+  currency          String   @default("PKR")
+  calculationDate   DateTime
+  status            String   @default("pending") // pending, approved, paid
+  paymentPayrollId  String?
+  notes             String?
+  createdAt         DateTime @default(now())
+
+  contractor       Contractor  @relation(fields: [contractorId], references: [id])
+
+  @@index([contractorId])
+  @@index([status])
+}
+
+// ============ P0: AUDIT TRAIL (Append-only) ============
+
+model AuditLog {
+  id                String   @id @default(cuid())
+  userId            String?
+  userName          String?
+  userRole          String?
+  sessionId         String?
+  action            String   // CREATE, UPDATE, DELETE, APPROVE, REJECT, LOGIN, EXPORT, VIEW
+  entityType        String   // FixedAsset, Subscription, PayrollRecord, etc.
+  entityId          String?
+  entityDescription String?
+  beforeValue       String?  // JSON string of before state
+  afterValue        String?  // JSON string of after state
+  reason            String?
+  ipAddress         String?
+  userAgent         String?
+  status            String   @default("success") // success, failure
+  severity          String   @default("info") // info, warning, error, critical
+  organizationId    String
+  createdAt         DateTime @default(now())
+
+  organization      Organization @relation(fields: [organizationId], references: [id])
+  user              User?       @relation(fields: [userId], references: [id])
+
+  @@index([organizationId])
+  @@index([entityType])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([action])
+}
