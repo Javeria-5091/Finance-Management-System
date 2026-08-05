@@ -2,83 +2,27 @@
 
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend, ScatterChart, Scatter, ZAxis } from 'recharts';
 import { getProjectProfitability } from '@/services/report.service';
-import { BarChart3, DollarSign, TrendingUp, TrendingDown, Target, AlertTriangle, CheckCircle2, Circle } from 'lucide-react';
-import type { ProjectProfitRow } from '@/types/reports.types';
+import ReportHeader from '@/components/reports/ReportHeader';
+import ReportFilterBar from '@/components/reports/ReportFilterBar';
+import ExportManager from '@/components/reports/ExportManager';
+import KPICard from '@/components/reports/KPICard';
+import EmptyReportState from '@/components/reports/EmptyReportState';
+import { BarChart3, TrendingUp, Target, CheckCircle2, XCircle } from 'lucide-react';
+import type { ProjectProfitRow, ReportFilters } from '@/types/reports.types';
 
 const f = (n: number) => new Intl.NumberFormat('en-PK', { style: 'currency', currency: 'PKR', minimumFractionDigits: 0 }).format(n || 0);
 const pct = (a: number, b: number) => (b === 0 ? 0 : ((a / b) * 100));
 
-// ==========================================
-// CHARTS
-// ==========================================
-function HorizontalBar({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
-  return (
-    <div className="space-y-1">
-      <div className="flex justify-between text-xs">
-        <span className="text-gray-600 dark:text-gray-400">{label}</span>
-        <span className="font-mono font-medium text-gray-900 dark:text-white">{f(value)}</span>
-      </div>
-      <div className="w-full bg-gray-100 dark:bg-gray-700 rounded-full h-3 overflow-hidden">
-        <div className="h-full rounded-full transition-all" style={{ width: `${Math.max((Math.abs(value) / max) * 100, 2)}%`, backgroundColor: color }} />
-      </div>
-    </div>
-  );
-}
-
-function ProfitBar({ revenue, costs, profit }: { revenue: number; costs: number; profit: number }) {
-  const max = Math.max(revenue, 1);
-  const costWidth = (costs / max) * 100;
-  const profitWidth = Math.max((profit / max) * 100, 0);
-  return (
-    <div className="h-8 bg-gray-100 dark:bg-gray-700 rounded-lg overflow-hidden flex">
-      <div className="h-full bg-red-500 transition-all" style={{ width: `${costWidth}%` }} />
-      <div className={`h-full transition-all ${profit >= 0 ? 'bg-green-500' : 'bg-red-700'}`} style={{ width: `${profitWidth}%` }} />
-    </div>
-  );
-}
-
-function MarginGauge({ margin }: { margin: number }) {
-  const color = margin >= 50 ? '#22c55e' : margin >= 30 ? '#f59e0b' : margin >= 0 ? '#ef4444' : '#dc2626';
-  const rotation = -90 + (margin / 100) * 180;
-  return (
-    <div className="flex flex-col items-center">
-      <svg width="100" height="60" viewBox="0 0 100 60">
-        <path d="M 10 55 A 40 40 0 0 1 90 55" fill="none" stroke="#e5e7eb" strokeWidth="8" strokeLinecap="round" />
-        <path d="M 10 55 A 40 40 0 0 1 90 55" fill="none" stroke={color} strokeWidth="8" strokeLinecap="round"
-          strokeDasharray={`${margin * 2.51} 251`} transform={`rotate(${rotation}, 50, 50)`} />
-        <text x="50" y="35" textAnchor="middle" className="fill-gray-900 dark:text-white" style={{ fontSize: '16px', fontWeight: 'bold' }}>{margin.toFixed(1)}%</text>
-        <text x="50" y="50" textAnchor="middle" className="fill-gray-500" style={{ fontSize: '8px' }}>MARGIN</text>
-      </svg>
-    </div>
-  );
-}
-
-// ==========================================
-// STATUS BADGE
-// ==========================================
-function StatusBadge({ status }: { status: string }) {
-  const config: Record<string, { label: string; color: string }> = {
-    ACTIVE: { label: 'Active', color: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' },
-    COMPLETED: { label: 'Completed', color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' },
-    ON_HOLD: { label: 'On Hold', color: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' },
-    CANCELLED: { label: 'Cancelled', color: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' },
-  };
-  const c = config[status] || config.ACTIVE;
-  return <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${c.color}`}>{c.label}</span>;
-}
-
-// ==========================================
-// MAIN PAGE
-// ==========================================
 export default function ProjectProfitabilityPage() {
-  const [start, setStart] = useState('');
-  const [end, setEnd] = useState('');
+  const [filters, setFilters] = useState<ReportFilters>({});
   const [sortBy, setSortBy] = useState<'profit' | 'revenue' | 'margin'>('profit');
+  const [dataAsOf] = useState(new Date().toISOString());
 
   const { data: projects, isLoading, refetch } = useQuery({
-    queryKey: ['proj-profit', start, end],
-    queryFn: () => getProjectProfitability(start || undefined, end || undefined),
+    queryKey: ['proj-profit', filters],
+    queryFn: () => getProjectProfitability(filters.startDate, filters.endDate),
   });
 
   const sorted = [...(projects || [])].sort((a, b) => {
@@ -98,214 +42,214 @@ export default function ProjectProfitabilityPage() {
   const profitableCount = sorted.filter(p => p.gross_profit > 0).length;
   const lossCount = sorted.filter(p => p.gross_profit <= 0).length;
 
+  const costStructureData = [
+    { name: 'Direct Costs', value: totalDirectCosts, fill: '#ef4444' },
+    { name: 'Platform Fees', value: totalPlatformFees, fill: '#f97316' },
+    { name: 'Overhead', value: totalOverhead, fill: '#6b7280' },
+    { name: 'Gross Profit', value: Math.max(totalGrossProfit, 0), fill: '#22c55e' },
+  ];
+
+  const marginScatter = sorted.map(p => ({
+    name: p.project_name.length > 12 ? p.project_name.slice(0, 12) + '...' : p.project_name,
+    revenue: p.revenue,
+    margin: pct(p.gross_profit, p.revenue),
+    profit: p.gross_profit,
+  }));
+
+  const getCsv = () => {
+    let csv = 'Project,Client,Status,Revenue,Direct Costs,Platform Fees,Overhead,Total Costs,Gross Profit,Net Profit,Gross Margin\n';
+    sorted.forEach(p => {
+      csv += `"${p.project_name}","${p.client_name}",${p.status},${p.revenue},${p.direct_costs},${p.platform_fees},${p.allocated_overhead},${p.total_costs},${p.gross_profit},${p.net_profit},${pct(p.gross_profit, p.revenue).toFixed(1)}%\n`;
+    });
+    return csv;
+  };
+
   return (
-    <div className="p-6 max-w-[1500px] mx-auto space-y-5">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-3">
-            <BarChart3 className="w-7 h-7 text-purple-600" /> Project Profitability
-          </h2>
-          <p className="text-sm text-gray-500">Revenue, costs, and margins by project — Document Section 6.3</p>
-        </div>
+    <div className="p-6 max-w-[1600px] mx-auto space-y-5">
+      <ReportHeader
+        title="Project Profitability"
+        subtitle="Revenue, costs, margins, and budget variance per project — Spec 13.2 Projects"
+        period={filters.startDate && filters.endDate ? `${filters.startDate} to ${filters.endDate}` : 'All Periods'}
+        dataAsOf={dataAsOf}
+        reconciled={true}
+        actions={
+          <ExportManager reportId="project-profitability" reportName="Project_Profitability" getCsvData={getCsv} activeFilters={filters as Record<string, string>} />
+        }
+      />
+
+      <div className="flex gap-3 items-end">
+        <ReportFilterBar
+          showDateRange
+          showEntityFilter
+          entityLabel="Project"
+          onApply={(f) => { setFilters(f); refetch(); }}
+          isLoading={isLoading}
+        />
       </div>
 
-      {/* Filters */}
-      <div className="flex gap-3 items-end bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
-        <div>
-          <label className="block text-[10px] uppercase text-gray-500 mb-1">From</label>
-          <input type="date" value={start} onChange={e => setStart(e.target.value)}
-            className="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm dark:bg-gray-900 dark:text-white" />
-        </div>
-        <div>
-          <label className="block text-[10px] uppercase text-gray-500 mb-1">To</label>
-          <input type="date" value={end} onChange={e => setEnd(e.target.value)}
-            className="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm dark:bg-gray-900 dark:text-white" />
-        </div>
-        <div>
-          <label className="block text-[10px] uppercase text-gray-500 mb-1">Sort By</label>
-          <select value={sortBy} onChange={e => setSortBy(e.target.value as any)}
-            className="border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-sm dark:bg-gray-900 dark:text-white">
-            <option value="profit">Highest Profit</option>
-            <option value="revenue">Highest Revenue</option>
-            <option value="margin">Best Margin</option>
-          </select>
-        </div>
-        <button onClick={() => refetch()} disabled={isLoading}
-          className="px-5 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 disabled:opacity-50">
-          {isLoading ? 'Loading...' : 'Generate'}
-        </button>
-      </div>
-
-      {isLoading && <div className="flex justify-center py-20"><div className="w-8 h-8 border-4 border-purple-600 border-t-transparent rounded-full animate-spin" /></div>}
+      {isLoading && <div className="flex justify-center py-20"><div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" /></div>}
 
       {sorted.length > 0 && !isLoading && (
         <>
           {/* KPI Cards */}
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
-              <p className="text-[10px] uppercase text-gray-500 mb-1">Total Revenue</p>
-              <p className="text-lg font-bold text-green-600">{f(totalRev)}</p>
-            </div>
-            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
-              <p className="text-[10px] uppercase text-gray-500 mb-1">Direct Costs</p>
-              <p className="text-lg font-bold text-red-600">{f(totalDirectCosts)}</p>
-            </div>
-            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
-              <p className="text-[10px] uppercase text-gray-500 mb-1">Platform Fees</p>
-              <p className="text-lg font-bold text-orange-600">{f(totalPlatformFees)}</p>
-            </div>
-            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
-              <p className="text-[10px] uppercase text-gray-500 mb-1">Overhead</p>
-              <p className="text-lg font-bold text-gray-600">{f(totalOverhead)}</p>
-            </div>
-            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
-              <p className="text-[10px] uppercase text-gray-500 mb-1">Gross Profit</p>
-              <p className={`text-lg font-bold ${totalGrossProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{f(totalGrossProfit)}</p>
-            </div>
-            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
-              <p className="text-[10px] uppercase text-gray-500 mb-1">Net Profit</p>
-              <p className={`text-lg font-bold ${totalNetProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{f(totalNetProfit)}</p>
-            </div>
-            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
-              <p className="text-[10px] uppercase text-gray-500 mb-1">Avg Margin</p>
-              <p className="text-lg font-bold text-blue-600">{avgMargin.toFixed(1)}%</p>
-            </div>
+            <KPICard label="Total Revenue" value={f(totalRev)} color="green" icon={<TrendingUp className="w-4 h-4 text-green-600" />} />
+            <KPICard label="Direct Costs" value={f(totalDirectCosts)} color="red" />
+            <KPICard label="Platform Fees" value={f(totalPlatformFees)} color="amber" />
+            <KPICard label="Allocated Overhead" value={f(totalOverhead)} color="gray" />
+            <KPICard label="Gross Profit" value={f(totalGrossProfit)} color={totalGrossProfit >= 0 ? 'green' : 'red'} change={pct(totalGrossProfit, totalRev)} changeLabel="margin" />
+            <KPICard label="Net Profit" value={f(totalNetProfit)} color={totalNetProfit >= 0 ? 'green' : 'red'} />
+            <KPICard label="Avg Margin" value={`${avgMargin.toFixed(1)}%`} color={avgMargin >= 30 ? 'green' : avgMargin >= 15 ? 'amber' : 'red'} />
           </div>
 
-          {/* Profit/Loss Summary */}
+          {/* Charts Row */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-            <div className="lg:col-span-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
-              <h4 className="text-xs font-bold uppercase text-gray-500 mb-4">Cost Structure (Document Section 6.3 Formula)</h4>
-              <div className="space-y-3">
-                <div>
-                  <div className="flex justify-between text-xs mb-1"><span className="text-gray-500">Revenue</span><span className="font-mono font-bold text-green-600">{f(totalRev)}</span></div>
-                  <ProfitBar revenue={totalRev} costs={totalCosts} profit={totalGrossProfit} />
-                </div>
-                <div className="grid grid-cols-2 gap-4 mt-2">
-                  <div className="space-y-2">
-                    <p className="text-[10px] uppercase text-gray-500 font-bold">Cost Breakdown</p>
-                    <HorizontalBar label="Direct Costs" value={totalDirectCosts} max={totalRev} color="#ef4444" />
-                    <HorizontalBar label="Platform Fees" value={totalPlatformFees} max={totalRev} color="#f97316" />
-                    <HorizontalBar label="Allocated Overhead" value={totalOverhead} max={totalRev} color="#6b7280" />
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-[10px] uppercase text-gray-500 font-bold">Profit Metrics</p>
-                    <div className="flex justify-between text-xs"><span className="text-gray-600">Gross Margin</span><span className="font-mono font-bold">{pct(totalGrossProfit, totalRev).toFixed(1)}%</span></div>
-                    <div className="flex justify-between text-xs"><span className="text-gray-600">Net Margin</span><span className="font-mono font-bold">{pct(totalNetProfit, totalRev).toFixed(1)}%</span></div>
-                    <div className="flex justify-between text-xs"><span className="text-gray-600">Profitable Projects</span><span className="font-mono font-bold text-green-600">{profitableCount}/{sorted.length}</span></div>
-                  </div>
-                </div>
-              </div>
+            {/* Cost Structure */}
+            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
+              <h4 className="text-xs font-bold uppercase text-gray-500 mb-4">Cost Structure (Spec 6.3)</h4>
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={costStructureData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                  <XAxis dataKey="name" fontSize={10} />
+                  <YAxis tickFormatter={(v) => `${(v / 1000).toFixed(0)}K`} fontSize={10} />
+                  <Tooltip formatter={(v) => f(Number(v))} />
+                  <Bar dataKey="value" radius={[6, 6, 0, 0]}>
+                    {costStructureData.map((entry, i) => <Cell key={i} fill={entry.fill} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
             </div>
 
-            <div className="space-y-5">
-              <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5 flex flex-col items-center">
-                <p className="text-[10px] uppercase text-gray-500 font-bold mb-3">Overall Margin</p>
-                <MarginGauge margin={avgMargin} />
-                <div className="grid grid-cols-2 gap-4 mt-3 w-full text-center">
-                  <div className="p-2 bg-green-50 dark:bg-green-900/20 rounded-lg">
+            {/* Revenue vs Margin Scatter */}
+            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
+              <h4 className="text-xs font-bold uppercase text-gray-500 mb-4">Revenue vs Margin %</h4>
+              <ResponsiveContainer width="100%" height={220}>
+                <ScatterChart>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                  <XAxis dataKey="revenue" tickFormatter={(v) => `${(v / 1000).toFixed(0)}K`} fontSize={10} name="Revenue" />
+                  <YAxis dataKey="margin" tickFormatter={(v) => `${v.toFixed(0)}%`} fontSize={10} name="Margin %" />
+                  <ZAxis range={[60, 400]} />
+                  <Tooltip formatter={(v, name) => name === 'Revenue' ? f(Number(v)) : `${Number(v).toFixed(1)}%`} cursor={{ strokeDasharray: '3 3' }} />
+                  <Scatter data={marginScatter} fill="#3b82f6">
+                    {marginScatter.map((entry, i) => (
+                      <Cell key={i} fill={entry.margin >= 50 ? '#22c55e' : entry.margin >= 30 ? '#f59e0b' : '#ef4444'} />
+                    ))}
+                  </Scatter>
+                </ScatterChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Profitability Summary */}
+            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
+              <h4 className="text-xs font-bold uppercase text-gray-500 mb-4">Profitability Summary</h4>
+              <div className="space-y-4">
+                <div className="flex justify-between items-center"><span className="text-xs text-gray-500">Total Projects</span><span className="font-bold text-lg text-gray-900 dark:text-white">{sorted.length}</span></div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-green-50 dark:bg-green-900/20 rounded-xl p-4 text-center">
+                    <CheckCircle2 className="w-5 h-5 text-green-600 mx-auto mb-1" />
                     <p className="text-[10px] text-green-600">Profitable</p>
-                    <p className="text-lg font-bold text-green-700">{profitableCount}</p>
+                    <p className="text-2xl font-bold text-green-700">{profitableCount}</p>
                   </div>
-                  <div className="p-2 bg-red-50 dark:bg-red-900/20 rounded-lg">
+                  <div className="bg-red-50 dark:bg-red-900/20 rounded-xl p-4 text-center">
+                    <XCircle className="w-5 h-5 text-red-600 mx-auto mb-1" />
                     <p className="text-[10px] text-red-600">Loss Making</p>
-                    <p className="text-lg font-bold text-red-700">{lossCount}</p>
+                    <p className="text-2xl font-bold text-red-700">{lossCount}</p>
                   </div>
                 </div>
-              </div>
-
-              {/* Top 5 Projects by Profit */}
-              <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
-                <p className="text-[10px] uppercase text-gray-500 font-bold mb-3">Top 5 by Profit</p>
                 <div className="space-y-2">
-                  {sorted.slice(0, 5).map((p, i) => (
-                    <div key={i} className="flex items-center justify-between">
-                      <span className="text-[11px] text-gray-700 dark:text-gray-300 truncate max-w-[140px]">{p.project_name}</span>
-                      <span className={`text-[11px] font-mono font-bold ${p.gross_profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{f(p.gross_profit)}</span>
-                    </div>
-                  ))}
+                  <div className="flex justify-between text-xs"><span className="text-gray-500">Gross Margin</span><span className="font-mono font-bold">{pct(totalGrossProfit, totalRev).toFixed(1)}%</span></div>
+                  <div className="flex justify-between text-xs"><span className="text-gray-500">Net Margin</span><span className="font-mono font-bold">{pct(totalNetProfit, totalRev).toFixed(1)}%</span></div>
+                  <div className="flex justify-between text-xs"><span className="text-gray-500">Cost-to-Revenue</span><span className="font-mono font-bold">{totalRev > 0 ? (totalCosts / totalRev * 100).toFixed(1) : '0.0'}%</span></div>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Main Table — Document: "clearly label direct cost, allocated overhead, gross margin, contribution margin" */}
+          {/* Main Table */}
           <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 dark:bg-gray-900/50 text-[10px] uppercase text-gray-500">
-                <tr>
-                  <th className="text-left p-3">Project</th>
-                  <th className="text-left p-3 hidden md:table-cell">Client</th>
-                  <th className="text-left p-3 hidden lg:table-cell">Status</th>
-                  <th className="text-right p-3">Revenue</th>
-                  <th className="text-right p-3 hidden lg:table-cell">Direct Costs</th>
-                  <th className="text-right p-3 hidden lg:table-cell">Platform Fees</th>
-                  <th className="text-right p-3 hidden lg:table-cell">Overhead</th>
-                  <th className="text-right p-3">Total Costs</th>
-                  <th className="text-right p-3">Gross Profit</th>
-                  <th className="text-right p-3 hidden md:table-cell">Gross Margin</th>
-                  <th className="text-right p-3 hidden lg:table-cell">Net Profit</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                {sorted.map((p, i) => {
-                  const gMargin = pct(p.gross_profit, p.revenue);
-                  const nMargin = pct(p.net_profit, p.revenue);
-                  return (
-                    <tr key={p.project_id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                      <td className="p-3 font-medium text-gray-900 dark:text-white">{p.project_name}</td>
-                      <td className="p-3 text-gray-500 hidden md:table-cell">{p.client_name}</td>
-                      <td className="p-3 hidden lg:table-cell"><StatusBadge status={p.status} /></td>
-                      <td className="p-3 text-right font-mono text-green-600">{f(p.revenue)}</td>
-                      <td className="p-3 text-right font-mono text-red-500 hidden lg:table-cell">{f(p.direct_costs)}</td>
-                      <td className="p-3 text-right font-mono text-orange-500 hidden lg:table-cell">{f(p.platform_fees)}</td>
-                      <td className="p-3 text-right font-mono text-gray-500 hidden lg:table-cell">{f(p.allocated_overhead)}</td>
-                      <td className="p-3 text-right font-mono text-red-600">{f(p.total_costs)}</td>
-                      <td className={`p-3 text-right font-mono font-bold ${p.gross_profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{f(p.gross_profit)}</td>
-                      <td className="p-3 text-right hidden md:table-cell">
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                          gMargin >= 50 ? 'bg-green-100 text-green-700' : gMargin >= 30 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'
-                        }`}>{gMargin.toFixed(1)}%</span>
-                      </td>
-                      <td className={`p-3 text-right font-mono hidden lg:table-cell ${p.net_profit >= 0 ? 'text-green-600' : 'text-red-500'}`}>{f(p.net_profit)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              <tfoot className="bg-gray-50 dark:bg-gray-900/50 font-bold text-xs">
-                <tr className="border-t-2 border-gray-300 dark:border-gray-600">
-                  <td colSpan={3} className="p-3">TOTAL</td>
-                  <td className="p-3 text-right text-green-600">{f(totalRev)}</td>
-                  <td className="p-3 text-right text-red-500 hidden lg:table-cell">{f(totalDirectCosts)}</td>
-                  <td className="p-3 text-right text-orange-500 hidden lg:table-cell">{f(totalPlatformFees)}</td>
-                  <td className="p-3 text-right text-gray-500 hidden lg:table-cell">{f(totalOverhead)}</td>
-                  <td className="p-3 text-right text-red-600">{f(totalCosts)}</td>
-                  <td className={`p-3 text-right ${totalGrossProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{f(totalGrossProfit)}</td>
-                  <td className="p-3 text-right hidden md:table-cell">{pct(totalGrossProfit, totalRev).toFixed(1)}%</td>
-                  <td className={`p-3 text-right hidden lg:table-cell ${totalNetProfit >= 0 ? 'text-green-600' : 'text-red-500'}`}>{f(totalNetProfit)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-
-          {/* Document Note */}
-          <div className="bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30 rounded-xl p-4 text-xs text-blue-700 dark:text-blue-400">
-            <p className="font-bold mb-1">📋 Per Document Section 6.3:</p>
-            <p><strong>Gross Profit</strong> = Revenue − Direct Costs − Platform/Service Fees (not including allocated overhead)</p>
-            <p><strong>Contribution/Net Profit</strong> = Gross Profit − Allocated Overhead</p>
-            <p className="mt-1 text-blue-500">Management should not be misled by allocation assumptions — direct costs and allocated overhead are labeled separately.</p>
+            <div className="flex items-center justify-between px-5 py-3 bg-gray-50 dark:bg-gray-900/40">
+              <h4 className="text-xs font-bold uppercase text-gray-500">All Projects — Spec 6.3: Direct costs and allocated overhead labeled separately</h4>
+              <div className="flex gap-1">
+                {(['profit', 'revenue', 'margin'] as const).map(s => (
+                  <button key={s} onClick={() => setSortBy(s)}
+                    className={`px-3 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${sortBy === s ? 'bg-blue-600 text-white' : 'text-gray-500 hover:bg-gray-200 dark:hover:bg-gray-700'}`}>
+                    {s === 'profit' ? 'By Profit' : s === 'revenue' ? 'By Revenue' : 'By Margin'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 dark:bg-gray-900/60 text-[10px] uppercase text-gray-500">
+                  <tr>
+                    <th className="text-left p-3">Project</th>
+                    <th className="text-left p-3 hidden md:table-cell">Client</th>
+                    <th className="text-left p-3 hidden lg:table-cell">Status</th>
+                    <th className="text-right p-3">Revenue</th>
+                    <th className="text-right p-3 hidden lg:table-cell">Direct Costs</th>
+                    <th className="text-right p-3 hidden lg:table-cell">Platform Fees</th>
+                    <th className="text-right p-3 hidden lg:table-cell">Overhead</th>
+                    <th className="text-right p-3">Total Costs</th>
+                    <th className="text-right p-3">Gross Profit</th>
+                    <th className="text-right p-3 hidden md:table-cell">Gross Margin</th>
+                    <th className="text-right p-3 hidden lg:table-cell">Net Profit</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                  {sorted.map((p) => {
+                    const gMargin = pct(p.gross_profit, p.revenue);
+                    return (
+                      <tr key={p.project_id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
+                        <td className="p-3 font-medium text-gray-900 dark:text-white">{p.project_name}</td>
+                        <td className="p-3 text-gray-500 hidden md:table-cell">{p.client_name}</td>
+                        <td className="p-3 hidden lg:table-cell"><StatusBadge status={p.status} /></td>
+                        <td className="p-3 text-right font-mono text-green-600">{f(p.revenue)}</td>
+                        <td className="p-3 text-right font-mono text-red-500 hidden lg:table-cell">{f(p.direct_costs)}</td>
+                        <td className="p-3 text-right font-mono text-orange-500 hidden lg:table-cell">{f(p.platform_fees)}</td>
+                        <td className="p-3 text-right font-mono text-gray-500 hidden lg:table-cell">{f(p.allocated_overhead)}</td>
+                        <td className="p-3 text-right font-mono text-red-600">{f(p.total_costs)}</td>
+                        <td className={`p-3 text-right font-mono font-bold ${p.gross_profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{f(p.gross_profit)}</td>
+                        <td className="p-3 text-right hidden md:table-cell">
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${gMargin >= 50 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : gMargin >= 30 ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'}`}>{gMargin.toFixed(1)}%</span>
+                        </td>
+                        <td className={`p-3 text-right font-mono hidden lg:table-cell ${p.net_profit >= 0 ? 'text-green-600' : 'text-red-500'}`}>{f(p.net_profit)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot className="bg-gray-50 dark:bg-gray-900/50 font-bold text-xs border-t-2 border-gray-300 dark:border-gray-600">
+                  <tr>
+                    <td colSpan={3} className="p-3">TOTAL</td>
+                    <td className="p-3 text-right text-green-600">{f(totalRev)}</td>
+                    <td className="p-3 text-right text-red-500 hidden lg:table-cell">{f(totalDirectCosts)}</td>
+                    <td className="p-3 text-right text-orange-500 hidden lg:table-cell">{f(totalPlatformFees)}</td>
+                    <td className="p-3 text-right text-gray-500 hidden lg:table-cell">{f(totalOverhead)}</td>
+                    <td className="p-3 text-right text-red-600">{f(totalCosts)}</td>
+                    <td className={`p-3 text-right ${totalGrossProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{f(totalGrossProfit)}</td>
+                    <td className="p-3 text-right hidden md:table-cell">{pct(totalGrossProfit, totalRev).toFixed(1)}%</td>
+                    <td className={`p-3 text-right hidden lg:table-cell ${totalNetProfit >= 0 ? 'text-green-600' : 'text-red-500'}`}>{f(totalNetProfit)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
           </div>
         </>
       )}
 
       {!isLoading && sorted.length === 0 && (
-        <div className="text-center py-20">
-          <BarChart3 className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-          <p className="text-gray-500">No project data with posted journal entries</p>
-          <p className="text-xs text-gray-400 mt-1">Post income/expense entries assigned to projects to see profitability analysis</p>
-        </div>
+        <EmptyReportState icon="chart" title="No Project Data" message="No projects with posted journal entries found" hint="Post income/expense entries assigned to projects to see profitability analysis" />
       )}
     </div>
   );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const config: Record<string, { label: string; color: string }> = {
+    ACTIVE: { label: 'Active', color: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' },
+    COMPLETED: { label: 'Completed', color: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' },
+    ON_HOLD: { label: 'On Hold', color: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' },
+    CANCELLED: { label: 'Cancelled', color: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' },
+  };
+  const c = config[status] || config.ACTIVE;
+  return <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${c.color}`}>{c.label}</span>;
 }

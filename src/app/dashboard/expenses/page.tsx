@@ -9,6 +9,7 @@ import StatusActions from "@/components/finance/StatusActions";
 import ReasonModal from "@/components/finance/ReasonModal";
 import { Plus, AlertTriangle } from "lucide-react";
 import { logAction } from "@/lib/logAction";
+import { callWorkflow } from "@/lib/workflow";
 import toast from "react-hot-toast";
 
 const STATUS_STYLES: Record<string, string> = {
@@ -135,59 +136,29 @@ export default function ExpensesPage() {
     // ═══════════════════════════════════════════════════════
     // FIX 4: MAKER-CHECKER — approve/reject enforce creator ≠ approver
     // ═══════════════════════════════════════════════════════
-    if (action === "approve") {
-      if (selectedExp.created_by === user?.id) {
-        toast.error("Maker-checker violation: You cannot approve your own expense.");
-        return;
-      }
-      // FIX 6: Approval amount limit check
-      const myLimit = APPROVAL_LIMITS[role] ?? 0;
-      if (selectedExp.amount > myLimit) {
-        toast.error(`Amount PKR ${selectedExp.amount.toLocaleString()} exceeds your approval limit of PKR ${myLimit.toLocaleString()}. Requires higher authority.`);
-        return;
-      }
-    }
-
-    if (action === "verify") {
-      if (selectedExp.created_by === user?.id) {
-        toast.error("Maker-checker violation: You cannot verify your own expense.");
-        return;
-      }
-    }
-
+    // ALL actions go through SERVER-SIDE WORKFLOW API
+    // Server enforces: auth, maker-checker, approval limits
     try {
-      const updateData: any = {
-        status: action.toUpperCase() === "REOPEN" ? "DRAFT" : action.toUpperCase(),
-      };
-      // Track who approved/verified
-      if (action === "approve") updateData.approved_by = user?.id;
-      if (action === "verify") updateData.verified_by = user?.id;
-
-      const { error } = await supabase.from("expenses").update(updateData).eq("id", selectedExp.id);
-      if (error) { toast.error("Action failed: " + error.message); return; }
-      toast.success(`Expense ${action.toUpperCase()} successfully`);
-      fetchExpenses();
+      const result = await callWorkflow('expense', selectedExp.id, action as any);
+      if (result.success) {
+        toast.success(result.message || `Expense ${action.toUpperCase()} successfully`);
+        fetchExpenses();
+      } else {
+        toast.error(result.error || 'Action failed');
+      }
     } catch (err: any) {
-      toast.error("Error: " + (err.message || "Unknown error"));
+      toast.error('Error: ' + (err.message || 'Unknown error'));
     }
   }
 
   async function confirmReason() {
     if (!selectedExp || !reason.trim()) return;
-    try {
-      const updateData: any = { 
-        status: pendingAction === "REOPEN" ? "DRAFT" : pendingAction.toUpperCase(), 
-        rejection_reason: reason,
-      };
-      if (pendingAction === "approve") updateData.approved_by = user?.id;
-      if (pendingAction === "verify") updateData.verified_by = user?.id;
-
-      const { error } = await supabase.from("expenses").update(updateData).eq("id", selectedExp.id);
-      if (error) { toast.error("Action failed: " + error.message); return; }
-      toast.success(`Expense ${pendingAction.toUpperCase()} successfully`);
+    const result = await callWorkflow('expense', selectedExp.id, pendingAction as any, reason);
+    if (result.success) {
+      toast.success(result.message || `Expense ${pendingAction.toUpperCase()} successfully`);
       setShowReasonModal(false); setReason(""); fetchExpenses();
-    } catch (err: any) {
-      toast.error("Error: " + (err.message || "Unknown error"));
+    } else {
+      toast.error(result.error || 'Action failed');
     }
   }
 

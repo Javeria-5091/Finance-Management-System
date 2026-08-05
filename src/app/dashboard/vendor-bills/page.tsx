@@ -7,6 +7,8 @@ import { FileText, Plus, Pencil, Eye, X, Loader2 } from "lucide-react";
 import LineItemsEditor from "@/components/finance/LineItemsEditor";
 import StatusActions from "@/components/finance/StatusActions";
 import ReasonModal from "@/components/finance/ReasonModal";
+import { callWorkflow } from "@/lib/workflow";
+import toast from "react-hot-toast";
 
 /* ═══════════════════════════════════════════════════════
    SAFE HELPERS — Null/undefined/NaN protection
@@ -443,42 +445,21 @@ const handleLineChange = useCallback((newLines: any[]) => {
   };
 
   /* ═══════════════════════════════════════════════════════
-     PROCESS ACTION — Submit/Verify/Approve/Post/Reject/Cancel
+     PROCESS ACTION — ALL through SERVER-SIDE WORKFLOW API
      ═══════════════════════════════════════════════════════ */
   const processAction = async (billId: string, action: string, reason: string) => {
-    const updates: any = {};
-
-    if (action === "cancel") {
-      updates.status = "CANCELLED";
-      updates.rejection_reason = reason;
-    } else if (action === "reject") {
-      updates.status = "DRAFT";
-      updates.rejection_reason = reason;
-      updates.rejected_by = user?.id;
-      updates.rejected_at = new Date().toISOString();
-    } else {
-      const map: Record<string, { status: string; by: string; at: string }> = {
-        submit: { status: "SUBMITTED", by: "submitted_by", at: "submitted_at" },
-        verify: { status: "VERIFIED", by: "verified_by", at: "verified_at" },
-        approve: { status: "APPROVED", by: "approved_by", at: "approved_at" },
-        post: { status: "POSTED", by: "posted_by", at: "posted_at" },
-      };
-      const cfg = map[action.toLowerCase()];
-      if (!cfg) { alert("Unknown action: " + action); return; }
-      updates.status = cfg.status;
-      updates[cfg.by] = user?.id;
-      updates[cfg.at] = new Date().toISOString();
-      if (reason) updates.rejection_reason = reason;
-    }
-
     try {
-      const { error } = await db.from("vendor_bills").update(updates).eq("id", billId);
-      if (error) throw error;
-      fetchBills();
+      const result = await callWorkflow('vendor_bill', billId, action.toLowerCase() as any, reason || undefined);
+      if (result.success) {
+        toast.success(result.message || `Bill ${action} successfully`);
+        fetchBills();
+      } else {
+        toast.error(result.error || 'Action failed');
+      }
     } catch (err: any) {
-      alert("Action failed: " + err.message);
+      toast.error('Action failed: ' + err.message);
     }
-    setReasonState({ open: false, title: "", action: "", id: "" });
+    setReasonState({ open: false, title: '', action: '', id: '' });
   };
 
   const handleAction = (billId: string, action: string, needsReason?: boolean) => {

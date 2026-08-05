@@ -8,6 +8,7 @@ import IncomeForm from "@/components/sections/IncomeForm";
 import StatusActions from "@/components/finance/StatusActions";
 import ReasonModal from "@/components/finance/ReasonModal";
 import { Plus, AlertTriangle } from "lucide-react";
+import { callWorkflow, postJournal } from "@/lib/workflow";
 import { logAction } from "@/lib/logAction";
 import toast from "react-hot-toast";
 
@@ -101,15 +102,8 @@ export default function IncomePage() {
       return;
     }
 
-    // MAKER-CHECKER: approve/verify
-    if (action === 'approve' || action === 'verify') {
-      const creatorId = selectedInc.created_by || selectedInc.user_id;
-      if (creatorId === user?.id) {
-        toast.error('Maker-checker violation: You cannot approve your own income.');
-        return;
-      }
-    }
-
+    // ALL actions go through SERVER-SIDE WORKFLOW API
+    // Server enforces: auth, maker-checker, approval limits
     try {
       if (action === "post") {
         setPostingId(selectedInc.id);
@@ -126,18 +120,12 @@ export default function IncomePage() {
         }
         toast.success("Income posted to General Ledger");
       } else {
-        const updateData: any = { status: action.toUpperCase() === "REOPEN" ? "DRAFT" : action.toUpperCase() };
-        if (action.toUpperCase() === "REJECT" || action.toUpperCase() === "REVERSE") {
-          updateData.rejection_reason = reason || 'Pending';
-        }
-        if (action === 'approve') updateData.approved_by = user?.id;
-        if (action === 'verify') updateData.verified_by = user?.id;
-        const { error } = await supabase.from("incomes").update(updateData).eq("id", selectedInc.id);
-        if (error) {
-          toast.error("Action failed: " + error.message);
+        const result = await callWorkflow('income', selectedInc.id, action as any);
+        if (!result.success) {
+          toast.error(result.error || 'Action failed');
           return;
         }
-        toast.success(`Income ${action.toUpperCase()} successfully`);
+        toast.success(result.message || `Income ${action.toUpperCase()} successfully`);
       }
       fetchIncomes();
     } catch (err: any) {
@@ -147,22 +135,12 @@ export default function IncomePage() {
 
   async function confirmReason() {
     if (!selectedInc || !reason.trim()) return;
-    try {
-      const updateData: any = { 
-        status: pendingAction === "REOPEN" ? "DRAFT" : pendingAction.toUpperCase(), 
-        rejection_reason: reason 
-      };
-      if (pendingAction === 'approve') updateData.approved_by = user?.id;
-      if (pendingAction === 'verify') updateData.verified_by = user?.id;
-      const { error } = await supabase.from("incomes").update(updateData).eq("id", selectedInc.id);
-      if (error) {
-        toast.error("Action failed: " + error.message);
-        return;
-      }
-      toast.success(`Income ${pendingAction.toUpperCase()} successfully`);
+    const result = await callWorkflow('income', selectedInc.id, pendingAction as any, reason);
+    if (result.success) {
+      toast.success(result.message || `Income ${pendingAction.toUpperCase()} successfully`);
       setShowReasonModal(false); setReason(""); fetchIncomes();
-    } catch (err: any) {
-      toast.error("Error: " + (err.message || "Unknown error"));
+    } else {
+      toast.error(result.error || 'Action failed');
     }
   }
 

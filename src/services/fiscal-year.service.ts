@@ -83,6 +83,7 @@ export async function softCloseFiscalYear(fyId: string, reason: string): Promise
 export async function hardCloseFiscalYear(fyId: string, reason: string): Promise<void> {
   const userId = await currentUserId();
 
+  // Check unclosed periods (must all be SOFT_CLOSED, not OPEN)
   const { data: periods, error: pErr } = await db()
     .from('accounting_periods')
     .select('id, status')
@@ -90,22 +91,32 @@ export async function hardCloseFiscalYear(fyId: string, reason: string): Promise
 
   if (pErr) throw pErr;
 
-  const notHardClosed = periods?.filter(p => p.status !== 'HARD_CLOSED');
-  if (notHardClosed && notHardClosed.length > 0) {
+  const openPeriods = periods?.filter(p => p.status === 'OPEN' || p.status === 'PENDING');
+  if (openPeriods && openPeriods.length > 0) {
     throw new Error('has_unclosed_periods');
   }
 
-  const { error } = await db()
-    .from('fiscal_years')
-    .update({
-      status: 'HARD_CLOSED',
-      reopening_reason: reason,
-      closed_at: new Date().toISOString(),
-      closed_by: userId,  // ✅ FIX
-    })
-    .eq('id', fyId);
+  // Soft close all periods first if not already
+  const softClosePeriods = periods?.filter(p => p.status !== 'HARD_CLOSED' && p.status !== 'SOFT_CLOSED');
+  if (softClosePeriods && softClosePeriods.length > 0) {
+    const { error: scErr } = await db()
+      .from('accounting_periods')
+      .update({ status: 'SOFT_CLOSED', closed_by: userId, closed_at: new Date().toISOString() })
+      .in('id', softClosePeriods.map(p => p.id));
+    if (scErr) throw scErr;
+  }
 
-  if (error) throw error;
+  // Call YEAR-END CLOSE API (calculates P&L, transfers to Retained Earnings)
+  const res = await fetch('/api/finance/year-end-close', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fiscalYearId: fyId, confirm: true }),
+  });
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.error || 'Year-end close failed');
+  }
 }
 
 // ══════════════════════════════════════════

@@ -8,6 +8,7 @@ import {
   AlertTriangle, ArrowUpCircle, FileText, RefreshCw, X, ShieldCheck
 } from "lucide-react";
 import ReasonModal from "@/components/finance/ReasonModal";
+import { callWorkflow } from "@/lib/workflow";
 import toast from "react-hot-toast";
 
 // ==========================================
@@ -97,55 +98,33 @@ export default function InvoicesPage() {
   // ==========================================
   const handleStatusChange = async (invoiceId: string, newStatus: string, reason?: string) => {
     setSaving(invoiceId);
-    
-    const updateData: any = { status: newStatus };
-    
-    if (reason) updateData.rejection_reason = reason;
-    if (reason && newStatus === 'VOID') updateData.void_reason = reason;
-    if (newStatus === 'ISSUED') {
-      updateData.issue_date = new Date().toISOString().split("T")[0];
-      updateData.issued_by = user?.id;
-      updateData.issued_at = new Date().toISOString();
-    }
-    if (newStatus === 'APPROVED') {
-      updateData.approved_by = user?.id;
-      updateData.approved_at = new Date().toISOString();
-    }
 
     try {
-      // Maker-checker for approve: fetch invoice first
-      if (newStatus === 'APPROVED' || newStatus === 'SUBMITTED') {
-        const { data: inv } = await supabase.from("invoices").select("created_by, total_amount, user_id").eq("id", invoiceId).single() as { data: { created_by?: string; total_amount?: number; user_id?: string } | null };
-        const creatorId = inv?.created_by || inv?.user_id;
-        
-        if (creatorId === user?.id) {
-          toast.error("Maker-checker violation: You cannot approve your own invoice.");
-          setSaving(null);
-          return;
-        }
+      // Map to workflow action
+      const actionMap: Record<string, string> = {
+        SUBMITTED: 'submit', APPROVED: 'approve', ISSUED: 'issue', REJECTED: 'reject',
+      };
+      const action = actionMap[newStatus];
 
-        // Amount limit check
-        const invAmount = inv?.total_amount ?? 0;
-        const myLimit = APPROVAL_LIMITS[role] ?? 0;
-        if (invAmount > myLimit) {
-          toast.error(`Amount PKR ${invAmount.toLocaleString()} exceeds your approval limit of PKR ${myLimit.toLocaleString()}.`);
-          setSaving(null);
-          return;
+      if (action) {
+        const result = await callWorkflow('invoice', invoiceId, action as any, reason);
+        if (result.success) {
+          toast.success(result.message || `Invoice ${newStatus} successfully`);
+          fetchInvoices();
+        } else {
+          toast.error(result.error || 'Action failed');
         }
+      } else {
+        // VOID etc - direct update
+        const { error } = await supabase.from("invoices").update({ status: newStatus, void_reason: reason }).eq("id", invoiceId);
+        if (error) throw error;
+        toast.success(`Invoice ${newStatus} successfully`);
+        fetchInvoices();
       }
 
-      const { error } = await supabase.from("invoices")
-        .update(updateData)
-        .eq("id", invoiceId);
-      
-      if (error) throw error;
-      
       if (reason && reasonModal.recordId === invoiceId) {
         reasonModal.onConfirm(reason);
       }
-      
-      toast.success(`Invoice ${newStatus} successfully`);
-      fetchInvoices();
     } catch (error: any) {
       toast.error(`Error: ${error.message}`);
     } finally {

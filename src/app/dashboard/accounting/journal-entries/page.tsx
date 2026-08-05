@@ -6,6 +6,7 @@ import { usePermissions } from "@/context/PermissionContext";
 import { Plus, X, CheckCircle, Eye, RotateCcw, AlertTriangle } from "lucide-react";
 import toast from "react-hot-toast";
 import ReasonModal from "@/components/finance/ReasonModal";
+import { callWorkflow, postJournal } from "@/lib/workflow";
 
 const STATUS_STYLES: Record<string, string> = {
   DRAFT: 'bg-gray-100 text-gray-700',
@@ -159,24 +160,25 @@ export default function JournalEntriesPage() {
       return;
     }
 
-    // Maker-checker
-    if (action === 'approve' || action === 'verify') {
-      if (journal.created_by === user?.id) {
-        toast.error('Maker-checker: You cannot approve your own journal.');
-        return;
-      }
-    }
-
+    // ALL actions through SERVER-SIDE WORKFLOW API
     try {
-      const updateData: any = { status: action.toUpperCase() };
-      if (action === 'approve') updateData.approved_by = user?.id;
-      if (action === 'verify') updateData.verified_by = user?.id;
-      if (action === 'post') updateData.posted_by = user?.id;
-
-      const { error } = await supabase.from('finance.journal_entries').update(updateData).eq('id', journalId);
-      if (error) throw error;
-      toast.success(`Journal ${action.toUpperCase()} successfully`);
-      fetchJournals();
+      if (action === 'post') {
+        const result = await postJournal(journalId);
+        if (result.success) {
+          toast.success(result.message || 'Journal posted');
+          fetchJournals();
+        } else {
+          toast.error(result.error || 'Posting failed');
+        }
+      } else {
+        const result = await callWorkflow('journal_entry', journalId, action as any);
+        if (result.success) {
+          toast.success(result.message || `Journal ${action.toUpperCase()} successfully`);
+          fetchJournals();
+        } else {
+          toast.error(result.error || 'Action failed');
+        }
+      }
     } catch (err: any) {
       toast.error('Error: ' + err.message);
     }
@@ -185,12 +187,8 @@ export default function JournalEntriesPage() {
   async function confirmReason() {
     if (!selectedJournal || !reason.trim()) return;
     try {
-      const updateData: any = {
-        status: pendingAction === 'reopen' ? 'DRAFT' : 'REVERSED',
-        reversal_reason: reason,
-      };
       if (pendingAction === 'reverse') {
-        // Call the reverse function
+        // Reverse still uses RPC for proper accounting
         const { error } = await supabase.rpc('finance.reverse_journal_entry', {
           p_journal_id: selectedJournal.id,
           p_reason: reason,
@@ -198,8 +196,8 @@ export default function JournalEntriesPage() {
         });
         if (error) throw error;
       } else {
-        const { error } = await supabase.from('finance.journal_entries').update(updateData).eq('id', selectedJournal.id);
-        if (error) throw error;
+        const result = await callWorkflow('journal_entry', selectedJournal.id, pendingAction as any, reason);
+        if (!result.success) { toast.error(result.error || 'Action failed'); return; }
       }
       toast.success(`Journal ${pendingAction} successfully`);
       setShowReasonModal(false); setReason(''); fetchJournals();
