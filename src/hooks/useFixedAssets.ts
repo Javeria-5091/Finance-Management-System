@@ -122,3 +122,55 @@ export const useNextAssetCode = () =>
     queryFn: S.generateNextAssetCode,
     staleTime: 60000,
   });
+
+  export const useUpdateFixedAsset = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: string; input: Partial<FixedAssetFormInput & { status?: AssetStatus }> }) =>
+      S.updateFixedAsset(id, input),
+    onSuccess: (_, variables) => {
+      qc.invalidateQueries({ queryKey: ['fixed-assets'] });
+      qc.invalidateQueries({ queryKey: ['fixed-asset', variables.id] });
+      qc.invalidateQueries({ queryKey: ['asset-kpis'] });
+    },
+  });
+};
+
+export const useAssetVerificationById = (id: string | null) =>
+  useQuery({
+    queryKey: ['asset-verification', id],
+    queryFn: () => S.getAssetVerificationById(id!),
+    enabled: !!id,
+    staleTime: 10000,
+  });
+
+export const useUpdateVerificationLine = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ lineId, updates }: { lineId: string; updates: { is_verified?: boolean; physical_location?: string; physical_condition?: string; discrepancy_notes?: string } }) =>
+      S.updateVerificationLine(lineId, updates),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['asset-verifications'] });
+      qc.invalidateQueries({ queryKey: ['asset-verification'] });
+    },
+  });
+};
+
+export const useCompleteVerification = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ verificationId, notes }: { verificationId: string; notes: string }) =>
+      S.completeVerification(verificationId, notes),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['asset-verifications'] });
+      qc.invalidateQueries({ queryKey: ['asset-verification'] });
+    },
+  });
+};
+
+export const useAccountingPeriods = () =>
+  useQuery({
+    queryKey: ['accounting-periods'],
+    queryFn: S.getAccountingPeriods,
+    staleTime: 60000,
+  });

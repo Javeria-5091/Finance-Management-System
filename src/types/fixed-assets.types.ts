@@ -63,7 +63,7 @@ export interface FixedAsset {
   status: AssetStatus;
   disposal_date?: string;
   disposal_value?: number;
-  disposal_currency_id?: string;
+  disposal_currency?: string;
   disposal_method?: string;
   gain_loss_amount?: number;
   disposal_journal_id?: string;
@@ -199,7 +199,6 @@ export interface FixedAssetFormInput {
   purchase_cost: number;
   currency_id: string;
   base_cost: number;
-  exchange_rate_id?: string;
   serial_number?: string;
   warranty_start?: string;
   warranty_end?: string;

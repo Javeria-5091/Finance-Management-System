@@ -81,8 +81,6 @@ export const getFixedAssets = async (filters?: {
       *,
       category:asset_categories(name, code),
       vendor:vendors(name),
-      currency:currencies(code),
-      project:projects(name),
       asset_account:linked_asset_account_id(name),
       depreciation_account:linked_depreciation_account_id(name),
       expense_account:linked_expense_account_id(name)
@@ -108,8 +106,6 @@ export const getFixedAssetById = async (id: string): Promise<FixedAsset | null> 
       *,
       category:asset_categories(name, code, useful_life_months, residual_value_pct, depreciation_method),
       vendor:vendors(name),
-      currency:currencies(code),
-      project:projects(name),
       asset_account:linked_asset_account_id(name),
       depreciation_account:linked_depreciation_account_id(name),
       expense_account:linked_expense_account_id(name)
@@ -241,7 +237,7 @@ export const getDepreciationSchedule = async (filters?: {
     .select(`
       *,
       asset:fixed_assets(code, name),
-      period:accounting_periods(period_name),
+      period:accounting_periods(name),
       fiscal_year:fiscal_years(name)
     `)
     .order('created_at', { ascending: false });
@@ -334,6 +330,54 @@ export const getAssetVerifications = async (): Promise<AssetVerification[]> => {
 
   if (error) throw new Error(`Failed to fetch asset verifications: ${error.message}`);
   return (data || []).map(mapVerificationJoins);
+};
+ 
+export const getAssetVerificationById = async (id: string): Promise<AssetVerification | null> => {
+  const { data, error } = await financeDB
+    .from('asset_verifications')
+    .select(`
+      *,
+      lines:asset_verification_lines(
+        *,
+        asset:fixed_assets(code, name, location, status)
+      )
+    `)
+    .eq('id', id)
+    .single();
+
+  if (error) throw new Error(`Failed to fetch verification: ${error.message}`);
+  return data ? mapVerificationJoins(data) : null;
+};
+
+// ─── Update Verification Line ───────────────────────────────────────────────
+
+export const updateVerificationLine = async (
+  lineId: string,
+  updates: {
+    is_verified?: boolean;
+    physical_location?: string;
+    physical_condition?: string;
+    discrepancy_notes?: string;
+  }
+): Promise<void> => {
+  const { error } = await financeDB
+    .from('asset_verification_lines')
+    .update({ ...updates, updated_at: new Date().toISOString() })
+    .eq('id', lineId);
+
+  if (error) throw new Error(`Failed to update verification line: ${error.message}`);
+};
+
+// ─── Get Accounting Periods (for depreciation page) ─────────────────────────
+
+export const getAccountingPeriods = async () => {
+  const { data, error } = await financeDB
+    .from('accounting_periods')
+    .select('id, name, start_date, end_date')
+    .order('start_date', { ascending: false });
+
+  if (error) throw new Error(`Failed to fetch accounting periods: ${error.message}`);
+  return data || [];
 };
 
 export const createAssetVerification = async (verificationDate: string, userId: string): Promise<AssetVerification> => {
@@ -465,7 +509,7 @@ function mapAssetJoins(raw: Record<string, unknown>): FixedAsset {
     ...raw as unknown as FixedAsset,
     category_name: (raw.category as Record<string, unknown>)?.name as string,
     vendor_name: (raw.vendor as Record<string, unknown>)?.name as string,
-    currency_code: (raw.currency as Record<string, unknown>)?.code as string,
+    currency_code: raw.currency as string,
     project_name: (raw.project as Record<string, unknown>)?.name as string,
     asset_account_name: (raw.asset_account as Record<string, unknown>)?.name as string,
     depreciation_account_name: (raw.depreciation_account as Record<string, unknown>)?.name as string,
@@ -478,7 +522,7 @@ function mapDepreciationJoins(raw: Record<string, unknown>): DepreciationSchedul
     ...raw as unknown as DepreciationSchedule,
     asset_code: (raw.asset as Record<string, unknown>)?.code as string,
     asset_name: (raw.asset as Record<string, unknown>)?.name as string,
-    period_name: (raw.period as Record<string, unknown>)?.period_name as string,
+    period_name: (raw.period as Record<string, unknown>)?.name as string,
     fiscal_year_name: (raw.fiscal_year as Record<string, unknown>)?.name as string,
   };
 }

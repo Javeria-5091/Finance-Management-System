@@ -12,7 +12,9 @@ import {
 import { Plus, Search, Building2, TrendingDown, CheckCircle2, Clock, AlertTriangle, Trash2, Eye } from "lucide-react";
 import { logAction, logAudit } from "@/lib/logAction";
 import toast from "react-hot-toast";
-import type { AssetStatus } from "@/types/fixed-assets.types";
+import type { AssetStatus, FixedAsset } from "@/types/fixed-assets.types";
+import AssetForm from "@/components/sections/AssetForm";
+import { useRouter } from "next/navigation";
 
 const STATUS_STYLES: Record<AssetStatus, { label: string; classes: string }> = {
   pending_capitalization: { label: "Pending Cap.", classes: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400" },
@@ -31,11 +33,12 @@ export default function FixedAssetsPage() {
   const { user } = useAuth();
   const { hasPermission } = usePermissions();
   const { isDark } = useTheme();
-
+  const router = useRouter();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [showDetail, setShowDetail] = useState<string | null>(null);
-
+  const [showAssetForm, setShowAssetForm] = useState(false);
+  const [editAsset, setEditAsset] = useState<FixedAsset | null>(null);
   const { data: assets = [], isLoading } = useFixedAssets({
     status: statusFilter !== "all" ? (statusFilter as AssetStatus) : undefined,
     search: search || undefined,
@@ -64,14 +67,14 @@ export default function FixedAssetsPage() {
           <p className={`text-sm mt-1 ${isDark ? "text-gray-400" : "text-gray-500"}`}>Asset register, depreciation, and verification management</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => toast("Coming soon: Verifications")} className={`px-3 py-2 text-sm rounded-lg border ${isDark ? "border-gray-700 hover:bg-gray-800 text-gray-300" : "border-gray-300 hover:bg-gray-100 text-gray-700"}`}>
+          <button onClick={() => router.push("/dashboard/assets/verifications")} className={`px-3 py-2 text-sm rounded-lg border ${isDark ? "border-gray-700 hover:bg-gray-800 text-gray-300" : "border-gray-300 hover:bg-gray-100 text-gray-700"}`}>
             <CheckCircle2 className="h-4 w-4 inline mr-1" /> Verifications
           </button>
-          <button onClick={() => toast("Coming soon: Depreciation")} className={`px-3 py-2 text-sm rounded-lg border ${isDark ? "border-gray-700 hover:bg-gray-800 text-gray-300" : "border-gray-300 hover:bg-gray-100 text-gray-700"}`}>
+          <button onClick={() => router.push("/dashboard/assets/depreciation")} className={`px-3 py-2 text-sm rounded-lg border ${isDark ? "border-gray-700 hover:bg-gray-800 text-gray-300" : "border-gray-300 hover:bg-gray-100 text-gray-700"}`}>
             <TrendingDown className="h-4 w-4 inline mr-1" /> Depreciation
           </button>
           {hasPermission("FIXED_ASSET_CREATE") && (
-            <button onClick={() => toast("Coming soon: Add Asset Form")} className="px-3 py-2 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white">
+            <button onClick={() => setShowAssetForm(true)} className="px-3 py-2 text-sm rounded-lg bg-blue-600 hover:bg-blue-700 text-white">
               <Plus className="h-4 w-4 inline mr-1" /> Add Asset
             </button>
           )}
@@ -203,6 +206,12 @@ export default function FixedAssetsPage() {
           </div>
         );
       })()}
+      {showAssetForm && (
+        <AssetForm
+          onClose={() => { setShowAssetForm(false); setEditAsset(null); }}
+          onSuccess={() => {}}
+        />
+      )}
     </div>
   );
 }

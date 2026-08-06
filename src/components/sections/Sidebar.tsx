@@ -179,7 +179,7 @@ const navGroups: NavGroup[] = [
     id: "fixed-assets",
     label: "Fixed Assets",
     items: [
-      { id: "asset-register", label: "Asset Register", icon: "Building2", path: "/dashboard/assets", perm: "FIXED_ASSET_READ" },
+      { id: "asset-register", label: "Asset Register", icon: "Building2", path: "/dashboard/assets/asset-register", perm: "FIXED_ASSET_READ" },
       { id: "asset-depreciation", label: "Depreciation", icon: "TrendingDown", path: "/dashboard/assets/depreciation", perm: "FIXED_ASSET_READ" },
       { id: "asset-verification", label: "Verifications", icon: "CheckCircle", path: "/dashboard/assets/verifications", perm: "FIXED_ASSET_READ" },
     ],

@@ -1,659 +1,1660 @@
 'use client'
+// ================================================================
+// OSYSTIC Finance Management System — Payroll Management Page (P1)
+// ================================================================
+// Convention: P0/P1 — direct Supabase queries, custom Button/Input,
+//              STATUS_STYLES pattern, maker-checker workflow, react-hot-toast,
+//              useAuth/usePermissions, logAction
+// ================================================================
 
-import { useState, useEffect, useCallback } from 'react'
-import { Plus, Search, Eye, Edit2, Trash2, ChevronLeft, ChevronRight, Filter, CheckCircle, XCircle } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
-import { Label } from '@/components/ui/label'
+import { useState, useEffect, useCallback } from "react";
+import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/context/AuthContext";
+import { usePermissions } from "@/context/PermissionContext";
+import { logAction } from "@/lib/logAction";
+import { formatPKR, formatDate, formatPeriod, timeAgo, getEmploymentTypeBadge, getLastDayOfMonth } from "@/lib/helpers";
+import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
 import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from '@/components/ui/table'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
-} from '@/components/ui/dialog'
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select'
-import { Textarea } from '@/components/ui/textarea'
-import { Skeleton } from '@/components/ui/skeleton'
-import StatusBadge from '../ui/StatusBadge'
-import { formatPKR, formatDate, formatPeriod, timeAgo } from '@/lib/helpers'
-import EmployeeDialog from './EmployeeDialog'
-import PayrollRunDetail from './PayrollRunDetail'
+  Plus, Search, Eye, Edit2, Trash2, ChevronLeft, ChevronRight,
+  Users, Calculator, Banknote, TrendingUp, FileText, X, Check, AlertTriangle, Loader2,
+} from "lucide-react";
+import toast from "react-hot-toast";
 
-interface Department {
-  id: string
-  name: string
-  code: string
+// ==========================================
+// STATUS STYLES (P0/P1 Convention)
+// ==========================================
+const STATUS_STYLES: Record<string, string> = {
+  DRAFT: "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
+  CALCULATED: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+  UNDER_REVIEW: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400",
+  APPROVED: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
+  POSTED: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+  REJECTED: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  CANCELLED: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
+  PENDING: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400",
+  PAID: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+  PARTIALLY_PAID: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+  FAILED: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  ACTIVE: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+  TERMINATED: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  ON_LEAVE: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+  SUSPENDED: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  FULLY_RECOVERED: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+  PARTIALLY_RECOVERED: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+};
+
+// EMPLOYMENT TYPES
+const EMPLOYMENT_TYPES = [
+  { value: "FULL_TIME", label: "Full Time" },
+  { value: "PART_TIME", label: "Part Time" },
+  { value: "CONTRACTOR", label: "Contractor" },
+  { value: "INTERN", label: "Intern" },
+  { value: "CONSULTANT", label: "Consultant" },
+];
+
+// COMPENSATION TYPES
+const COMPENSATION_TYPES = [
+  { value: "MONTHLY_SALARY", label: "Monthly Salary" },
+  { value: "HOURLY_RATE", label: "Hourly Rate" },
+  { value: "DAILY_RATE", label: "Daily Rate" },
+  { value: "PROJECT_BASED", label: "Project Based" },
+  { value: "COMMISSION_ONLY", label: "Commission Only" },
+  { value: "FIXED_CONTRACT", label: "Fixed Contract" },
+];
+
+// DEDUCTION TYPES
+const DEDUCTION_TYPES = [
+  { value: "TAX", label: "Income Tax" },
+  { value: "PROVIDENT_FUND", label: "Provident Fund" },
+  { value: "EOBI", label: "EOBI" },
+  { value: "SOCIAL_SECURITY", label: "Social Security" },
+  { value: "LOAN_INSTALLMENT", label: "Loan Installment" },
+  { value: "ADVANCE_DEDUCTION", label: "Advance Deduction" },
+  { value: "ABSENCE_PENALTY", label: "Absence Penalty" },
+  { value: "OTHER", label: "Other" },
+];
+
+// ==========================================
+// LOCAL INTERFACES (matching DB columns — snake_case from Supabase)
+// ==========================================
+interface PayrollEmployee {
+  id: string;
+  employee_code: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  designation: string | null;
+  department: string | null;
+  employment_type: string;
+  status: string;
+  join_date: string | null;
+  bank_name: string | null;
+  bank_account: string | null;
+  cnic: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+  // Joined from compensation
+  payroll_compensation?: PayrollCompensation[];
 }
 
-interface Employee {
-  id: string
-  employeeCode: string
-  name: string
-  email: string | null
-  phone: string | null
-  designation: string | null
-  employmentType: string
-  status: string
-  joinDate: string | null
-  department: { id: string; name: string; code: string } | null
+interface PayrollCompensation {
+  id: string;
+  employee_id: string;
+  compensation_type: string;
+  amount: number;
+  currency: string;
+  effective_from: string;
+  effective_to: string | null;
+  is_active: boolean;
+  project_id: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface PayrollRun {
-  id: string
-  payrollPeriod: string
-  status: string
-  totalGrossPay: number
-  totalNetPay: number
-  totalDeductions: number
-  totalEmployees: number
-  createdAt: string
-  _count: { payrollLines: number }
+  id: string;
+  payroll_period: string;
+  period_start: string;
+  period_end: string;
+  status: string;
+  total_gross_pay: number;
+  total_deductions: number;
+  total_net_pay: number;
+  total_employer_cost: number;
+  total_employees: number;
+ calculated_by: string | null;
+  calculated_at: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  posted_by: string | null;
+  posted_at: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+  payroll_lines?: PayrollLine[];
 }
 
-interface Advance {
-  id: string
-  amount: number
-  remainingBalance: number
-  purpose: string | null
-  requestDate: string
-  approvalStatus: string
-  employee: { id: string; name: string; employeeCode: string; department: { id: string; name: string; code: string } | null }
+interface PayrollLine {
+  id: string;
+  payroll_run_id: string;
+  employee_id: string;
+  basic_salary: number;
+  housing_allow: number;
+  medical_allow: number;
+  conveyance_allow: number;
+  other_allowances: number;
+  overtime_pay: number;
+  commission_pay: number;
+  bonus_pay: number;
+  gross_pay: number;
+  tax_deduction: number;
+  provident_fund: number;
+  eobi: number;
+  advance_deduction: number;
+  other_deductions: number;
+  total_deductions: number;
+  net_pay: number;
+  employer_cost: number;
+  payment_status: string;
+  payment_date: string | null;
+  payment_ref: string | null;
+  bank_name: string | null;
+  bank_account: string | null;
+  project_id: string | null;
+  employee_name: string | null;
+  employee_code: string | null;
+  designation: string | null;
+  department: string | null;
+  notes: string | null;
+  created_at: string;
 }
 
-interface Commission {
-  id: string
-  commissionType: string
-  description: string | null
-  baseAmount: number
-  commissionRate: number
-  commissionAmount: number
-  periodMonth: string | null
-  status: string
-  employee: { id: string; name: string; employeeCode: string; department: { id: string; name: string; code: string } | null }
+interface PayrollAdvance {
+  id: string;
+  employee_id: string;
+  amount: number;
+  purpose: string | null;
+  request_date: string;
+  approval_status: string;
+  approved_by: string | null;
+  approved_at: string | null;
+  total_deducted: number;
+  remaining_balance: number;
+  monthly_deduction: number | null;
+  start_deduction_month: string | null;
+  notes: string | null;
+  created_at: string;
+  // Joined
+  payroll_employees?: { id: string; name: string; employee_code: string; department: string | null } | null;
 }
 
+interface PayrollCommission {
+  id: string;
+  employee_id: string;
+  project_id: string | null;
+  commission_type: string;
+  description: string | null;
+  base_amount: number;
+  commission_rate: number;
+  commission_amount: number;
+  period_month: string | null;
+  status: string;
+  approved_by: string | null;
+  approved_at: string | null;
+  paid_date: string | null;
+  payment_ref: string | null;
+  notes: string | null;
+  created_at: string;
+  // Joined
+  payroll_employees?: { id: string; name: string; employee_code: string; department: string | null } | null;
+}
+
+// Employee form data type
+interface EmployeeFormData {
+  name: string;
+  email: string;
+  phone: string;
+  designation: string;
+  department: string;
+  employment_type: string;
+  join_date: string;
+  bank_name: string;
+  bank_account: string;
+  cnic: string;
+  notes: string;
+}
+
+interface CompensationFormData {
+  employee_id: string;
+  compensation_type: string;
+  amount: string;
+  effective_from: string;
+  effective_to: string;
+  project_id: string;
+  notes: string;
+}
+
+// ==========================================
+// MAIN COMPONENT
+// ==========================================
 export default function PayrollPage() {
-  const [departments, setDepartments] = useState<Department[]>([])
-  const [employees, setEmployees] = useState<Employee[]>([])
-  const [runs, setRuns] = useState<PayrollRun[]>([])
-  const [advances, setAdvances] = useState<Advance[]>([])
-  const [commissions, setCommissions] = useState<Commission[]>([])
-  const [activeTab, setActiveTab] = useState('employees')
+  const { user } = useAuth();
+  const { hasPermission, role } = usePermissions();
+  const canAdd = hasPermission("PAYROLL_CREATE");
+  const canApprove = hasPermission("PAYROLL_APPROVE");
+  const canPost = hasPermission("PAYROLL_POST");
 
-  // Loading states
-  const [empLoading, setEmpLoading] = useState(true)
-  const [runsLoading, setRunsLoading] = useState(true)
-  const [advLoading, setAdvLoading] = useState(true)
-  const [commLoading, setCommLoading] = useState(true)
+  // ─── Tab State ───
+  const [activeTab, setActiveTab] = useState<"employees" | "runs" | "advances" | "commissions">("employees");
 
-  // Filters
-  const [empSearch, setEmpSearch] = useState('')
-  const [empPage, setEmpPage] = useState(1)
-  const [empTotalPages, setEmpTotalPages] = useState(1)
-  const [runPage, setRunPage] = useState(1)
-  const [runTotalPages, setRunTotalPages] = useState(1)
+  // ─── Employees State ───
+  const [employees, setEmployees] = useState<PayrollEmployee[]>([]);
+  const [empLoading, setEmpLoading] = useState(true);
+  const [empSearch, setEmpSearch] = useState("");
+  const [empPage, setEmpPage] = useState(1);
+  const empPerPage = 10;
 
-  // Dialog states
-  const [showEmpDialog, setShowEmpDialog] = useState(false)
-  const [editEmp, setEditEmp] = useState<Employee | null>(null)
-  const [showRunDialog, setShowRunDialog] = useState(false)
-  const [showAdvanceDialog, setShowAdvanceDialog] = useState(false)
-  const [showCommDialog, setShowCommDialog] = useState(false)
-  const [detailRunId, setDetailRunId] = useState<string | null>(null)
-  const [submitting, setSubmitting] = useState(false)
-  const [refreshKey, setRefreshKey] = useState(0)
+  // ─── Runs State ───
+  const [runs, setRuns] = useState<PayrollRun[]>([]);
+  const [runsLoading, setRunsLoading] = useState(true);
+  const [runPage, setRunPage] = useState(1);
+  const runPerPage = 10;
+  const [selectedRun, setSelectedRun] = useState<PayrollRun | null>(null);
+  const [runLines, setRunLines] = useState<PayrollLine[]>([]);
+  const [runLinesLoading, setRunLinesLoading] = useState(false);
 
-  // Run dialog form
-  const [runForm, setRunForm] = useState({ month: String(new Date().getMonth() + 1), year: String(new Date().getFullYear()) })
+  // ─── Advances State ───
+  const [advances, setAdvances] = useState<PayrollAdvance[]>([]);
+  const [advLoading, setAdvLoading] = useState(true);
 
-  // Advance form
-  const [advForm, setAdvForm] = useState({ employeeId: '', amount: '', purpose: '', monthlyDeduction: '', startDeductionMonth: '' })
+  // ─── Commissions State ───
+  const [commissions, setCommissions] = useState<PayrollCommission[]>([]);
+  const [commLoading, setCommLoading] = useState(true);
 
-  // Commission form
-  const [commForm, setCommForm] = useState({ employeeId: '', commissionType: 'performance_based', baseAmount: '', commissionRate: '', commissionAmount: '', periodMonth: '', description: '' })
+  // ─── Dialog States ───
+  const [showEmpForm, setShowEmpForm] = useState(false);
+  const [editingEmp, setEditingEmp] = useState<PayrollEmployee | null>(null);
+  const [showCompForm, setShowCompForm] = useState(false);
+  const [compEmployeeId, setCompEmployeeId] = useState<string>("");
+  const [showRunDialog, setShowRunDialog] = useState(false);
+  const [showAdvanceDialog, setShowAdvanceDialog] = useState(false);
+  const [showCommDialog, setShowCommDialog] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ type: string; id: string; name: string } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  // Fetch departments
-  const fetchDepartments = useCallback(async () => {
-    const res = await fetch('/api/departments?limit=50')
-    const json = await res.json()
-    setDepartments(json.data || [])
-  }, [])
+  // ─── Run creation form ───
+  const [runForm, setRunForm] = useState({
+    month: String(new Date().getMonth() + 1),
+    year: String(new Date().getFullYear()),
+  });
 
-  // Fetch employees
+  // ─── Advance form ───
+  const [advForm, setAdvForm] = useState({
+    employee_id: "",
+    amount: "",
+    purpose: "",
+    monthly_deduction: "",
+    start_deduction_month: "",
+  });
+
+  // ─── Commission form ───
+  const [commForm, setCommForm] = useState({
+    employee_id: "",
+    commission_type: "PERFORMANCE_BASED",
+    base_amount: "",
+    commission_rate: "",
+    commission_amount: "",
+    period_month: "",
+    description: "",
+  });
+
+  // ─── Projects for dropdowns ───
+  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
+
+  // ==========================================
+  // FETCH FUNCTIONS
+  // ==========================================
+
+  const fetchProjects = useCallback(async () => {
+    const { data } = await supabase.from("projects").select("id, name");
+    setProjects(data || []);
+  }, []);
+
+  // ─── Employees ───
   const fetchEmployees = useCallback(async () => {
-    setEmpLoading(true)
-    try {
-      const params = new URLSearchParams({ page: String(empPage), limit: '10' })
-      if (empSearch) params.set('search', empSearch)
-      const res = await fetch(`/api/payroll/employees?${params}`)
-      const json = await res.json()
-      setEmployees(json.employees || [])
-      setEmpTotalPages(json.pagination?.totalPages || 1)
-    } catch { /* empty */ } finally { setEmpLoading(false) }
-  }, [empPage, empSearch, refreshKey])
+    setEmpLoading(true);
+    let query = supabase
+      .from("payroll_employees")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (empSearch) {
+      query = query.or(`name.ilike.%${empSearch}%,employee_code.ilike.%${empSearch}%,designation.ilike.%${empSearch}%,department.ilike.%${empSearch}%`);
+    }
+    const { data, error } = await query;
+    if (error) toast.error("Failed to load employees: " + error.message);
+    else setEmployees(data || []);
+    setEmpLoading(false);
+  }, [empSearch, refreshKey]);
 
-  // Fetch runs
+  // ─── Payroll Runs ───
   const fetchRuns = useCallback(async () => {
-    setRunsLoading(true)
-    try {
-      const res = await fetch(`/api/payroll/runs?page=${runPage}&limit=10`)
-      const json = await res.json()
-      setRuns(json.runs || [])
-      setRunTotalPages(json.pagination?.totalPages || 1)
-    } catch { /* empty */ } finally { setRunsLoading(false) }
-  }, [runPage, refreshKey])
+    setRunsLoading(true);
+    const { data, error } = await supabase
+      .from("payroll_runs")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) toast.error("Failed to load payroll runs: " + error.message);
+    else setRuns(data || []);
+    setRunsLoading(false);
+  }, [refreshKey]);
 
-  // Fetch advances
+  // ─── Advances ───
   const fetchAdvances = useCallback(async () => {
-    setAdvLoading(true)
-    try {
-      const res = await fetch('/api/payroll/advances?limit=20')
-      const json = await res.json()
-      setAdvances(json.advances || [])
-    } catch { /* empty */ } finally { setAdvLoading(false) }
-  }, [refreshKey])
+    setAdvLoading(true);
+    const { data, error } = await supabase
+      .from("payroll_advances")
+      .select("*, payroll_employees(id, name, employee_code, department)")
+      .order("request_date", { ascending: false });
+    if (error) toast.error("Failed to load advances: " + error.message);
+    else setAdvances(data || []);
+    setAdvLoading(false);
+  }, [refreshKey]);
 
-  // Fetch commissions
+  // ─── Commissions ───
   const fetchCommissions = useCallback(async () => {
-    setCommLoading(true)
-    try {
-      const res = await fetch('/api/payroll/commissions?limit=20')
-      const json = await res.json()
-      setCommissions(json.commissions || [])
-    } catch { /* empty */ } finally { setCommLoading(false) }
-  }, [refreshKey])
+    setCommLoading(true);
+    const { data, error } = await supabase
+      .from("payroll_commissions")
+      .select("*, payroll_employees(id, name, employee_code, department)")
+      .order("created_at", { ascending: false });
+    if (error) toast.error("Failed to load commissions: " + error.message);
+    else setCommissions(data || []);
+    setCommLoading(false);
+  }, [refreshKey]);
 
-  useEffect(() => { fetchDepartments() }, [fetchDepartments])
-  useEffect(() => { if (activeTab === 'employees') fetchEmployees() }, [fetchEmployees, activeTab])
-  useEffect(() => { if (activeTab === 'runs') fetchRuns() }, [fetchRuns, activeTab])
-  useEffect(() => { if (activeTab === 'advances') fetchAdvances() }, [fetchAdvances, activeTab])
-  useEffect(() => { if (activeTab === 'commissions') fetchCommissions() }, [fetchCommissions, activeTab])
+  // ─── Effects ───
+  useEffect(() => { fetchProjects(); }, [fetchProjects]);
+  useEffect(() => { if (activeTab === "employees") fetchEmployees(); }, [fetchEmployees, activeTab]);
+  useEffect(() => { if (activeTab === "runs") fetchRuns(); }, [fetchRuns, activeTab]);
+  useEffect(() => { if (activeTab === "advances") fetchAdvances(); }, [fetchAdvances, activeTab]);
+  useEffect(() => { if (activeTab === "commissions") fetchCommissions(); }, [fetchCommissions, activeTab]);
 
-  const handleCreateRun = async () => {
-    const month = runForm.month.padStart(2, '0')
-    const year = runForm.year
-    const startDate = `${year}-${month}-01`
-    const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate()
-    const endDate = `${year}-${month}-${lastDay}`
-    setSubmitting(true)
+  // ==========================================
+  // EMPLOYEE CRUD
+  // ==========================================
+  async function handleEmployeeSubmit(formData: EmployeeFormData) {
     try {
-      const res = await fetch('/api/payroll/runs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ periodStartDate: startDate, periodEndDate: endDate }),
-      })
-      if (!res.ok) { const err = await res.json(); alert(err.error || 'Failed'); return }
-      setShowRunDialog(false)
-      setRefreshKey(k => k + 1)
-    } catch { alert('Failed') } finally { setSubmitting(false) }
+      let error;
+      if (editingEmp) {
+        const res = await supabase.from("payroll_employees").update(formData).eq("id", editingEmp.id);
+        error = res.error;
+      } else {
+        // Auto-generate employee code
+        const { data: codeData } = await supabase.rpc("payroll_generate_employee_code");
+        const employeeCode = codeData || `EMP-${Date.now().toString().slice(-4)}`;
+        const res = await supabase.from("payroll_employees").insert({
+          ...formData,
+          employee_code: employeeCode,
+          status: "ACTIVE",
+          created_by: user?.id,
+        });
+        error = res.error;
+      }
+      if (error) {
+        toast.error("Failed: " + error.message);
+      } else {
+        toast.success(editingEmp ? "Employee updated" : "Employee created");
+        await logAction(editingEmp ? "PAYROLL_EMPLOYEE_UPDATE" : "PAYROLL_EMPLOYEE_CREATE", { target: formData.name });
+        setShowEmpForm(false);
+        setEditingEmp(null);
+        fetchEmployees();
+      }
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown"));
+    }
   }
 
-  const handleCreateAdvance = async () => {
-    if (!advForm.employeeId || !advForm.amount) return
-    setSubmitting(true)
-    try {
-      const res = await fetch('/api/payroll/advances', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          employeeId: advForm.employeeId,
-          amount: parseFloat(advForm.amount),
-          purpose: advForm.purpose,
-          monthlyDeduction: advForm.monthlyDeduction ? parseFloat(advForm.monthlyDeduction) : null,
-          startDeductionMonth: advForm.startDeductionMonth || null,
-        }),
-      })
-      if (!res.ok) { const err = await res.json(); alert(err.error || 'Failed'); return }
-      setShowAdvanceDialog(false)
-      setAdvForm({ employeeId: '', amount: '', purpose: '', monthlyDeduction: '', startDeductionMonth: '' })
-      setRefreshKey(k => k + 1)
-    } catch { alert('Failed') } finally { setSubmitting(false) }
+  async function handleTerminateEmployee(emp: PayrollEmployee) {
+    if (!confirm(`Terminate ${emp.name}? This will mark them as inactive.`)) return;
+    const { error } = await supabase.from("payroll_employees").update({ status: "TERMINATED" }).eq("id", emp.id);
+    if (error) { toast.error("Failed: " + error.message); return; }
+    toast.success(`${emp.name} terminated`);
+    await logAction("PAYROLL_EMPLOYEE_TERMINATE", { target: emp.name });
+    fetchEmployees();
   }
 
-  const handleAdvanceAction = async (id: string, action: 'approved' | 'rejected') => {
+  // ==========================================
+  // COMPENSATION CRUD
+  // ==========================================
+  async function handleCompensationSubmit(formData: CompensationFormData) {
+    if (!formData.employee_id || !formData.amount) {
+      toast.error("Employee and amount are required");
+      return;
+    }
+    setSubmitting(true);
     try {
-      const res = await fetch(`/api/payroll/advances/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ approvalStatus: action }),
-      })
-      if (!res.ok) { const err = await res.json(); alert(err.error || 'Failed'); return }
-      setRefreshKey(k => k + 1)
-    } catch { alert('Failed') }
+      // Deactivate old compensation for this employee
+      await supabase.from("payroll_compensation").update({ is_active: false }).eq("employee_id", formData.employee_id).eq("is_active", true);
+      // Insert new active compensation
+      const { error } = await supabase.from("payroll_compensation").insert({
+        employee_id: formData.employee_id,
+        compensation_type: formData.compensation_type,
+        amount: parseFloat(formData.amount),
+        effective_from: formData.effective_from || new Date().toISOString().split("T")[0],
+        effective_to: formData.effective_to || null,
+        is_active: true,
+        project_id: formData.project_id || null,
+        notes: formData.notes || null,
+        created_by: user?.id,
+      });
+      if (error) { toast.error("Failed: " + error.message); }
+      else {
+        toast.success("Compensation updated");
+        await logAction("PAYROLL_COMPENSATION_UPDATE", { target: formData.employee_id });
+        setShowCompForm(false);
+        fetchEmployees();
+      }
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown"));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
-  const handleCreateCommission = async () => {
-    if (!commForm.employeeId || !commForm.commissionAmount) return
-    setSubmitting(true)
+  // ==========================================
+  // PAYROLL RUN
+  // ==========================================
+  async function handleCreateRun() {
+    const month = parseInt(runForm.month);
+    const year = parseInt(runForm.year);
+    const lastDay = getLastDayOfMonth(month, year);
+    const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
+    const periodEnd = `${year}-${String(month).padStart(2, "0")}-${lastDay}`;
+    const payrollPeriod = `${year}-${String(month).padStart(2, "0")}`;
+
+    setSubmitting(true);
     try {
-      const res = await fetch('/api/payroll/commissions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          employeeId: commForm.employeeId,
-          commissionType: commForm.commissionType,
-          baseAmount: commForm.baseAmount ? parseFloat(commForm.baseAmount) : 0,
-          commissionRate: commForm.commissionRate ? parseFloat(commForm.commissionRate) : 0,
-          commissionAmount: parseFloat(commForm.commissionAmount),
-          periodMonth: commForm.periodMonth || null,
-          description: commForm.description || null,
-        }),
-      })
-      if (!res.ok) { const err = await res.json(); alert(err.error || 'Failed'); return }
-      setShowCommDialog(false)
-      setCommForm({ employeeId: '', commissionType: 'performance_based', baseAmount: '', commissionRate: '', commissionAmount: '', periodMonth: '', description: '' })
-      setRefreshKey(k => k + 1)
-    } catch { alert('Failed') } finally { setSubmitting(false) }
+      const res = await fetch("/api/payroll/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ period_start: periodStart, period_end: periodEnd, payroll_period: payrollPeriod }),
+      });
+      const result = await res.json();
+      if (res.ok) {
+        toast.success(result.message || "Payroll run created and calculated");
+        await logAction("PAYROLL_RUN_CREATE", { target: payrollPeriod });
+        setShowRunDialog(false);
+        setRefreshKey((k) => k + 1);
+      } else {
+        toast.error(result.error || "Failed to create payroll run");
+      }
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Network error"));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
-  const months = Array.from({ length: 12 }, (_, i) => ({ value: String(i + 1), label: new Date(2024, i).toLocaleString('en', { month: 'long' }) }))
-  const years = [2024, 2025, 2026, 2027].map(y => ({ value: String(y), label: String(y) }))
+  async function handleRunAction(run: PayrollRun, action: string) {
+    if (action === "view") {
+      setSelectedRun(run);
+      setRunLinesLoading(true);
+      const { data } = await supabase.from("payroll_lines").select("*").eq("payroll_run_id", run.id);
+      setRunLines(data || []);
+      setRunLinesLoading(false);
+      return;
+    }
+    if (action === "post") {
+      setSubmitting(true);
+      try {
+        const res = await fetch(`/api/payroll/runs`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ runId: run.id, action: "post" }),
+        });
+        const result = await res.json();
+        if (res.ok) {
+          toast.success(result.message || "Payroll posted to General Ledger");
+          await logAction("PAYROLL_RUN_POST", { target: run.payroll_period });
+          fetchRuns();
+        } else {
+          toast.error(result.error || "Posting failed");
+        }
+      } catch (err: any) {
+        toast.error("Error: " + (err.message || "Unknown"));
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+    if (action === "approve" && canApprove) {
+      const { error } = await supabase.from("payroll_runs").update({
+        status: "APPROVED",
+        approved_by: user?.id,
+        approved_at: new Date().toISOString(),
+      }).eq("id", run.id);
+      if (error) { toast.error("Failed: " + error.message); return; }
+      toast.success("Payroll run approved");
+      await logAction("PAYROLL_RUN_APPROVE", { target: run.payroll_period });
+      fetchRuns();
+      return;
+    }
+    if (action === "cancel") {
+      if (!confirm("Cancel this payroll run?")) return;
+      const { error } = await supabase.from("payroll_runs").update({ status: "CANCELLED" }).eq("id", run.id);
+      if (error) { toast.error("Failed: " + error.message); return; }
+      toast.success("Payroll run cancelled");
+      fetchRuns();
+    }
+  }
 
+  // ==========================================
+  // ADVANCES CRUD
+  // ==========================================
+  async function handleCreateAdvance() {
+    if (!advForm.employee_id || !advForm.amount) {
+      toast.error("Employee and amount are required");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const { error } = await supabase.from("payroll_advances").insert({
+        employee_id: advForm.employee_id,
+        amount: parseFloat(advForm.amount),
+        purpose: advForm.purpose || null,
+        monthly_deduction: advForm.monthly_deduction ? parseFloat(advForm.monthly_deduction) : null,
+        start_deduction_month: advForm.start_deduction_month || null,
+        remaining_balance: parseFloat(advForm.amount),
+        created_by: user?.id,
+      });
+      if (error) { toast.error("Failed: " + error.message); }
+      else {
+        toast.success("Advance created");
+        await logAction("PAYROLL_ADVANCE_CREATE", { target: advForm.employee_id });
+        setShowAdvanceDialog(false);
+        setAdvForm({ employee_id: "", amount: "", purpose: "", monthly_deduction: "", start_deduction_month: "" });
+        setRefreshKey((k) => k + 1);
+      }
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown"));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleAdvanceAction(advance: PayrollAdvance, action: string) {
+    if (action === "approve" && canApprove) {
+      const { error } = await supabase.from("payroll_advances").update({
+        approval_status: "APPROVED",
+        approved_by: user?.id,
+        approved_at: new Date().toISOString(),
+      }).eq("id", advance.id);
+      if (error) { toast.error("Failed: " + error.message); return; }
+      toast.success("Advance approved");
+      fetchAdvances();
+      return;
+    }
+    if (action === "reject" && canApprove) {
+      const { error } = await supabase.from("payroll_advances").update({
+        approval_status: "REJECTED",
+        approved_by: user?.id,
+        approved_at: new Date().toISOString(),
+      }).eq("id", advance.id);
+      if (error) { toast.error("Failed: " + error.message); return; }
+      toast.success("Advance rejected");
+      fetchAdvances();
+    }
+  }
+
+  // ==========================================
+  // COMMISSIONS CRUD
+  // ==========================================
+  async function handleCreateCommission() {
+    if (!commForm.employee_id || !commForm.commission_amount) {
+      toast.error("Employee and commission amount are required");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const { error } = await supabase.from("payroll_commissions").insert({
+        employee_id: commForm.employee_id,
+        commission_type: commForm.commission_type,
+        base_amount: commForm.base_amount ? parseFloat(commForm.base_amount) : 0,
+        commission_rate: commForm.commission_rate ? parseFloat(commForm.commission_rate) : 0,
+        commission_amount: parseFloat(commForm.commission_amount),
+        period_month: commForm.period_month || null,
+        description: commForm.description || null,
+        status: "PENDING",
+        created_by: user?.id,
+      });
+      if (error) { toast.error("Failed: " + error.message); }
+      else {
+        toast.success("Commission created");
+        await logAction("PAYROLL_COMMISSION_CREATE", { target: commForm.employee_id });
+        setShowCommDialog(false);
+        setCommForm({ employee_id: "", commission_type: "PERFORMANCE_BASED", base_amount: "", commission_rate: "", commission_amount: "", period_month: "", description: "" });
+        setRefreshKey((k) => k + 1);
+      }
+    } catch (err: any) {
+      toast.error("Error: " + (err.message || "Unknown"));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleCommissionAction(commission: PayrollCommission, action: string) {
+    if (action === "approve" && canApprove) {
+      const { error } = await supabase.from("payroll_commissions").update({
+        status: "APPROVED",
+        approved_by: user?.id,
+        approved_at: new Date().toISOString(),
+      }).eq("id", commission.id);
+      if (error) { toast.error("Failed: " + error.message); return; }
+      toast.success("Commission approved");
+      fetchCommissions();
+      return;
+    }
+    if (action === "reject" && canApprove) {
+      const { error } = await supabase.from("payroll_commissions").update({ status: "REJECTED" }).eq("id", commission.id);
+      if (error) { toast.error("Failed: " + error.message); return; }
+      toast.success("Commission rejected");
+      fetchCommissions();
+    }
+  }
+
+  // ==========================================
+  // DELETE HANDLER
+  // ==========================================
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    const { error } = await supabase.from(`payroll_${deleteTarget.type}s` as any).delete().eq("id", deleteTarget.id);
+    if (error) { toast.error("Delete failed: " + error.message); return; }
+    toast.success(`${deleteTarget.name} deleted`);
+    await logAction(`PAYROLL_${deleteTarget.type.toUpperCase()}_DELETE`, { target: deleteTarget.name });
+    setShowDeleteModal(false);
+    setDeleteTarget(null);
+    setRefreshKey((k) => k + 1);
+  }
+
+  // ==========================================
+  // PAGINATION HELPERS
+  // ==========================================
+  const empTotalPages = Math.ceil(employees.length / empPerPage);
+  const empPaginated = employees.slice((empPage - 1) * empPerPage, empPage * empPerPage);
+  const runTotalPages = Math.ceil(runs.length / runPerPage);
+  const runPaginated = runs.slice((runPage - 1) * runPerPage, runPage * runPerPage);
+
+  // Months / Years for form selects
+  const months = Array.from({ length: 12 }, (_, i) => ({ value: String(i + 1), label: new Date(2024, i).toLocaleString("en", { month: "long" }) }));
+  const years = [2024, 2025, 2026, 2027, 2028].map((y) => ({ value: String(y), label: String(y) }));
+
+  // ==========================================
+  // RENDER
+  // ==========================================
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Payroll Management</h1>
-        <p className="text-sm text-gray-500">Manage employees, payroll runs, advances, and commissions</p>
+    <div className="space-y-6">
+      {/* ─── PAGE HEADER ─── */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Payroll Management</h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+            Manage employees, payroll runs, advances, and commissions
+          </p>
+        </div>
       </div>
 
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="bg-gray-100">
-          <TabsTrigger value="employees" className="text-sm">Employees</TabsTrigger>
-          <TabsTrigger value="runs" className="text-sm">Payroll Runs</TabsTrigger>
-          <TabsTrigger value="advances" className="text-sm">Advances</TabsTrigger>
-          <TabsTrigger value="commissions" className="text-sm">Commissions</TabsTrigger>
-        </TabsList>
+      {/* ─── TAB NAVIGATION ─── */}
+      <div className="flex flex-wrap gap-2 border-b border-gray-200 dark:border-gray-700 pb-2">
+        {[
+          { key: "employees" as const, label: "Employees", icon: Users },
+          { key: "runs" as const, label: "Payroll Runs", icon: Calculator },
+          { key: "advances" as const, label: "Advances", icon: Banknote },
+          { key: "commissions" as const, label: "Commissions", icon: TrendingUp },
+        ].map((tab) => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-t-lg text-sm font-medium transition-colors
+              ${activeTab === tab.key
+                ? "bg-blue-600 text-white"
+                : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800"
+              }`}
+          >
+            <tab.icon className="w-4 h-4" />
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-        {/* ========== EMPLOYEES TAB ========== */}
-        <TabsContent value="employees" className="space-y-4 mt-4">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="relative flex-1 max-w-md">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-              <Input placeholder="Search employees..." value={empSearch} onChange={e => { setEmpSearch(e.target.value); setEmpPage(1) }} className="pl-9" />
+      {/* ================================================ */}
+      {/* TAB 1: EMPLOYEES                                    */}
+      {/* ================================================ */}
+      {activeTab === "employees" && (
+        <div className="space-y-4">
+          {/* Toolbar */}
+          <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
+            <div className="relative flex-1 max-w-sm">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search employees..."
+                value={empSearch}
+                onChange={(e) => { setEmpSearch(e.target.value); setEmpPage(1); }}
+                className="w-full pl-9 pr-4 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              />
             </div>
-            <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => { setEditEmp(null); setShowEmpDialog(true) }}>
-              <Plus className="h-4 w-4 mr-2" /> Add Employee
-            </Button>
+            {canAdd && (
+              <button
+                onClick={() => { setEditingEmp(null); setShowEmpForm(true); }}
+                className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-medium text-sm hover:bg-blue-700 transition-colors"
+              >
+                <Plus className="w-4 h-4" /> Add Employee
+              </button>
+            )}
           </div>
 
-          <Card>
-            <CardContent className="p-0">
-              {empLoading ? (
-                <div className="p-4 space-y-3">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
-              ) : !employees.length ? (
-                <div className="text-center py-12"><p className="text-gray-500 text-sm">No employees found</p></div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="text-xs">Code</TableHead>
-                        <TableHead className="text-xs">Name</TableHead>
-                        <TableHead className="text-xs hidden md:table-cell">Designation</TableHead>
-                        <TableHead className="text-xs hidden sm:table-cell">Department</TableHead>
-                        <TableHead className="text-xs">Type</TableHead>
-                        <TableHead className="text-xs">Status</TableHead>
-                        <TableHead className="text-xs text-right">Actions</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {employees.map((emp) => (
-                        <TableRow key={emp.id}>
-                          <TableCell className="text-xs font-mono">{emp.employeeCode}</TableCell>
-                          <TableCell className="text-xs font-medium">{emp.name}</TableCell>
-                          <TableCell className="text-xs text-gray-500 hidden md:table-cell">{emp.designation || '—'}</TableCell>
-                          <TableCell className="text-xs text-gray-500 hidden sm:table-cell">{emp.department?.name || '—'}</TableCell>
-                          <TableCell className="text-xs capitalize">{emp.employmentType.replace(/_/g, ' ')}</TableCell>
-                          <TableCell><StatusBadge status={emp.status} /></TableCell>
-                          <TableCell className="text-right">
-                            <div className="flex items-center justify-end gap-1">
-                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setEditEmp(emp); setShowEmpDialog(true) }}><Edit2 className="h-3.5 w-3.5" /></Button>
-                              <Button variant="ghost" size="icon" className="h-7 w-7 text-red-500" onClick={async () => {
-                                if (!confirm(`Terminate ${emp.name}?`)) return
-                                await fetch(`/api/payroll/employees/${emp.id}`, { method: 'DELETE' })
-                                setRefreshKey(k => k + 1)
-                              }}><Trash2 className="h-3.5 w-3.5" /></Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {empTotalPages > 1 && (
-            <div className="flex items-center justify-between">
-              <p className="text-xs text-gray-500">Page {empPage} of {empTotalPages}</p>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" disabled={empPage <= 1} onClick={() => setEmpPage(p => p - 1)}><ChevronLeft className="h-4 w-4" /></Button>
-                <Button variant="outline" size="sm" disabled={empPage >= empTotalPages} onClick={() => setEmpPage(p => p + 1)}><ChevronRight className="h-4 w-4" /></Button>
-              </div>
-            </div>
-          )}
-        </TabsContent>
-
-        {/* ========== PAYROLL RUNS TAB ========== */}
-        <TabsContent value="runs" className="space-y-4 mt-4">
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-gray-500">Create and manage payroll runs</p>
-            <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => setShowRunDialog(true)}>
-              <Plus className="h-4 w-4 mr-2" /> Create Payroll Run
-            </Button>
-          </div>
-
-          <Card>
-            <CardContent className="p-0">
-              {runsLoading ? (
-                <div className="p-4 space-y-3">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}</div>
-              ) : !runs.length ? (
-                <div className="text-center py-12"><p className="text-gray-500 text-sm">No payroll runs yet</p></div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="text-xs">Period</TableHead>
-                        <TableHead className="text-xs">Status</TableHead>
-                        <TableHead className="text-xs text-right">Total Gross</TableHead>
-                        <TableHead className="text-xs text-right">Total Net</TableHead>
-                        <TableHead className="text-xs text-center">Employees</TableHead>
-                        <TableHead className="text-xs">Created</TableHead>
-                        <TableHead className="text-xs text-right">Actions</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {runs.map((run) => (
-                        <TableRow key={run.id}>
-                          <TableCell className="text-xs font-medium">{formatPeriod(run.payrollPeriod)}</TableCell>
-                          <TableCell><StatusBadge status={run.status} /></TableCell>
-                          <TableCell className="text-xs text-right">{formatPKR(run.totalGrossPay)}</TableCell>
-                          <TableCell className="text-xs text-right font-medium">{formatPKR(run.totalNetPay)}</TableCell>
-                          <TableCell className="text-xs text-center">{run.totalEmployees}</TableCell>
-                          <TableCell className="text-xs text-gray-500">{timeAgo(run.createdAt)}</TableCell>
-                          <TableCell className="text-right">
-                            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setDetailRunId(run.id)}><Eye className="h-3.5 w-3.5" /></Button>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {runTotalPages > 1 && (
-            <div className="flex items-center justify-between">
-              <p className="text-xs text-gray-500">Page {runPage} of {runTotalPages}</p>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" disabled={runPage <= 1} onClick={() => setRunPage(p => p - 1)}><ChevronLeft className="h-4 w-4" /></Button>
-                <Button variant="outline" size="sm" disabled={runPage >= runTotalPages} onClick={() => setRunPage(p => p + 1)}><ChevronRight className="h-4 w-4" /></Button>
-              </div>
-            </div>
-          )}
-        </TabsContent>
-
-        {/* ========== ADVANCES TAB ========== */}
-        <TabsContent value="advances" className="space-y-4 mt-4">
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-gray-500">Manage salary advance requests</p>
-            <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => setShowAdvanceDialog(true)}>
-              <Plus className="h-4 w-4 mr-2" /> New Advance
-            </Button>
-          </div>
-
-          <Card>
-            <CardContent className="p-0">
-              {advLoading ? (
-                <div className="p-4 space-y-3">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}</div>
-              ) : !advances.length ? (
-                <div className="text-center py-12"><p className="text-gray-500 text-sm">No advances recorded</p></div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="text-xs">Employee</TableHead>
-                        <TableHead className="text-xs">Purpose</TableHead>
-                        <TableHead className="text-xs text-right">Amount</TableHead>
-                        <TableHead className="text-xs text-right">Remaining</TableHead>
-                        <TableHead className="text-xs">Status</TableHead>
-                        <TableHead className="text-xs">Date</TableHead>
-                        <TableHead className="text-xs text-right">Actions</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {advances.map((adv) => (
-                        <TableRow key={adv.id}>
-                          <TableCell className="text-xs font-medium">{adv.employee.name}</TableCell>
-                          <TableCell className="text-xs text-gray-500">{adv.purpose || '—'}</TableCell>
-                          <TableCell className="text-xs text-right">{formatPKR(adv.amount)}</TableCell>
-                          <TableCell className="text-xs text-right font-medium">{formatPKR(adv.remainingBalance)}</TableCell>
-                          <TableCell><StatusBadge status={adv.approvalStatus} /></TableCell>
-                          <TableCell className="text-xs text-gray-500">{formatDate(adv.requestDate)}</TableCell>
-                          <TableCell className="text-right">
-                            {adv.approvalStatus === 'pending' && (
-                              <div className="flex items-center justify-end gap-1">
-                                <Button variant="ghost" size="icon" className="h-7 w-7 text-emerald-600" onClick={() => handleAdvanceAction(adv.id, 'approved')}><CheckCircle className="h-3.5 w-3.5" /></Button>
-                                <Button variant="ghost" size="icon" className="h-7 w-7 text-red-500" onClick={() => handleAdvanceAction(adv.id, 'rejected')}><XCircle className="h-3.5 w-3.5" /></Button>
-                              </div>
+          {/* Employees Table */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 dark:bg-gray-900/50">
+                  <tr>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Code</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Name</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400 hidden md:table-cell">Designation</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400 hidden lg:table-cell">Department</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Type</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Status</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                  {empLoading ? (
+                    <tr><td colSpan={7} className="text-center py-8 text-gray-400">Loading...</td></tr>
+                  ) : employees.length === 0 ? (
+                    <tr><td colSpan={7} className="text-center py-8 text-gray-400">No employees found. Add your first employee.</td></tr>
+                  ) : (
+                    empPaginated.map((emp) => (
+                      <tr key={emp.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                        <td className="px-4 py-3 font-mono text-xs text-gray-600 dark:text-gray-400">{emp.employee_code}</td>
+                        <td className="px-4 py-3 font-medium text-gray-900 dark:text-white">{emp.name}</td>
+                        <td className="px-4 py-3 text-gray-600 dark:text-gray-400 hidden md:table-cell">{emp.designation || "—"}</td>
+                        <td className="px-4 py-3 text-gray-600 dark:text-gray-400 hidden lg:table-cell">{emp.department || "—"}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${getEmploymentTypeBadge(emp.employment_type)}`}>
+                            {emp.employment_type.replace(/_/g, " ")}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[emp.status] || STATUS_STYLES.DRAFT}`}>
+                            {emp.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1">
+                            <button onClick={() => { setCompEmployeeId(emp.id); setShowCompForm(true); }}
+                              className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition-colors" title="Set Compensation">
+                              <FileText className="w-4 h-4" />
+                            </button>
+                            <button onClick={() => { setEditingEmp(emp); setShowEmpForm(true); }}
+                              className="p-1.5 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors" title="Edit">
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            {emp.status === "ACTIVE" && (
+                              <button onClick={() => handleTerminateEmployee(emp)}
+                                className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors" title="Terminate">
+                                <X className="w-4 h-4" />
+                              </button>
                             )}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            {/* Pagination */}
+            {empTotalPages > 1 && (
+              <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 dark:border-gray-700">
+                <span className="text-sm text-gray-500">Page {empPage} of {empTotalPages}</span>
+                <div className="flex gap-1">
+                  <button onClick={() => setEmpPage((p) => Math.max(1, p - 1))} disabled={empPage <= 1}
+                    className="p-1.5 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50">
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => setEmpPage((p) => Math.min(empTotalPages, p + 1))} disabled={empPage >= empTotalPages}
+                    className="p-1.5 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50">
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
                 </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
-        {/* ========== COMMISSIONS TAB ========== */}
-        <TabsContent value="commissions" className="space-y-4 mt-4">
+      {/* ================================================ */}
+      {/* TAB 2: PAYROLL RUNS                                 */}
+      {/* ================================================ */}
+      {activeTab === "runs" && (
+        <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <p className="text-sm text-gray-500">Track employee commissions</p>
-            <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => setShowCommDialog(true)}>
-              <Plus className="h-4 w-4 mr-2" /> Add Commission
-            </Button>
+            <p className="text-sm text-gray-500 dark:text-gray-400">Create and manage payroll runs</p>
+            {canAdd && (
+              <button onClick={() => setShowRunDialog(true)}
+                className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-medium text-sm hover:bg-blue-700 transition-colors">
+                <Plus className="w-4 h-4" /> Create Payroll Run
+              </button>
+            )}
           </div>
 
-          <Card>
-            <CardContent className="p-0">
-              {commLoading ? (
-                <div className="p-4 space-y-3">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}</div>
-              ) : !commissions.length ? (
-                <div className="text-center py-12"><p className="text-gray-500 text-sm">No commissions recorded</p></div>
+          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 dark:bg-gray-900/50">
+                  <tr>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Period</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Status</th>
+                    <th className="text-right px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Total Gross</th>
+                    <th className="text-right px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Total Net</th>
+                    <th className="text-center px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Employees</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400 hidden md:table-cell">Created</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                  {runsLoading ? (
+                    <tr><td colSpan={7} className="text-center py-8 text-gray-400">Loading...</td></tr>
+                  ) : runs.length === 0 ? (
+                    <tr><td colSpan={7} className="text-center py-8 text-gray-400">No payroll runs yet. Create your first run.</td></tr>
+                  ) : (
+                    runPaginated.map((run) => (
+                      <tr key={run.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                        <td className="px-4 py-3 font-medium text-gray-900 dark:text-white">{formatPeriod(run.payroll_period)}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[run.status] || STATUS_STYLES.DRAFT}`}>
+                            {run.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-gray-900 dark:text-white">{formatPKR(run.total_gross_pay)}</td>
+                        <td className="px-4 py-3 text-right font-mono font-semibold text-gray-900 dark:text-white">{formatPKR(run.total_net_pay)}</td>
+                        <td className="px-4 py-3 text-center text-gray-600 dark:text-gray-400">{run.total_employees}</td>
+                        <td className="px-4 py-3 text-gray-500 dark:text-gray-400 text-xs hidden md:table-cell">{timeAgo(run.created_at)}</td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1">
+                            <button onClick={() => handleRunAction(run, "view")}
+                              className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition-colors" title="View Details">
+                              <Eye className="w-4 h-4" />
+                            </button>
+                            {run.status === "CALCULATED" && canApprove && (
+                              <button onClick={() => handleRunAction(run, "approve")}
+                                className="p-1.5 text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg transition-colors" title="Approve">
+                                <Check className="w-4 h-4" />
+                              </button>
+                            )}
+                            {run.status === "APPROVED" && canPost && (
+                              <button onClick={() => handleRunAction(run, "post")} disabled={submitting}
+                                className="p-1.5 text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded-lg transition-colors disabled:opacity-50" title="Post to GL">
+                                {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Calculator className="w-4 h-4" />}
+                              </button>
+                            )}
+                            {(run.status === "DRAFT" || run.status === "CALCULATED") && (
+                              <button onClick={() => handleRunAction(run, "cancel")}
+                                className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors" title="Cancel">
+                                <X className="w-4 h-4" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            {runTotalPages > 1 && (
+              <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 dark:border-gray-700">
+                <span className="text-sm text-gray-500">Page {runPage} of {runTotalPages}</span>
+                <div className="flex gap-1">
+                  <button onClick={() => setRunPage((p) => Math.max(1, p - 1))} disabled={runPage <= 1}
+                    className="p-1.5 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50">
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => setRunPage((p) => Math.min(runTotalPages, p + 1))} disabled={runPage >= runTotalPages}
+                    className="p-1.5 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50">
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ================================================ */}
+      {/* TAB 3: ADVANCES                                    */}
+      {/* ================================================ */}
+      {activeTab === "advances" && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-gray-500 dark:text-gray-400">Track salary advances and recoveries</p>
+            {canAdd && (
+              <button onClick={() => setShowAdvanceDialog(true)}
+                className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-medium text-sm hover:bg-blue-700 transition-colors">
+                <Plus className="w-4 h-4" /> New Advance
+              </button>
+            )}
+          </div>
+
+          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 dark:bg-gray-900/50">
+                  <tr>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Employee</th>
+                    <th className="text-right px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Amount</th>
+                    <th className="text-right px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Remaining</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400 hidden md:table-cell">Purpose</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Status</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                  {advLoading ? (
+                    <tr><td colSpan={6} className="text-center py-8 text-gray-400">Loading...</td></tr>
+                  ) : advances.length === 0 ? (
+                    <tr><td colSpan={6} className="text-center py-8 text-gray-400">No advances found.</td></tr>
+                  ) : (
+                    advances.map((adv) => (
+                      <tr key={adv.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                        <td className="px-4 py-3">
+                          <div className="font-medium text-gray-900 dark:text-white">{adv.payroll_employees?.name || "—"}</div>
+                          <div className="text-xs text-gray-500">{adv.payroll_employees?.employee_code || ""}</div>
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-gray-900 dark:text-white">{formatPKR(adv.amount)}</td>
+                        <td className="px-4 py-3 text-right font-mono text-gray-900 dark:text-white">{formatPKR(adv.remaining_balance)}</td>
+                        <td className="px-4 py-3 text-gray-600 dark:text-gray-400 text-xs hidden md:table-cell max-w-[200px] truncate">{adv.purpose || "—"}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[adv.approval_status] || STATUS_STYLES.PENDING}`}>
+                            {adv.approval_status.replace(/_/g, " ")}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1">
+                            {adv.approval_status === "PENDING" && canApprove && (
+                              <>
+                                <button onClick={() => handleAdvanceAction(adv, "approve")}
+                                  className="p-1.5 text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg transition-colors" title="Approve">
+                                  <Check className="w-4 h-4" />
+                                </button>
+                                <button onClick={() => handleAdvanceAction(adv, "reject")}
+                                  className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors" title="Reject">
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================================================ */}
+      {/* TAB 4: COMMISSIONS                                 */}
+      {/* ================================================ */}
+      {activeTab === "commissions" && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-gray-500 dark:text-gray-400">Manage performance and project-based commissions</p>
+            {canAdd && (
+              <button onClick={() => setShowCommDialog(true)}
+                className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg font-medium text-sm hover:bg-blue-700 transition-colors">
+                <Plus className="w-4 h-4" /> New Commission
+              </button>
+            )}
+          </div>
+
+          <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 dark:bg-gray-900/50">
+                  <tr>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Employee</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Type</th>
+                    <th className="text-right px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Base</th>
+                    <th className="text-right px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Rate</th>
+                    <th className="text-right px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Amount</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Status</th>
+                    <th className="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                  {commLoading ? (
+                    <tr><td colSpan={7} className="text-center py-8 text-gray-400">Loading...</td></tr>
+                  ) : commissions.length === 0 ? (
+                    <tr><td colSpan={7} className="text-center py-8 text-gray-400">No commissions found.</td></tr>
+                  ) : (
+                    commissions.map((comm) => (
+                      <tr key={comm.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                        <td className="px-4 py-3">
+                          <div className="font-medium text-gray-900 dark:text-white">{comm.payroll_employees?.name || "—"}</div>
+                          <div className="text-xs text-gray-500">{comm.payroll_employees?.employee_code || ""}</div>
+                        </td>
+                        <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{comm.commission_type.replace(/_/g, " ")}</td>
+                        <td className="px-4 py-3 text-right font-mono text-gray-900 dark:text-white">{formatPKR(comm.base_amount)}</td>
+                        <td className="px-4 py-3 text-right text-gray-600 dark:text-gray-400">{(comm.commission_rate * 100).toFixed(1)}%</td>
+                        <td className="px-4 py-3 text-right font-mono font-semibold text-gray-900 dark:text-white">{formatPKR(comm.commission_amount)}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[comm.status] || STATUS_STYLES.PENDING}`}>
+                            {comm.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1">
+                            {comm.status === "PENDING" && canApprove && (
+                              <>
+                                <button onClick={() => handleCommissionAction(comm, "approve")}
+                                  className="p-1.5 text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg transition-colors" title="Approve">
+                                  <Check className="w-4 h-4" />
+                                </button>
+                                <button onClick={() => handleCommissionAction(comm, "reject")}
+                                  className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors" title="Reject">
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================================================ */}
+      {/* DIALOGS                                          */}
+      {/* ================================================ */}
+
+      {/* ─── EMPLOYEE FORM DIALOG ─── */}
+      {showEmpForm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowEmpForm(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
+                {editingEmp ? "Edit Employee" : "Add New Employee"}
+              </h2>
+              <button onClick={() => setShowEmpForm(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <EmployeeForm
+              initialData={editingEmp ? {
+                name: editingEmp.name,
+                email: editingEmp.email || "",
+                phone: editingEmp.phone || "",
+                designation: editingEmp.designation || "",
+                department: editingEmp.department || "",
+                employment_type: editingEmp.employment_type,
+                join_date: editingEmp.join_date || "",
+                bank_name: editingEmp.bank_name || "",
+                bank_account: editingEmp.bank_account || "",
+                cnic: editingEmp.cnic || "",
+                notes: editingEmp.notes || "",
+              } : undefined}
+              onSubmit={handleEmployeeSubmit}
+              onCancel={() => { setShowEmpForm(false); setEditingEmp(null); }}
+              submitting={submitting}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* ─── COMPENSATION FORM DIALOG ─── */}
+      {showCompForm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowCompForm(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Set Compensation</h2>
+              <button onClick={() => setShowCompForm(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <CompensationForm
+              employeeId={compEmployeeId}
+              projects={projects}
+              onSubmit={handleCompensationSubmit}
+              onCancel={() => setShowCompForm(false)}
+              submitting={submitting}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* ─── RUN CREATION DIALOG ─── */}
+      {showRunDialog && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowRunDialog(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Create Payroll Run</h2>
+              <button onClick={() => setShowRunDialog(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Month</label>
+                <select
+                  value={runForm.month} onChange={(e) => setRunForm({ ...runForm, month: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  {months.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Year</label>
+                <select
+                  value={runForm.year} onChange={(e) => setRunForm({ ...runForm, year: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  {years.map((y) => <option key={y.value} value={y.value}>{y.label}</option>)}
+                </select>
+              </div>
+              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+                <p className="text-xs text-amber-700 dark:text-amber-400">
+                  This will calculate payroll for all ACTIVE employees with active compensation. Make sure compensation is set correctly before running.
+                </p>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setShowRunDialog(false)}
+                  className="flex-1 px-4 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700">
+                  Cancel
+                </button>
+                <button onClick={handleCreateRun} disabled={submitting}
+                  className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">
+                  {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                  {submitting ? "Calculating..." : "Create & Calculate"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── RUN DETAIL DIALOG (Payslip View) ─── */}
+      {selectedRun && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => { setSelectedRun(null); setRunLines([]); }}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-5xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-800 z-10">
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
+                  Payroll Run — {formatPeriod(selectedRun.payroll_period)}
+                </h2>
+                <div className="flex items-center gap-3 mt-1">
+                  <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[selectedRun.status] || STATUS_STYLES.DRAFT}`}>
+                    {selectedRun.status}
+                  </span>
+                  <span className="text-xs text-gray-500">{selectedRun.total_employees} employees</span>
+                </div>
+              </div>
+              <button onClick={() => { setSelectedRun(null); setRunLines([]); }} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            {/* Summary Cards */}
+            <div className="grid grid-cols-3 gap-4 p-6">
+              <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4">
+                <p className="text-xs text-blue-600 dark:text-blue-400 font-medium">Total Gross Pay</p>
+                <p className="text-xl font-bold text-blue-900 dark:text-blue-100 mt-1">{formatPKR(selectedRun.total_gross_pay)}</p>
+              </div>
+              <div className="bg-red-50 dark:bg-red-900/20 rounded-lg p-4">
+                <p className="text-xs text-red-600 dark:text-red-400 font-medium">Total Deductions</p>
+                <p className="text-xl font-bold text-red-900 dark:text-red-100 mt-1">{formatPKR(selectedRun.total_deductions)}</p>
+              </div>
+              <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-4">
+                <p className="text-xs text-green-600 dark:text-green-400 font-medium">Total Net Pay</p>
+                <p className="text-xl font-bold text-green-900 dark:text-green-100 mt-1">{formatPKR(selectedRun.total_net_pay)}</p>
+              </div>
+            </div>
+
+            {/* Lines Table */}
+            <div className="px-6 pb-6">
+              {runLinesLoading ? (
+                <p className="text-center py-8 text-gray-400">Loading payslips...</p>
+              ) : runLines.length === 0 ? (
+                <p className="text-center py-8 text-gray-400">No payroll lines found for this run.</p>
               ) : (
-                <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="text-xs">Employee</TableHead>
-                        <TableHead className="text-xs">Type</TableHead>
-                        <TableHead className="text-xs text-right">Base Amount</TableHead>
-                        <TableHead className="text-xs text-right">Rate</TableHead>
-                        <TableHead className="text-xs text-right">Commission</TableHead>
-                        <TableHead className="text-xs">Period</TableHead>
-                        <TableHead className="text-xs">Status</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {commissions.map((comm) => (
-                        <TableRow key={comm.id}>
-                          <TableCell className="text-xs font-medium">{comm.employee.name}</TableCell>
-                          <TableCell className="text-xs capitalize">{comm.commissionType.replace(/_/g, ' ')}</TableCell>
-                          <TableCell className="text-xs text-right">{formatPKR(comm.baseAmount)}</TableCell>
-                          <TableCell className="text-xs text-right">{comm.commissionRate}%</TableCell>
-                          <TableCell className="text-xs text-right font-medium">{formatPKR(comm.commissionAmount)}</TableCell>
-                          <TableCell className="text-xs text-gray-500">{comm.periodMonth ? formatPeriod(comm.periodMonth) : '—'}</TableCell>
-                          <TableCell><StatusBadge status={comm.status} /></TableCell>
-                        </TableRow>
+                <div className="overflow-x-auto border border-gray-200 dark:border-gray-700 rounded-lg">
+                  <table className="w-full text-xs">
+                    <thead className="bg-gray-50 dark:bg-gray-900/50">
+                      <tr>
+                        <th className="text-left px-3 py-2 font-medium text-gray-500">Employee</th>
+                        <th className="text-right px-3 py-2 font-medium text-gray-500">Basic</th>
+                        <th className="text-right px-3 py-2 font-medium text-gray-500 hidden md:table-cell">Allows</th>
+                        <th className="text-right px-3 py-2 font-medium text-gray-500">Gross</th>
+                        <th className="text-right px-3 py-2 font-medium text-gray-500 hidden md:table-cell">Deductions</th>
+                        <th className="text-right px-3 py-2 font-medium text-gray-500">Net Pay</th>
+                        <th className="text-center px-3 py-2 font-medium text-gray-500">Payment</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                      {runLines.map((line) => (
+                        <tr key={line.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                          <td className="px-3 py-2">
+                            <div className="font-medium text-gray-900 dark:text-white">{line.employee_name || "—"}</div>
+                            <div className="text-gray-500">{line.employee_code || ""}</div>
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono">{formatPKR(line.basic_salary)}</td>
+                          <td className="px-3 py-2 text-right font-mono hidden md:table-cell">{formatPKR(line.housing_allow + line.medical_allow + line.conveyance_allow + line.other_allowances + line.overtime_pay)}</td>
+                          <td className="px-3 py-2 text-right font-mono font-medium">{formatPKR(line.gross_pay)}</td>
+                          <td className="px-3 py-2 text-right font-mono text-red-600 hidden md:table-cell">{formatPKR(line.total_deductions)}</td>
+                          <td className="px-3 py-2 text-right font-mono font-bold text-green-700 dark:text-green-400">{formatPKR(line.net_pay)}</td>
+                          <td className="px-3 py-2 text-center">
+                            <span className={`inline-flex px-1.5 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLES[line.payment_status] || STATUS_STYLES.PENDING}`}>
+                              {line.payment_status.replace(/_/g, " ")}
+                            </span>
+                          </td>
+                        </tr>
                       ))}
-                    </TableBody>
-                  </Table>
+                    </tbody>
+                    <tfoot className="bg-gray-50 dark:bg-gray-900/50 font-bold">
+                      <tr>
+                        <td className="px-3 py-2 text-gray-900 dark:text-white">TOTAL</td>
+                        <td className="px-3 py-2 text-right font-mono text-gray-900 dark:text-white">{formatPKR(runLines.reduce((s, l) => s + l.basic_salary, 0))}</td>
+                        <td className="px-3 py-2 text-right font-mono text-gray-900 dark:text-white hidden md:table-cell">{formatPKR(runLines.reduce((s, l) => s + l.housing_allow + l.medical_allow + l.conveyance_allow + l.other_allowances + l.overtime_pay, 0))}</td>
+                        <td className="px-3 py-2 text-right font-mono text-gray-900 dark:text-white">{formatPKR(runLines.reduce((s, l) => s + l.gross_pay, 0))}</td>
+                        <td className="px-3 py-2 text-right font-mono text-red-600 hidden md:table-cell">{formatPKR(runLines.reduce((s, l) => s + l.total_deductions, 0))}</td>
+                        <td className="px-3 py-2 text-right font-mono text-green-700 dark:text-green-400">{formatPKR(runLines.reduce((s, l) => s + l.net_pay, 0))}</td>
+                        <td></td>
+                      </tr>
+                    </tfoot>
+                  </table>
                 </div>
               )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
-
-      {/* Employee Dialog */}
-      <EmployeeDialog
-        open={showEmpDialog}
-        employee={editEmp}
-        departments={departments}
-        onClose={() => { setShowEmpDialog(false); setEditEmp(null) }}
-        onSaved={() => setRefreshKey(k => k + 1)}
-      />
-
-      {/* Create Payroll Run Dialog */}
-      <Dialog open={showRunDialog} onOpenChange={o => { if (!o) setShowRunDialog(false) }}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Create Payroll Run</DialogTitle>
-            <DialogDescription>Select the period for the payroll run</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-3">
-            <div className="grid gap-2">
-              <Label>Month</Label>
-              <Select value={runForm.month} onValueChange={v => setRunForm(f => ({ ...f, month: v }))}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{months.map(m => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-2">
-              <Label>Year</Label>
-              <Select value={runForm.year} onValueChange={v => setRunForm(f => ({ ...f, year: v }))}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{years.map(y => <SelectItem key={y.value} value={y.value}>{y.label}</SelectItem>)}</SelectContent>
-              </Select>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowRunDialog(false)}>Cancel</Button>
-            <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={handleCreateRun} disabled={submitting}>
-              {submitting ? 'Creating...' : 'Create Run'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        </div>
+      )}
 
-      {/* Advance Dialog */}
-      <Dialog open={showAdvanceDialog} onOpenChange={o => { if (!o) setShowAdvanceDialog(false) }}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>New Advance Request</DialogTitle>
-            <DialogDescription>Create a salary advance for an employee</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-3">
-            <div className="grid gap-2">
-              <Label>Employee *</Label>
-              <Select value={advForm.employeeId} onValueChange={v => setAdvForm(f => ({ ...f, employeeId: v }))}>
-                <SelectTrigger><SelectValue placeholder="Select employee" /></SelectTrigger>
-                <SelectContent>{employees.filter(e => e.status === 'active').map(e => <SelectItem key={e.id} value={e.id}>{e.name} ({e.employeeCode})</SelectItem>)}</SelectContent>
-              </Select>
+      {/* ─── ADVANCE FORM DIALOG ─── */}
+      {showAdvanceDialog && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowAdvanceDialog(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">New Salary Advance</h2>
+              <button onClick={() => setShowAdvanceDialog(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label>Amount (PKR) *</Label>
-                <Input type="number" value={advForm.amount} onChange={e => setAdvForm(f => ({ ...f, amount: e.target.value }))} placeholder="0" />
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Employee *</label>
+                <select value={advForm.employee_id} onChange={(e) => setAdvForm({ ...advForm, employee_id: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                  <option value="">Select employee...</option>
+                  {employees.filter((e) => e.status === "ACTIVE").map((e) => (
+                    <option key={e.id} value={e.id}>{e.employee_code} — {e.name}</option>
+                  ))}
+                </select>
               </div>
-              <div className="grid gap-2">
-                <Label>Monthly Deduction</Label>
-                <Input type="number" value={advForm.monthlyDeduction} onChange={e => setAdvForm(f => ({ ...f, monthlyDeduction: e.target.value }))} placeholder="0" />
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Amount (PKR) *</label>
+                <input type="number" value={advForm.amount} onChange={(e) => setAdvForm({ ...advForm, amount: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="e.g. 50000" />
               </div>
-            </div>
-            <div className="grid gap-2">
-              <Label>Purpose</Label>
-              <Textarea value={advForm.purpose} onChange={e => setAdvForm(f => ({ ...f, purpose: e.target.value }))} placeholder="Reason for advance..." rows={2} />
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Purpose</label>
+                <input type="text" value={advForm.purpose} onChange={(e) => setAdvForm({ ...advForm, purpose: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="Reason for advance" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Monthly Deduction</label>
+                  <input type="number" value={advForm.monthly_deduction} onChange={(e) => setAdvForm({ ...advForm, monthly_deduction: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                    placeholder="e.g. 5000" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Start Month</label>
+                  <input type="month" value={advForm.start_deduction_month} onChange={(e) => setAdvForm({ ...advForm, start_deduction_month: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+                </div>
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setShowAdvanceDialog(false)}
+                  className="flex-1 px-4 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700">
+                  Cancel
+                </button>
+                <button onClick={handleCreateAdvance} disabled={submitting}
+                  className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">
+                  {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                  Create Advance
+                </button>
+              </div>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowAdvanceDialog(false)}>Cancel</Button>
-            <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={handleCreateAdvance} disabled={submitting || !advForm.employeeId || !advForm.amount}>
-              {submitting ? 'Creating...' : 'Create Advance'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        </div>
+      )}
 
-      {/* Commission Dialog */}
-      <Dialog open={showCommDialog} onOpenChange={o => { if (!o) setShowCommDialog(false) }}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Add Commission</DialogTitle>
-            <DialogDescription>Record a commission entry for an employee</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-3">
-            <div className="grid gap-2">
-              <Label>Employee *</Label>
-              <Select value={commForm.employeeId} onValueChange={v => setCommForm(f => ({ ...f, employeeId: v }))}>
-                <SelectTrigger><SelectValue placeholder="Select employee" /></SelectTrigger>
-                <SelectContent>{employees.filter(e => e.status === 'active').map(e => <SelectItem key={e.id} value={e.id}>{e.name} ({e.employeeCode})</SelectItem>)}</SelectContent>
-              </Select>
+      {/* ─── COMMISSION FORM DIALOG ─── */}
+      {showCommDialog && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowCommDialog(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white">New Commission</h2>
+              <button onClick={() => setShowCommDialog(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label>Commission Type</Label>
-                <Select value={commForm.commissionType} onValueChange={v => setCommForm(f => ({ ...f, commissionType: v }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="project_based">Project Based</SelectItem>
-                    <SelectItem value="sales_based">Sales Based</SelectItem>
-                    <SelectItem value="performance_based">Performance Based</SelectItem>
-                    <SelectItem value="referral">Referral</SelectItem>
-                  </SelectContent>
-                </Select>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Employee *</label>
+                <select value={commForm.employee_id} onChange={(e) => setCommForm({ ...commForm, employee_id: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                  <option value="">Select employee...</option>
+                  {employees.filter((e) => e.status === "ACTIVE").map((e) => (
+                    <option key={e.id} value={e.id}>{e.employee_code} — {e.name}</option>
+                  ))}
+                </select>
               </div>
-              <div className="grid gap-2">
-                <Label>Period</Label>
-                <Input value={commForm.periodMonth} onChange={e => setCommForm(f => ({ ...f, periodMonth: e.target.value }))} placeholder="2026-07" />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Commission Type</label>
+                  <select value={commForm.commission_type} onChange={(e) => setCommForm({ ...commForm, commission_type: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                    <option value="PERFORMANCE_BASED">Performance</option>
+                    <option value="PROJECT_BASED">Project</option>
+                    <option value="SALES_BASED">Sales</option>
+                    <option value="REFERRAL">Referral</option>
+                    <option value="OTHER">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Period Month</label>
+                  <input type="month" value={commForm.period_month} onChange={(e) => setCommForm({ ...commForm, period_month: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+                </div>
               </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="grid gap-2">
-                <Label>Base Amount</Label>
-                <Input type="number" value={commForm.baseAmount} onChange={e => setCommForm(f => ({ ...f, baseAmount: e.target.value }))} placeholder="0" />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Base Amount</label>
+                  <input type="number" value={commForm.base_amount} onChange={(e) => setCommForm({ ...commForm, base_amount: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                    placeholder="0" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Rate (%)</label>
+                  <input type="number" step="0.01" value={commForm.commission_rate} onChange={(e) => setCommForm({ ...commForm, commission_rate: e.target.value })}
+                    className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                    placeholder="e.g. 10" />
+                </div>
               </div>
-              <div className="grid gap-2">
-                <Label>Rate (%)</Label>
-                <Input type="number" value={commForm.commissionRate} onChange={e => setCommForm(f => ({ ...f, commissionRate: e.target.value }))} placeholder="0" />
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Commission Amount (PKR) *</label>
+                <input type="number" value={commForm.commission_amount} onChange={(e) => setCommForm({ ...commForm, commission_amount: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="Final amount" />
               </div>
-            </div>
-            <div className="grid gap-2">
-              <Label>Commission Amount (PKR) *</Label>
-              <Input type="number" value={commForm.commissionAmount} onChange={e => setCommForm(f => ({ ...f, commissionAmount: e.target.value }))} placeholder="0" />
-            </div>
-            <div className="grid gap-2">
-              <Label>Description</Label>
-              <Textarea value={commForm.description} onChange={e => setCommForm(f => ({ ...f, description: e.target.value }))} placeholder="Commission details..." rows={2} />
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
+                <textarea value={commForm.description} onChange={(e) => setCommForm({ ...commForm, description: e.target.value })} rows={2}
+                  className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                  placeholder="Optional details..." />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button onClick={() => setShowCommDialog(false)}
+                  className="flex-1 px-4 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700">
+                  Cancel
+                </button>
+                <button onClick={handleCreateCommission} disabled={submitting}
+                  className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">
+                  {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                  Create Commission
+                </button>
+              </div>
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowCommDialog(false)}>Cancel</Button>
-            <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={handleCreateCommission} disabled={submitting || !commForm.employeeId || !commForm.commissionAmount}>
-              {submitting ? 'Creating...' : 'Add Commission'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        </div>
+      )}
 
-      {/* Payroll Run Detail Sheet */}
-      <PayrollRunDetail
-        runId={detailRunId}
-        open={!!detailRunId}
-        onClose={() => setDetailRunId(null)}
-        onRefresh={() => setRefreshKey(k => k + 1)}
-      />
+      {/* ─── DELETE CONFIRMATION DIALOG ─── */}
+      {showDeleteModal && deleteTarget && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setShowDeleteModal(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="p-6 text-center">
+              <div className="mx-auto w-12 h-12 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center mb-4">
+                <AlertTriangle className="w-6 h-6 text-red-600" />
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Delete {deleteTarget.type}?</h3>
+              <p className="text-sm text-gray-500 mt-2">Are you sure you want to delete &quot;{deleteTarget.name}&quot;? This action cannot be undone.</p>
+              <div className="flex gap-3 mt-6">
+                <button onClick={() => setShowDeleteModal(false)}
+                  className="flex-1 px-4 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700">
+                  Cancel
+                </button>
+                <button onClick={confirmDelete}
+                  className="flex-1 px-4 py-2.5 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700">
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
-  )
+  );
+}
+
+// ==========================================
+// INLINE SUB-COMPONENTS (P0 Convention — same file)
+// ==========================================
+
+// ─── Employee Form ───
+function EmployeeForm({
+  initialData,
+  onSubmit,
+  onCancel,
+  submitting,
+}: {
+  initialData?: EmployeeFormData;
+  onSubmit: (data: EmployeeFormData) => void;
+  onCancel: () => void;
+  submitting: boolean;
+}) {
+  const [form, setForm] = useState<EmployeeFormData>(
+    initialData || {
+      name: "", email: "", phone: "", designation: "", department: "",
+      employment_type: "FULL_TIME", join_date: "", bank_name: "", bank_account: "", cnic: "", notes: "",
+    }
+  );
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!form.name.trim()) { toast.error("Name is required"); return; }
+    onSubmit(form);
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="p-6 space-y-4">
+      <div className="grid grid-cols-2 gap-4">
+        <div className="col-span-2">
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Full Name *</label>
+          <input type="text" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Email</label>
+          <input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Phone</label>
+          <input type="text" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Designation</label>
+          <input type="text" value={form.designation} onChange={(e) => setForm({ ...form, designation: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Department</label>
+          <input type="text" value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Employment Type *</label>
+          <select value={form.employment_type} onChange={(e) => setForm({ ...form, employment_type: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+            {EMPLOYMENT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Join Date</label>
+          <input type="date" value={form.join_date} onChange={(e) => setForm({ ...form, join_date: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">CNIC</label>
+          <input type="text" value={form.cnic} onChange={(e) => setForm({ ...form, cnic: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+            placeholder="00000-0000000-0" />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Bank Name</label>
+          <input type="text" value={form.bank_name} onChange={(e) => setForm({ ...form, bank_name: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Bank Account</label>
+          <input type="text" value={form.bank_account} onChange={(e) => setForm({ ...form, bank_account: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Notes</label>
+        <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={2}
+          className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
+      </div>
+      <div className="flex gap-3 pt-2">
+        <button type="button" onClick={onCancel}
+          className="flex-1 px-4 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700">
+          Cancel
+        </button>
+        <button type="submit" disabled={submitting}
+          className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">
+          {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+          {initialData ? "Update Employee" : "Create Employee"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// ─── Compensation Form ───
+function CompensationForm({
+  employeeId,
+  projects,
+  onSubmit,
+  onCancel,
+  submitting,
+}: {
+  employeeId: string;
+  projects: { id: string; name: string }[];
+  onSubmit: (data: CompensationFormData) => void;
+  onCancel: () => void;
+  submitting: boolean;
+}) {
+  const [form, setForm] = useState<CompensationFormData>({
+    employee_id: employeeId,
+    compensation_type: "MONTHLY_SALARY",
+    amount: "",
+    effective_from: new Date().toISOString().split("T")[0],
+    effective_to: "",
+    project_id: "",
+    notes: "",
+  });
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    onSubmit(form);
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="p-6 space-y-4">
+      <div>
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Compensation Type</label>
+        <select value={form.compensation_type} onChange={(e) => setForm({ ...form, compensation_type: e.target.value })}
+          className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+          {COMPENSATION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+        </select>
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Amount (PKR) *</label>
+        <input type="number" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} required
+          className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+          placeholder="e.g. 150000" />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Effective From</label>
+          <input type="date" value={form.effective_from} onChange={(e) => setForm({ ...form, effective_from: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Effective To</label>
+          <input type="date" value={form.effective_to} onChange={(e) => setForm({ ...form, effective_to: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+        </div>
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Project (Optional)</label>
+        <select value={form.project_id} onChange={(e) => setForm({ ...form, project_id: e.target.value })}
+          className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+          <option value="">No project allocation</option>
+          {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Notes</label>
+        <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={2}
+          className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
+      </div>
+      <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3">
+        <p className="text-xs text-blue-700 dark:text-blue-400">
+          Setting new compensation will deactivate the previous active record. Old compensation history is preserved.
+        </p>
+      </div>
+      <div className="flex gap-3 pt-2">
+        <button type="button" onClick={onCancel}
+          className="flex-1 px-4 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700">
+          Cancel
+        </button>
+        <button type="submit" disabled={submitting}
+          className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">
+          {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+          Save Compensation
+        </button>
+      </div>
+    </form>
+  );
 }
