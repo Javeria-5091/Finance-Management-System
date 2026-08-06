@@ -333,6 +333,86 @@ CREATE POLICY "Authenticated read on payroll_reimbursements"
   ON public.payroll_reimbursements FOR SELECT
   TO authenticated USING (true);
 
+-- =============================================================================
+-- FIX: Add missing INSERT/UPDATE/DELETE RLS policies for authenticated users
+-- Run this in Supabase SQL Editor
+-- =============================================================================
+
+-- ─── payroll_employees ───
+CREATE POLICY "Authenticated insert on payroll_employees"
+  ON public.payroll_employees FOR INSERT
+  TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated update on payroll_employees"
+  ON public.payroll_employees FOR UPDATE
+  TO authenticated USING (true) WITH CHECK (true);
+
+CREATE POLICY "Authenticated delete on payroll_employees"
+  ON public.payroll_employees FOR DELETE
+  TO authenticated USING (true);
+
+-- ─── payroll_compensation ───
+CREATE POLICY "Authenticated insert on payroll_compensation"
+  ON public.payroll_compensation FOR INSERT
+  TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated update on payroll_compensation"
+  ON public.payroll_compensation FOR UPDATE
+  TO authenticated USING (true) WITH CHECK (true);
+
+-- ─── payroll_deductions ───
+CREATE POLICY "Authenticated insert on payroll_deductions"
+  ON public.payroll_deductions FOR INSERT
+  TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated update on payroll_deductions"
+  ON public.payroll_deductions FOR UPDATE
+  TO authenticated USING (true) WITH CHECK (true);
+
+-- ─── payroll_runs ───
+CREATE POLICY "Authenticated insert on payroll_runs"
+  ON public.payroll_runs FOR INSERT
+  TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated update on payroll_runs"
+  ON public.payroll_runs FOR UPDATE
+  TO authenticated USING (true) WITH CHECK (true);
+
+-- ─── payroll_lines ───
+CREATE POLICY "Authenticated insert on payroll_lines"
+  ON public.payroll_lines FOR INSERT
+  TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated update on payroll_lines"
+  ON public.payroll_lines FOR UPDATE
+  TO authenticated USING (true) WITH CHECK (true);
+
+-- ─── payroll_advances ───
+CREATE POLICY "Authenticated insert on payroll_advances"
+  ON public.payroll_advances FOR INSERT
+  TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated update on payroll_advances"
+  ON public.payroll_advances FOR UPDATE
+  TO authenticated USING (true) WITH CHECK (true);
+
+-- ─── payroll_commissions ───
+CREATE POLICY "Authenticated insert on payroll_commissions"
+  ON public.payroll_commissions FOR INSERT
+  TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated update on payroll_commissions"
+  ON public.payroll_commissions FOR UPDATE
+  TO authenticated USING (true) WITH CHECK (true);
+
+-- ─── payroll_reimbursements ───
+CREATE POLICY "Authenticated insert on payroll_reimbursements"
+  ON public.payroll_reimbursements FOR INSERT
+  TO authenticated WITH CHECK (true);
+
+CREATE POLICY "Authenticated update on payroll_reimbursements"
+  ON public.payroll_reimbursements FOR UPDATE
+  TO authenticated USING (true) WITH CHECK (true);
 -- ================================================================
 -- AUTO-UPDATE TRIGGER FOR updated_at
 -- ================================================================

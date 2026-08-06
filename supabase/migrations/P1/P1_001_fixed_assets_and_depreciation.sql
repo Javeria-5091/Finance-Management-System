@@ -499,3 +499,21 @@ ORDER BY fy.name, ap.start_date;
 GRANT SELECT ON reporting.v_depreciation_summary TO authenticated;
 
 COMMIT;
+
+-- =============================================================================
+-- Add fn_subtract_accumulated_depreciation function
+-- Used by the Reverse Depreciation button on the depreciation page
+-- Run this in Supabase SQL Editor.
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION finance.fn_subtract_accumulated_depreciation(
+    p_asset_id UUID,
+    p_amount NUMERIC(18,2)
+)
+RETURNS VOID AS $$ BEGIN
+    UPDATE finance.fixed_assets
+    SET accumulated_depreciation = GREATEST(accumulated_depreciation - p_amount, 0)
+    WHERE id = p_asset_id;
+END;
+$$ LANGUAGE plpgsql;
+

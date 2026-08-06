@@ -102,6 +102,26 @@ export interface PayrollLineRow {
   created_at: string;
 }
 
+// ─── Helper: Convert empty strings to null for DB fields ───
+function emptyToNull(obj: Record<string, any>): Record<string, any> {
+  const cleaned: Record<string, any> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    // Convert empty strings to null (DB doesn't accept "" for DATE, UUID, etc.)
+    if (value === "") {
+      cleaned[key] = null;
+    }
+    // Trim non-empty strings
+    else if (typeof value === "string") {
+      cleaned[key] = value.trim() === "" ? null : value.trim();
+    }
+    // Pass everything else as-is
+    else {
+      cleaned[key] = value;
+    }
+  }
+  return cleaned;
+}
+
 // ─── Employee Services ───
 
 export async function fetchEmployees(search?: string) {
@@ -111,7 +131,9 @@ export async function fetchEmployees(search?: string) {
     .order("created_at", { ascending: false });
 
   if (search) {
-    query = query.or(`name.ilike.%${search}%,employee_code.ilike.%${search}%,designation.ilike.%${search}%`);
+    query = query.or(
+      `name.ilike.%${search}%,employee_code.ilike.%${search}%,designation.ilike.%${search}%`
+    );
   }
 
   const { data, error } = await query;
@@ -131,16 +153,23 @@ export async function fetchEmployeeWithCompensation(employeeId: string) {
 }
 
 export async function createEmployee(employeeData: any) {
-  const { data: codeData } = await supabase.rpc("payroll_generate_employee_code");
-  const employeeCode = codeData || `EMP-${Date.now().toString().slice(-4)}`;
+  // Generate employee code
+  const { data: codeData } = await supabase.rpc(
+    "payroll_generate_employee_code"
+  );
+  const employeeCode =
+    codeData || `EMP-${Date.now().toString().slice(-4)}`;
+
+  // ★ FIX: Clean empty strings to null before insert
+  const cleanedData = emptyToNull({
+    ...employeeData,
+    employee_code: employeeCode,
+    status: "ACTIVE",
+  });
 
   const { data, error } = await supabase
     .from("payroll_employees")
-    .insert({
-      ...employeeData,
-      employee_code: employeeCode,
-      status: "ACTIVE",
-    })
+    .insert(cleanedData)
     .select("*")
     .single();
 
@@ -149,9 +178,12 @@ export async function createEmployee(employeeData: any) {
 }
 
 export async function updateEmployee(id: string, updates: any) {
+  // ★ FIX: Clean empty strings to null before update
+  const cleanedUpdates = emptyToNull(updates);
+
   const { data, error } = await supabase
     .from("payroll_employees")
-    .update(updates)
+    .update(cleanedUpdates)
     .eq("id", id)
     .select("*")
     .single();
@@ -170,14 +202,16 @@ export async function setCompensation(employeeId: string, compData: any) {
     .eq("employee_id", employeeId)
     .eq("is_active", true);
 
-  // Insert new
+  // ★ FIX: Clean empty strings to null
+  const cleanedData = emptyToNull({
+    employee_id: employeeId,
+    ...compData,
+    is_active: true,
+  });
+
   const { data, error } = await supabase
     .from("payroll_compensation")
-    .insert({
-      employee_id: employeeId,
-      ...compData,
-      is_active: true,
-    })
+    .insert(cleanedData)
     .select("*")
     .single();
 
@@ -188,13 +222,16 @@ export async function setCompensation(employeeId: string, compData: any) {
 // ─── Deduction Services ───
 
 export async function setDeduction(employeeId: string, dedData: any) {
+  // ★ FIX: Clean empty strings to null
+  const cleanedData = emptyToNull({
+    employee_id: employeeId,
+    ...dedData,
+    is_active: true,
+  });
+
   const { data, error } = await supabase
     .from("payroll_deductions")
-    .insert({
-      employee_id: employeeId,
-      ...dedData,
-      is_active: true,
-    })
+    .insert(cleanedData)
     .select("*")
     .single();
 
@@ -263,14 +300,30 @@ export async function fetchCommissions() {
 
 export async function fetchPayrollStats() {
   const [empRes, runRes, advRes] = await Promise.all([
-    supabase.from("payroll_employees").select("id", { count: "exact" }).eq("status", "ACTIVE"),
-    supabase.from("payroll_runs").select("total_net_pay").eq("status", "POSTED").order("created_at", { ascending: false }).limit(1),
-    supabase.from("payroll_advances").select("remaining_balance").in("approval_status", ["APPROVED", "PARTIALLY_RECOVERED"]),
+    supabase
+      .from("payroll_employees")
+      .select("id", { count: "exact" })
+      .eq("status", "ACTIVE"),
+    supabase
+      .from("payroll_runs")
+      .select("total_net_pay")
+      .eq("status", "POSTED")
+      .order("created_at", { ascending: false })
+      .limit(1),
+    supabase
+      .from("payroll_advances")
+      .select("remaining_balance")
+      .in("approval_status", ["APPROVED", "PARTIALLY_RECOVERED"]),
   ]);
 
   const activeEmployees = empRes.count || 0;
-  const lastPayroll = (runRes.data as any[])?.[0]?.total_net_pay || 0;
-  const pendingAdvances = (advRes.data as any[])?.reduce((s: number, a: any) => s + Number(a.remaining_balance), 0) || 0;
+  const lastPayroll =
+    (runRes.data as any[])?.[0]?.total_net_pay || 0;
+  const pendingAdvances =
+    (advRes.data as any[])?.reduce(
+      (s: number, a: any) => s + Number(a.remaining_balance),
+      0
+    ) || 0;
 
   return { activeEmployees, lastPayroll, pendingAdvances };
 }

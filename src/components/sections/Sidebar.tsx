@@ -47,6 +47,7 @@ import {
   UsersRound,
   FileCheck,
   CircleDollarSign,
+  Banknote,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -193,6 +194,13 @@ const navGroups: NavGroup[] = [
       { id: "tax-returns", label: "Tax Returns", icon: "FileCheck", path: "/dashboard/tax-equity/tax-returns", perm: "TAX_READ" },
       { id: "profit-dist", label: "Profit Distribution", icon: "TrendingUp", path: "/dashboard/tax-equity/profit-distribution", perm: "EQUITY_READ" },
       { id: "ownership-reserves", label: "Ownership & Reserves", icon: "PiggyBank", path: "/dashboard/tax-equity/ownership-reserves", perm: "EQUITY_READ" },
+    ],
+  },
+  {
+    id: "payroll",
+    label: "Payroll",
+    items: [
+      { id: "payroll-management", label: "Payroll Management", icon: "Banknote", path: "/dashboard/payroll", perm: "PAYROLL_READ" },
     ],
   },
   {

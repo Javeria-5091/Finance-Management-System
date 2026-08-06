@@ -1,133 +1,117 @@
-// ================================================================
-// OSYSTIC Finance Management System — Payroll Hook (P1)
-// ================================================================
-// P0/P1 Convention: Custom hook for payroll data fetching
-// Uses react-query pattern from existing codebase
-// ================================================================
+// =============================================================================
+// P1 Hook: Payroll — REWRITTEN to follow P0's TanStack React Query pattern
+// Convention: P0 uses src/hooks/use*.ts with @tanstack/react-query
+// File: src/hooks/usePayroll.ts (rename from usepayroll.ts → usePayroll.ts)
+// ★★★ FIX #4: Converted from useState/useEffect to React Query pattern ★★★
+// =============================================================================
 
-import { useState, useEffect, useCallback } from "react";
-import { supabase } from "@/lib/supabase";
-import { useAuth } from "@/context/AuthContext";
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import * as S from '@/services/payroll.service';
 
-// ─── Types ───
-interface PayrollStats {
-  activeEmployees: number;
-  lastPayrollAmount: number;
-  pendingAdvances: number;
-  lastPayrollPeriod: string;
-}
+// ─── Queries ─────────────────────────────────────────────────────────────────
 
-// ─── Main Payroll Hook ───
-export function usePayroll() {
-  const { user } = useAuth();
-  const [stats, setStats] = useState<PayrollStats>({
-    activeEmployees: 0,
-    lastPayrollAmount: 0,
-    pendingAdvances: 0,
-    lastPayrollPeriod: "",
+export const usePayrollStats = () =>
+  useQuery({
+    queryKey: ['payroll-stats'],
+    queryFn: S.fetchPayrollStats,
+    staleTime: 30000,
   });
-  const [loading, setLoading] = useState(true);
 
-  const fetchStats = useCallback(async () => {
-    if (!user) return;
-    try {
-      // Active employee count
-      const { count: empCount } = await supabase
-        .from("payroll_employees")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "ACTIVE");
+export const usePayrollEmployees = (search?: string) =>
+  useQuery({
+    queryKey: ['payroll-employees', search],
+    queryFn: () => S.fetchEmployees(search),
+    staleTime: 15000,
+  });
 
-      // Last posted payroll run
-      const { data: lastRun } = await supabase
-        .from("payroll_runs")
-        .select("payroll_period, total_net_pay")
-        .eq("status", "POSTED")
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .single();
+export const usePayrollEmployeeWithCompensation = (employeeId: string | null) =>
+  useQuery({
+    queryKey: ['payroll-employee-detail', employeeId],
+    queryFn: () => S.fetchEmployeeWithCompensation(employeeId!),
+    enabled: !!employeeId,
+    staleTime: 10000,
+  });
 
-      // Pending advance balance
-      const { data: advances } = await supabase
-        .from("payroll_advances")
-        .select("remaining_balance")
-        .in("approval_status", ["APPROVED", "PARTIALLY_RECOVERED"]);
+export const usePayrollRuns = () =>
+  useQuery({
+    queryKey: ['payroll-runs'],
+    queryFn: S.fetchPayrollRuns,
+    staleTime: 15000,
+  });
 
-      const pendingAdvances = (advances || []).reduce(
-        (sum: number, a: any) => sum + Number(a.remaining_balance),
-        0
-      );
+export const usePayrollLines = (runId: string | null) =>
+  useQuery({
+    queryKey: ['payroll-lines', runId],
+    queryFn: () => S.fetchPayrollLines(runId!),
+    enabled: !!runId,
+    staleTime: 10000,
+  });
 
-      setStats({
-        activeEmployees: empCount || 0,
-        lastPayrollAmount: (lastRun as any)?.total_net_pay || 0,
-        pendingAdvances,
-        lastPayrollPeriod: (lastRun as any)?.payroll_period || "",
-      });
-    } catch (err) {
-      console.error("Failed to fetch payroll stats:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, [user]);
+export const usePayrollDeductions = (employeeId: string | null) =>
+  useQuery({
+    queryKey: ['payroll-deductions', employeeId],
+    queryFn: () => S.fetchDeductions(employeeId!),
+    enabled: !!employeeId,
+    staleTime: 10000,
+  });
 
-  useEffect(() => {
-    fetchStats();
-  }, [fetchStats]);
+export const usePayrollAdvances = () =>
+  useQuery({
+    queryKey: ['payroll-advances'],
+    queryFn: S.fetchAdvances,
+    staleTime: 15000,
+  });
 
-  return { stats, loading, refetch: fetchStats };
-}
+export const usePayrollCommissions = () =>
+  useQuery({
+    queryKey: ['payroll-commissions'],
+    queryFn: S.fetchCommissions,
+    staleTime: 15000,
+  });
 
-// ─── Payroll Employees Hook ───
-export function usePayrollEmployees(search?: string) {
-  const [employees, setEmployees] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+// ─── Mutations ───────────────────────────────────────────────────────────────
 
-  const fetch = useCallback(async () => {
-    setLoading(true);
-    let query = supabase
-      .from("payroll_employees")
-      .select("*")
-      .order("created_at", { ascending: false });
+export const useCreatePayrollEmployee = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: any) => S.createEmployee(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['payroll-employees'] });
+      qc.invalidateQueries({ queryKey: ['payroll-stats'] });
+    },
+  });
+};
 
-    if (search) {
-      query = query.or(
-        `name.ilike.%${search}%,employee_code.ilike.%${search}%,designation.ilike.%${search}%`
-      );
-    }
+export const useUpdatePayrollEmployee = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, updates }: { id: string; updates: any }) => S.updateEmployee(id, updates),
+    onSuccess: (_, variables) => {
+      qc.invalidateQueries({ queryKey: ['payroll-employees'] });
+      qc.invalidateQueries({ queryKey: ['payroll-employee-detail', variables.id] });
+    },
+  });
+};
 
-    const { data, error } = await query;
-    if (error) console.error("Failed to fetch employees:", error.message);
-    else setEmployees(data || []);
-    setLoading(false);
-  }, [search]);
+export const useSetCompensation = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ employeeId, compData }: { employeeId: string; compData: any }) =>
+      S.setCompensation(employeeId, compData),
+    onSuccess: (_, variables) => {
+      qc.invalidateQueries({ queryKey: ['payroll-employee-detail', variables.employeeId] });
+      qc.invalidateQueries({ queryKey: ['payroll-employees'] });
+    },
+  });
+};
 
-  useEffect(() => {
-    fetch();
-  }, [fetch]);
-
-  return { employees, loading, refetch: fetch };
-}
-
-// ─── Payroll Runs Hook ───
-export function usePayrollRuns() {
-  const [runs, setRuns] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const fetch = useCallback(async () => {
-    setLoading(true);
-    const { data, error } = await supabase
-      .from("payroll_runs")
-      .select("*")
-      .order("created_at", { ascending: false });
-
-    if (error) console.error("Failed to fetch payroll runs:", error.message);
-    else setRuns(data || []);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetch();
-  }, [fetch]);
-
-  return { runs, loading, refetch: fetch };
-}
+export const useSetDeduction = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ employeeId, dedData }: { employeeId: string; dedData: any }) =>
+      S.setDeduction(employeeId, dedData),
+    onSuccess: (_, variables) => {
+      qc.invalidateQueries({ queryKey: ['payroll-deductions', variables.employeeId] });
+    },
+  });
+};

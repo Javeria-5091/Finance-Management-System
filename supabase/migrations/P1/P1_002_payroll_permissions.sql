@@ -1,91 +1,144 @@
 -- =============================================================================
--- STEP 1: ALTER — linked account columns ko nullable bana do
--- (AssetForm already allows empty — code matches this)
+--  SEED PAYROLL PERMISSIONS into core.permissions
+-- ★★★ FIX #3: This file now contains ACTUAL payroll permissions (was asset categories) ★★★
 -- =============================================================================
 
-ALTER TABLE finance.asset_categories
-    ALTER COLUMN linked_asset_account_id DROP NOT NULL,
-    ALTER COLUMN linked_depreciation_account_id DROP NOT NULL,
-    ALTER COLUMN linked_expense_account_id DROP NOT NULL;
-
--- Optional: fixed_assets ke override columns bhi nullable hon chahiye
-ALTER TABLE finance.fixed_assets
-    ALTER COLUMN exchange_rate_id DROP NOT NULL;
+-- Insert Payroll module permissions
+INSERT INTO core.permissions (id, code, name, module, action, is_system, description)
+VALUES
+  (gen_random_uuid(), 'PAYROLL_READ',               'Payroll: Read',               'PAYROLL', 'READ',    true, 'View payroll employees, runs, and reports'),
+  (gen_random_uuid(), 'PAYROLL_CREATE',             'Payroll: Create',             'PAYROLL', 'CREATE',  true, 'Create payroll employees, runs, and entries'),
+  (gen_random_uuid(), 'PAYROLL_UPDATE',             'Payroll: Update',             'PAYROLL', 'UPDATE',  true, 'Edit payroll records, compensation, deductions'),
+  (gen_random_uuid(), 'PAYROLL_DELETE',             'Payroll: Delete',             'PAYROLL', 'DELETE',  true, 'Remove payroll employees and records'),
+  (gen_random_uuid(), 'PAYROLL_APPROVE',            'Payroll: Approve',            'PAYROLL', 'APPROVE', true, 'Approve payroll runs, advances, and commissions'),
+  (gen_random_uuid(), 'PAYROLL_POST',               'Payroll: Post to GL',         'PAYROLL', 'POST',    true, 'Post approved payroll to general ledger'),
+  (gen_random_uuid(), 'PAYROLL_ADVANCE_READ',       'Advance: Read',               'PAYROLL_ADVANCE', 'READ',    true, 'View payroll advance requests'),
+  (gen_random_uuid(), 'PAYROLL_ADVANCE_CREATE',     'Advance: Create',             'PAYROLL_ADVANCE', 'CREATE',  true, 'Create payroll advance requests'),
+  (gen_random_uuid(), 'PAYROLL_ADVANCE_APPROVE',    'Advance: Approve',            'PAYROLL_ADVANCE', 'APPROVE', true, 'Approve or reject advance requests'),
+  (gen_random_uuid(), 'PAYROLL_COMMISSION_READ',    'Commission: Read',            'PAYROLL_COMMISSION', 'READ',    true, 'View payroll commission records'),
+  (gen_random_uuid(), 'PAYROLL_COMMISSION_CREATE',  'Commission: Create',           'PAYROLL_COMMISSION', 'CREATE',  true, 'Create commission entries'),
+  (gen_random_uuid(), 'PAYROLL_COMMISSION_APPROVE', 'Commission: Approve',          'PAYROLL_COMMISSION', 'APPROVE', true, 'Approve commission payouts'),
+  (gen_random_uuid(), 'PAYROLL_REIMBURSEMENT_READ',       'Reimbursement: Read',       'PAYROLL_REIMBURSEMENT', 'READ',    true, 'View reimbursement claims'),
+  (gen_random_uuid(), 'PAYROLL_REIMBURSEMENT_CREATE',     'Reimbursement: Create',     'PAYROLL_REIMBURSEMENT', 'CREATE',  true, 'Submit reimbursement claims'),
+  (gen_random_uuid(), 'PAYROLL_REIMBURSEMENT_APPROVE',    'Reimbursement: Approve',    'PAYROLL_REIMBURSEMENT', 'APPROVE', true, 'Approve reimbursement claims')
+ON CONFLICT (code) DO NOTHING;
 
 -- =============================================================================
--- STEP 2: SEED DATA — 10 default asset categories
+-- STEP 4: MAP PAYROLL PERMISSIONS TO ROLES
 -- =============================================================================
 
-INSERT INTO finance.asset_categories (
-    id, code, name, description,
-    depreciation_method, useful_life_months, residual_value_pct,
-    capitalization_threshold,
-    linked_asset_account_id, linked_depreciation_account_id, linked_expense_account_id,
-    active, created_by, created_at
-) VALUES
+-- Helper: Get permission ID by code
+-- (Supabase SQL doesn't have variables, so we use CTEs or subqueries)
 
--- IT Equipment (3 years)
-(gen_random_uuid(), 'IT-EQ', 'IT Equipment', 'Computers, laptops, servers, networking gear',
-    'straight_line', 36, 10, 50000,
-    NULL, NULL, NULL,
-    true, auth.uid(), now()),
+-- CEO: All Payroll permissions, scope ALL
+INSERT INTO core.role_permissions (role_id, permission_id, data_scope, amount_limit)
+SELECT
+  r.id,
+  p.id,
+  'ALL' as data_scope,
+  NULL::numeric as amount_limit
+FROM core.roles r
+CROSS JOIN core.permissions p
+WHERE r.name = 'CEO'
+  AND p.code IN (
+    'PAYROLL_READ', 'PAYROLL_CREATE', 'PAYROLL_UPDATE', 'PAYROLL_DELETE',
+    'PAYROLL_APPROVE', 'PAYROLL_POST',
+    'PAYROLL_ADVANCE_READ', 'PAYROLL_ADVANCE_CREATE', 'PAYROLL_ADVANCE_APPROVE',
+    'PAYROLL_COMMISSION_READ', 'PAYROLL_COMMISSION_CREATE', 'PAYROLL_COMMISSION_APPROVE',
+    'PAYROLL_REIMBURSEMENT_READ', 'PAYROLL_REIMBURSEMENT_CREATE', 'PAYROLL_REIMBURSEMENT_APPROVE'
+  )
+ON CONFLICT DO NOTHING;
 
--- Vehicles (5 years)
-(gen_random_uuid(), 'VEH', 'Vehicles', 'Cars, motorcycles, delivery vans',
-    'straight_line', 60, 15, 100000,
-    NULL, NULL, NULL,
-    true, auth.uid(), now()),
+-- CFO: All except DELETE, scope ALL
+INSERT INTO core.role_permissions (role_id, permission_id, data_scope, amount_limit)
+SELECT
+  r.id,
+  p.id,
+  'ALL' as data_scope,
+  NULL::numeric as amount_limit
+FROM core.roles r
+CROSS JOIN core.permissions p
+WHERE r.name = 'CFO'
+  AND p.code IN (
+    'PAYROLL_READ', 'PAYROLL_CREATE', 'PAYROLL_UPDATE',
+    'PAYROLL_APPROVE', 'PAYROLL_POST',
+    'PAYROLL_ADVANCE_READ', 'PAYROLL_ADVANCE_CREATE', 'PAYROLL_ADVANCE_APPROVE',
+    'PAYROLL_COMMISSION_READ', 'PAYROLL_COMMISSION_CREATE', 'PAYROLL_COMMISSION_APPROVE',
+    'PAYROLL_REIMBURSEMENT_READ', 'PAYROLL_REIMBURSEMENT_CREATE', 'PAYROLL_REIMBURSEMENT_APPROVE'
+  )
+ON CONFLICT DO NOTHING;
 
--- Furniture & Fixtures (10 years)
-(gen_random_uuid(), 'FF', 'Furniture & Fixtures', 'Desks, chairs, cabinets, partitions',
-    'straight_line', 120, 10, 25000,
-    NULL, NULL, NULL,
-    true, auth.uid(), now()),
+-- FINANCE_HEAD: Same as CFO
+INSERT INTO core.role_permissions (role_id, permission_id, data_scope, amount_limit)
+SELECT
+  r.id,
+  p.id,
+  'ALL' as data_scope,
+  NULL::numeric as amount_limit
+FROM core.roles r
+CROSS JOIN core.permissions p
+WHERE r.name = 'FINANCE_HEAD'
+  AND p.code IN (
+    'PAYROLL_READ', 'PAYROLL_CREATE', 'PAYROLL_UPDATE',
+    'PAYROLL_APPROVE', 'PAYROLL_POST',
+    'PAYROLL_ADVANCE_READ', 'PAYROLL_ADVANCE_CREATE', 'PAYROLL_ADVANCE_APPROVE',
+    'PAYROLL_COMMISSION_READ', 'PAYROLL_COMMISSION_CREATE', 'PAYROLL_COMMISSION_APPROVE',
+    'PAYROLL_REIMBURSEMENT_READ', 'PAYROLL_REIMBURSEMENT_CREATE', 'PAYROLL_REIMBURSEMENT_APPROVE'
+  )
+ON CONFLICT DO NOTHING;
 
--- Office Equipment (5 years)
-(gen_random_uuid(), 'OFF-EQ', 'Office Equipment', 'Printers, scanners, AC units, generators',
-    'straight_line', 60, 10, 25000,
-    NULL, NULL, NULL,
-    true, auth.uid(), now()),
+-- ACCOUNTANT: Read + Create/Update (no delete, no approve, no post)
+INSERT INTO core.role_permissions (role_id, permission_id, data_scope, amount_limit)
+SELECT
+  r.id,
+  p.id,
+  'ALL' as data_scope,
+  NULL::numeric as amount_limit
+FROM core.roles r
+CROSS JOIN core.permissions p
+WHERE r.name = 'ACCOUNTANT'
+  AND p.code IN (
+    'PAYROLL_READ', 'PAYROLL_CREATE', 'PAYROLL_UPDATE',
+    'PAYROLL_ADVANCE_READ', 'PAYROLL_ADVANCE_CREATE',
+    'PAYROLL_COMMISSION_READ', 'PAYROLL_COMMISSION_CREATE',
+    'PAYROLL_REIMBURSEMENT_READ', 'PAYROLL_REIMBURSEMENT_CREATE'
+  )
+ON CONFLICT DO NOTHING;
 
--- Machinery (10 years)
-(gen_random_uuid(), 'MCH', 'Machinery', 'Production machinery, industrial equipment',
-    'declining_balance', 120, 5, 100000,
-    NULL, NULL, NULL,
-    true, auth.uid(), now()),
+-- HOD: Read only
+INSERT INTO core.role_permissions (role_id, permission_id, data_scope, amount_limit)
+SELECT
+  r.id,
+  p.id,
+  'DEPARTMENT' as data_scope,
+  NULL::numeric as amount_limit
+FROM core.roles r
+CROSS JOIN core.permissions p
+WHERE r.name = 'HOD'
+  AND p.code IN (
+    'PAYROLL_READ',
+    'PAYROLL_ADVANCE_READ',
+    'PAYROLL_COMMISSION_READ',
+    'PAYROLL_REIMBURSEMENT_READ'
+  )
+ON CONFLICT DO NOTHING;
 
--- Buildings (25 years)
-(gen_random_uuid(), 'BLD', 'Buildings', 'Office buildings, warehouses, factories',
-    'straight_line', 300, 0, 500000,
-    NULL, NULL, NULL,
-    true, auth.uid(), now()),
-
--- Land (non-depreciable)
-(gen_random_uuid(), 'LND', 'Land', 'Plots, land — no depreciation',
-    'none', 0, 100, 0,
-    NULL, NULL, NULL,
-    true, auth.uid(), now()),
-
--- Electrical Equipment (5 years)
-(gen_random_uuid(), 'ELC', 'Electrical Equipment', 'UPS, transformers, wiring installations',
-    'straight_line', 60, 5, 25000,
-    NULL, NULL, NULL,
-    true, auth.uid(), now()),
-
--- Plumbing & HVAC (10 years)
-(gen_random_uuid(), 'PHV', 'Plumbing & HVAC', 'Water systems, heating, ventilation',
-    'straight_line', 120, 10, 50000,
-    NULL, NULL, NULL,
-    true, auth.uid(), now()),
-
--- Software Licenses (3 years)
-(gen_random_uuid(), 'SW', 'Software Licenses', 'ERP, CRM, development tools licenses',
-    'straight_line', 36, 0, 10000,
-    NULL, NULL, NULL,
-    true, auth.uid(), now());
+-- PROJECT_MANAGER: Read only, scope PROJECT
+INSERT INTO core.role_permissions (role_id, permission_id, data_scope, amount_limit)
+SELECT
+  r.id,
+  p.id,
+  'PROJECT' as data_scope,
+  NULL::numeric as amount_limit
+FROM core.roles r
+CROSS JOIN core.permissions p
+WHERE r.name = 'PROJECT_MANAGER'
+  AND p.code IN ('PAYROLL_READ')
+ON CONFLICT DO NOTHING;
 
 -- =============================================================================
 -- DONE!
--- Ab AssetForm mein category dropdown mein 10 options dikhenge.
--- Linked accounts baad mein category edit karke ya individual UPDATE se link kar sakti ho.
+-- Asset categories seeded (10 categories)
+-- Payroll permissions seeded (15 permissions)
+-- Role-permission mappings created for all roles
 -- =============================================================================
