@@ -83,6 +83,22 @@ function PLBreakdownCard() {
 }
 
 // ==========================================
+// RECONCILIATION DATA HOOK (replaces Math.random)
+// ==========================================
+function useReconciliationStatus() {
+  return useQuery({
+    queryKey: ['cfo-reconciliation-status'],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc('unreconciled_summary');
+      if (error) throw new Error(error.message);
+      // Returns array of { account_id, account_name, unreconciled_count, unreconciled_amount }
+      return (data || []) as Array<{ account_id: string; account_name: string; unreconciled_count: number; unreconciled_amount: number }>;
+    },
+    staleTime: 30000,
+  });
+}
+
+// ==========================================
 // MAIN CFO DASHBOARD
 // ==========================================
 export function CFODashboard() {
@@ -93,7 +109,7 @@ export function CFODashboard() {
     queryKey: ['cfo-financial-accounts'],
     queryFn: async () => {
       const { data, error } = await supabase
-        .from('finance.financial_accounts')
+        .from('financial_accounts')
         .select('id, account_name, institution_type, currency, masked_identifier, opening_balance, is_active')
         .eq('is_active', true)
         .order('account_name');
@@ -102,12 +118,15 @@ export function CFODashboard() {
     },
   });
 
+  // ✅ FIXED: Uses real reconciliation data from RPC, not Math.random()
+  const { data: reconStatus } = useReconciliationStatus();
+
   // Pending journals
   const { data: pendingJournals } = useQuery({
     queryKey: ['cfo-pending-journals'],
     queryFn: async () => {
       const { count } = await supabase
-        .from('finance.journal_entries')
+        .from('journal_entries')
         .select('id', { count: 'exact', head: true })
         .in('status', ['DRAFT', 'SUBMITTED', 'VERIFIED']);
       return count || 0;
@@ -120,8 +139,8 @@ export function CFODashboard() {
     queryKey: ['cfo-pending-approvals'],
     queryFn: async () => {
       const [invRes, billRes] = await Promise.all([
-        supabase.from('public.invoices').select('id, invoice_number, total_amount, client_name, due_date, status').in('status', ['SUBMITTED', 'VERIFIED']).order('due_date'),
-        supabase.from('finance.vendor_bills').select('id, bill_number, total_amount, vendor_name, due_date, status').in('status', ['SUBMITTED', 'VERIFIED']).order('due_date'),
+        supabase.from('invoices').select('id, invoice_number, total_amount, client_name, due_date, status').in('status', ['SUBMITTED', 'VERIFIED']).order('due_date'),
+        supabase.from('vendor_bills').select('id, bill_number, total_amount, vendor_name, due_date, status').in('status', ['SUBMITTED', 'VERIFIED']).order('due_date'),
       ]);
       return [
         ...(invRes.data || []).map((i: any) => ({ ...i, source_type: 'INVOICE' })),
@@ -143,12 +162,23 @@ export function CFODashboard() {
     queryKey: ['cfo-periods'],
     queryFn: async () => {
       const { data, error } = await supabase
-        .from('finance.accounting_periods')
+        .from('accounting_periods')
         .select('id, name, start_date, end_date, status')
         .order('start_date');
       if (error) throw new Error(error.message);
       return data || [];
     },
+  });
+
+  // Reconciled count from reconciliation_summary RPC
+  const { data: reconSummary } = useQuery({
+    queryKey: ['cfo-recon-summary'],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc('reconciliation_summary');
+      if (error) throw new Error(error.message);
+      return data || [];
+    },
+    staleTime: 30000,
   });
 
   const totalCash = (financialAccounts || []).reduce((s, a) => s + (a.opening_balance || 0), 0);
@@ -160,6 +190,20 @@ export function CFODashboard() {
   const softClosedPeriods = (periods || []).filter(p => p.status === 'SOFT_CLOSED').length || 0;
   const hasRisks = highRiskRecv > 0 || highRiskPay > 0 || openPeriods > 1;
 
+  // ✅ FIXED: Real reconciliation counts from RPC data
+  const totalReconAccounts = (reconSummary || []).length || 0;
+  const fullyReconciledAccounts = (reconSummary || []).filter((r: any) => r.reconciliation_pct === 100).length || 0;
+
+  // ✅ FIXED: Build a lookup map from unreconciled_summary for per-account match %
+  const reconLookup = new Map<string, number>();
+  (reconStatus || []).forEach((r: any) => {
+    // If no unreconciled items, it's 100% reconciled
+    reconLookup.set(r.account_id, r.unreconciled_count === 0 ? 100 : 0);
+  });
+  (reconSummary || []).forEach((r: any) => {
+    reconLookup.set(r.financial_account_id, Math.round(r.reconciliation_pct || 0));
+  });
+
   return (
     <div className={`space-y-5 p-6 max-w-[1500px] mx-auto transition-colors duration-300 ${isDark ? 'bg-gray-950' : 'bg-gray-50'}`}>
 
@@ -168,8 +212,8 @@ export function CFODashboard() {
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_80%_50%,rgba(255,255,255,0.1),transparent_50%)]" />
         <div className="relative z-10">
           <span className="text-xs font-bold uppercase tracking-widest text-purple-200">CFO Finance Portal</span>
-          <h1 className="text-3xl font-extrababold text-white mt-1">Finance Control Center</h1>
-          <p className="text-purple-200 mt-1 text-sm">Accounting integrity, reconciliation, and fiscal control — Document Section 7.1</p>
+          <h1 className="text-3xl font-extrabold text-white mt-1">Finance Control Center</h1>
+          <p className="text-purple-200 mt-1 text-sm">Accounting integrity, reconciliation, and fiscal control</p>
         </div>
       </div>
 
@@ -200,9 +244,10 @@ export function CFODashboard() {
           <div className="flex items-center gap-2 mb-2"><div className="p-1.5 rounded-lg bg-blue-50 dark:bg-blue-900/20"><FileText className="w-4 h-4 text-blue-600" /></div><span className="text-[10px] uppercase text-gray-500">Pending Journals</span></div>
           <p className="text-xl font-bold text-blue-600">{pendingJournals || 0}</p>
         </div>
+        {/* ✅ FIXED: Real reconciliation count from RPC, not hardcoded false */}
         <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
           <div className="flex items-center gap-2 mb-2"><div className="p-1.5 rounded-lg bg-green-50 dark:bg-green-900/20"><CheckCircle className="w-4 h-4 text-green-600" /></div><span className="text-[10px] uppercase text-gray-500">Reconciled</span></div>
-          <p className="text-xl font-bold text-green-600">{(financialAccounts || []).filter(a => a.opening_balance > 0 && false).length} / {(financialAccounts || []).length}</p>
+          <p className="text-xl font-bold text-green-600">{fullyReconciledAccounts} / {totalReconAccounts}</p>
         </div>
         <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4">
           <div className="flex items-center gap-2 mb-2"><div className="p-1.5 rounded-lg bg-purple-50 dark:bg-purple-900/20"><Clock className="w-4 h-4 text-purple-600" /></div><span className="text-[10px] uppercase text-gray-500">Period Status</span></div>
@@ -226,13 +271,13 @@ export function CFODashboard() {
               ) : (financialAccounts || []).length === 0 ? (
                 <p className="text-sm text-gray-400 text-center py-8">No financial accounts configured</p>
               ) : (financialAccounts || []).map((acc: any) => {
-                // In real app, calculate actual match % from reconciliation_status
-                const isReconciled = false; // placeholder
-                const matchedPct = isReconciled ? 100 : Math.floor(Math.random() * 80);
+                // ✅ FIXED: Uses real reconciliation % from RPC, NOT Math.random()
+                const matchedPct = reconLookup.get(acc.id) ?? 0;
+                const totalLines = (reconSummary || []).find((r: any) => r.financial_account_id === acc.id)?.total_lines || 0;
                 return (
                   <ReconciliationBar
                     matched={matchedPct}
-                    total={acc.opening_balance || 1}
+                    total={totalLines || acc.opening_balance || 1}
                     name={`${acc.account_name} (${acc.institution_type})`}
                   />
                 );
@@ -275,7 +320,6 @@ export function CFODashboard() {
 
         {/* Right Column */}
         <div className="space-y-5">
-          {/* P&L Summary */}
           <PLBreakdownCard />
 
           {/* Fiscal Period Progress */}

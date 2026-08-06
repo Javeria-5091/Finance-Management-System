@@ -73,7 +73,7 @@ export default function OwnershipReservesPage() {
           <div>
             <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Ownership & Reserves</h2>
             <p className="text-gray-500 dark:text-gray-400 text-sm">
-              Shareholder ownership & reserve policies — configurable, effective-dated (CEO Spec v1.3)
+              Shareholder ownership & reserve policies — configurable, effective-dated 
             </p>
           </div>
         </div>
@@ -86,7 +86,7 @@ export default function OwnershipReservesPage() {
           <div>
             <p className="text-sm font-medium text-blue-800 dark:text-blue-300">Configurable, Not Hardcoded</p>
             <p className="text-xs text-blue-700 dark:text-blue-400 mt-1">
-              Per CEO Spec v1.3 Revision 1.1: OSYSTIC ownership and reserve logic must be generalized with configurable rules. These are setup data, not compiled source-code constants.
+              OSYSTIC ownership and reserve logic must be generalized with configurable rules. These are setup data, not compiled source-code constants.
             </p>
           </div>
         </div>

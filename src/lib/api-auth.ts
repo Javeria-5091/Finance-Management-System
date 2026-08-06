@@ -129,12 +129,12 @@ export function enforceMakerChecker(creatorId: string, approverId: string): bool
 
 // ---------- Approval amount limit check ----------
 export function checkApprovalLimit(userRole: string, amount: number): { allowed: boolean; reason: string } {
-  // Default limits by role (PKR) — can be overridden by DB config
+  // ✅ BUG FIX: HOD limit changed from 50,000 to 100,000 per P0 spec
   const LIMITS: Record<string, number> = {
     CEO: Infinity,
     FINANCE_HEAD: 500000,
     ACCOUNTANT: 100000,
-    HOD: 50000,
+    HOD: 100000,           // ✅ FIXED: Was 50000, now 100000 per spec
     PROJECT_MANAGER: 25000,
   };
 
