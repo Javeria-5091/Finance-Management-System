@@ -137,16 +137,21 @@ export const createFixedAsset = async (input: FixedAssetFormInput, userId: strin
     }
   }
 
+  // Convert empty strings to null for date columns (PostgreSQL rejects "" for DATE type)
+  const insertPayload = {
+    ...input,
+    warranty_start: input.warranty_start || null,
+    warranty_end: input.warranty_end || null,
+    linked_asset_account_id: assetAccountId,
+    linked_depreciation_account_id: depAccountId,
+    linked_expense_account_id: expAccountId,
+    status: 'pending_capitalization',
+    created_by: userId
+  };
+
   const { data, error } = await financeDB
     .from('fixed_assets')
-    .insert({
-      ...input,
-      linked_asset_account_id: assetAccountId,
-      linked_depreciation_account_id: depAccountId,
-      linked_expense_account_id: expAccountId,
-      status: 'pending_capitalization',
-      created_by: userId
-    })
+    .insert(insertPayload)
     .select()
     .single();
 
@@ -155,9 +160,14 @@ export const createFixedAsset = async (input: FixedAssetFormInput, userId: strin
 };
 
 export const updateFixedAsset = async (id: string, input: Partial<FixedAssetFormInput & { status?: AssetStatus }>): Promise<FixedAsset> => {
+  // Convert empty strings to null for date columns
+  const updatePayload: Record<string, unknown> = { ...input, updated_at: new Date().toISOString() };
+  if ('warranty_start' in updatePayload) updatePayload.warranty_start = (updatePayload.warranty_start as string) || null;
+  if ('warranty_end' in updatePayload) updatePayload.warranty_end = (updatePayload.warranty_end as string) || null;
+
   const { data, error } = await financeDB
     .from('fixed_assets')
-    .update({ ...input, updated_at: new Date().toISOString() })
+    .update(updatePayload)
     .eq('id', id)
     .select()
     .single();
@@ -209,7 +219,7 @@ export const disposeAsset = async (
       status: 'disposed',
       disposal_date: disposalDate,
       disposal_value: disposalValue,
-      disposal_currency_id: disposalCurrencyId,
+      disposal_currency: disposalCurrencyId,
       disposal_method: disposalMethod,
       gain_loss_amount: gainLoss
     })

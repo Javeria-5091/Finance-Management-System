@@ -29,7 +29,7 @@ const EMPTY_FORM: FixedAssetFormInput = {
   description: "",
   purchase_date: "",
   purchase_cost: 0,
-  currency_id: "PKR",
+  currency: "PKR",
   base_cost: 0,
   serial_number: "",
   warranty_start: "",
@@ -77,7 +77,7 @@ export default function AssetForm({ asset, onClose, onSuccess }: AssetFormProps)
         description: asset.description || "",
         purchase_date: asset.purchase_date,
         purchase_cost: asset.purchase_cost,
-        currency_id: (asset as unknown as Record<string, unknown>).currency as string || "PKR",
+        currency: (asset as unknown as Record<string, unknown>).currency as string || "PKR",
         base_cost: asset.base_cost,
         serial_number: asset.serial_number || "",
         warranty_start: asset.warranty_start || "",
@@ -283,8 +283,8 @@ export default function AssetForm({ asset, onClose, onSuccess }: AssetFormProps)
               <label className={labelCls}>Currency</label>
               <input
                 type="text"
-                value={form.currency_id}
-                onChange={(e) => handleChange("currency_id", e.target.value)}
+                value={form.currency}
+                onChange={(e) => handleChange("currency", e.target.value)}
                 className={inputCls}
                 placeholder="PKR"
               />

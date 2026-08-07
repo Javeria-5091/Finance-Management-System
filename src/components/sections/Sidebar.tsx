@@ -48,6 +48,7 @@ import {
   FileCheck,
   CircleDollarSign,
   Banknote,
+  Repeat,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -201,6 +202,13 @@ const navGroups: NavGroup[] = [
     label: "Payroll",
     items: [
       { id: "payroll-management", label: "Payroll Management", icon: "Banknote", path: "/dashboard/payroll", perm: "PAYROLL_READ" },
+    ],
+  },
+  {
+    id: "subscriptions",
+    label: "Subscriptions",  
+    items: [
+    {id: "subscriptions", label: "Subscriptions", icon: "Repeat", path: "/dashboard/subscriptions", perm: "SUBSCRIPTION_READ" },
     ],
   },
   {

@@ -183,6 +183,16 @@ CREATE TABLE IF NOT EXISTS finance.asset_verification_lines (
     UNIQUE(verification_id, asset_id)
 );
 
+ALTER TABLE finance.asset_verification_lines
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+
+DROP TRIGGER IF EXISTS trg_asset_verification_lines_ts
+  ON finance.asset_verification_lines;
+
+CREATE TRIGGER trg_asset_verification_lines_ts
+    BEFORE UPDATE ON finance.asset_verification_lines
+    FOR EACH ROW EXECUTE FUNCTION finance.fn_update_timestamp();
+    
 -- =============================================================================
 -- RLS Policies — Same pattern as P0 finance tables (auth.uid() IS NOT NULL)
 -- =============================================================================

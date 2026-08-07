@@ -14,6 +14,14 @@ export function formatPKR(amount: number): string {
   }).format(amount);
 }
 
+export function formatCurrency(amount: number, currency: string = 'PKR'): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency,
+    minimumFractionDigits: 0,
+  }).format(amount || 0);
+}
+
 // ─── Date Formatting ─────────────────────────────────────────────────────────
 
 export function formatDate(dateStr: string | null | undefined): string {

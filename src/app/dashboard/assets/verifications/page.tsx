@@ -13,7 +13,7 @@ import {
 } from "@/hooks/useFixedAssets";
 import { logAudit } from "@/lib/logAction";
 import toast from "react-hot-toast";
-import { Plus, ArrowLeft, CheckCircle2, ClipboardCheck, Save } from "lucide-react";
+import { Plus, ArrowLeft, CheckCircle2, ClipboardCheck, Save, AlertTriangle } from "lucide-react";
 import type { AssetVerificationLine } from "@/types/fixed-assets.types";
 
 // =============================================================================
@@ -21,6 +21,81 @@ import type { AssetVerificationLine } from "@/types/fixed-assets.types";
 // Convention: P0 style — raw HTML + Tailwind, no shadcn
 // File: src/app/dashboard/assets/verifications/page.tsx
 // =============================================================================
+
+// ─── ConfirmDialog Component (inline modal popup) ──────────────────────────
+
+function ConfirmDialog({
+  open,
+  onConfirm,
+  onCancel,
+  title,
+  message,
+  confirmLabel,
+  cancelLabel,
+  loading,
+  variant,
+}: {
+  open: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  loading?: boolean;
+  variant?: "danger" | "warning" | "info";
+}) {
+  if (!open) return null;
+
+  const btnVariant = variant === "danger"
+    ? "bg-red-600 hover:bg-red-700"
+    : variant === "warning"
+    ? "bg-yellow-600 hover:bg-yellow-700"
+    : "bg-blue-600 hover:bg-blue-700";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onCancel} />
+
+      {/* Dialog Box */}
+      <div className="relative bg-white dark:bg-gray-800 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 p-6 w-full max-w-md mx-4 z-10">
+        {/* Icon */}
+        <div className={`flex items-center gap-3 mb-4 ${
+          variant === "danger"
+            ? "text-red-500"
+            : variant === "warning"
+            ? "text-yellow-500"
+            : "text-blue-500"
+        }`}>
+          <AlertTriangle className="h-6 w-6 flex-shrink-0" />
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{title}</h3>
+        </div>
+
+        {/* Message */}
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-6 leading-relaxed">{message}</p>
+
+        {/* Actions */}
+        <div className="flex items-center justify-end gap-3">
+          <button
+            onClick={onCancel}
+            disabled={loading}
+            className="px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
+          >
+            {cancelLabel || "Cancel"}
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={loading}
+            className={`px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors disabled:opacity-50 ${btnVariant}`}
+          >
+            {loading ? "Processing..." : (confirmLabel || "Confirm")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const STATUS_BADGE: Record<string, { label: string; classes: string }> = {
   in_progress: { label: "In Progress", classes: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400" },
@@ -37,6 +112,9 @@ export default function VerificationsPage() {
   const [completionNotes, setCompletionNotes] = useState("");
   const [localLines, setLocalLines] = useState<Map<string, Partial<AssetVerificationLine>>>(new Map());
 
+  // ─── Confirm dialog states ──────────────────────────────────────────
+  const [showCompleteConfirm, setShowCompleteConfirm] = useState(false);
+
   const { data: verifications = [], isLoading } = useAssetVerifications();
   const { data: verification, isLoading: detailLoading } = useAssetVerificationById(selectedId);
 
@@ -44,6 +122,7 @@ export default function VerificationsPage() {
   const updateLineMut = useUpdateVerificationLine();
   const completeMut = useCompleteVerification();
 
+  // ─── Create Handler ────────────────────────────────────────────────
   const handleCreate = () => {
     if (!user?.id) return;
     const today = new Date().toISOString().split("T")[0];
@@ -60,6 +139,7 @@ export default function VerificationsPage() {
     );
   };
 
+  // ─── Line Change Handler ────────────────────────────────────────────
   const handleLineChange = (lineId: string, field: string, value: string | boolean) => {
     setLocalLines((prev) => {
       const next = new Map(prev);
@@ -68,6 +148,7 @@ export default function VerificationsPage() {
     });
   };
 
+  // ─── Save Line Handler ──────────────────────────────────────────────
   const handleSaveLine = (lineId: string) => {
     const updates = localLines.get(lineId);
     if (!updates) return;
@@ -87,16 +168,20 @@ export default function VerificationsPage() {
     );
   };
 
-  const handleComplete = () => {
+  // ─── Complete Handler (opens confirm dialog) ─────────────────────────
+  const handleCompleteClick = () => {
     if (!selectedId) return;
-    if (!confirm("Are you sure you want to complete this verification?")) return;
+    setShowCompleteConfirm(true);
+  };
 
+  const confirmComplete = () => {
+    setShowCompleteConfirm(false);
     completeMut.mutate(
-      { verificationId: selectedId, notes: completionNotes },
+      { verificationId: selectedId!, notes: completionNotes },
       {
         onSuccess: () => {
           toast.success("Verification completed");
-          logAudit.update("asset_verifications", selectedId, "Verification completed");
+          logAudit.update("asset_verifications", selectedId!, "Verification completed");
           setSelectedId(null);
           setCompletionNotes("");
           setLocalLines(new Map());
@@ -122,10 +207,24 @@ export default function VerificationsPage() {
     const verifiedCount = lines.filter((l) => l.is_verified).length;
     const discrepancyCount = lines.filter((l) => !!l.discrepancy_notes).length;
     const hasUnsavedChanges = localLines.size > 0;
-    const canEdit = verification.status === "in_progress" && hasPermission("ASSET_VERIFICATION_UPDATE");
+    // FIXED: permission code now matches DB seed "FIXED_ASSET_VERIFY_UPDATE"
+    const canEdit = verification.status === "in_progress" && hasPermission("FIXED_ASSET_VERIFY_UPDATE");
 
     return (
       <div className={`p-6 min-h-screen ${isDark ? "bg-gray-900 text-gray-100" : "bg-gray-50 text-gray-900"}`}>
+        {/* Complete Confirmation Dialog */}
+        <ConfirmDialog
+          open={showCompleteConfirm}
+          title="Complete Verification"
+          message={`Are you sure you want to complete verification ${verification.verification_code}? This will finalize all verification results and cannot be undone.${hasUnsavedChanges ? " You have unsaved changes that will NOT be included." : ""}`}
+          confirmLabel="Complete Verification"
+          cancelLabel="Cancel"
+          onConfirm={confirmComplete}
+          onCancel={() => setShowCompleteConfirm(false)}
+          loading={completeMut.isPending}
+          variant="warning"
+        />
+
         {/* Header with back button */}
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
@@ -146,9 +245,10 @@ export default function VerificationsPage() {
             {hasUnsavedChanges && (
               <span className="text-xs text-orange-500 font-medium">Unsaved changes ({localLines.size})</span>
             )}
-            {verification.status === "in_progress" && hasPermission("ASSET_VERIFICATION_UPDATE") && (
+            {/* FIXED: permission code now matches DB seed "FIXED_ASSET_VERIFY_UPDATE" */}
+            {verification.status === "in_progress" && hasPermission("FIXED_ASSET_VERIFY_UPDATE") && (
               <button
-                onClick={handleComplete}
+                onClick={handleCompleteClick}
                 disabled={hasUnsavedChanges}
                 className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm font-medium disabled:opacity-50 flex items-center gap-1 transition-colors"
               >
@@ -312,7 +412,8 @@ export default function VerificationsPage() {
             Physical verification and reconciliation of fixed assets
           </p>
         </div>
-        {hasPermission("ASSET_VERIFICATION_CREATE") && (
+        {/* FIXED: permission code now matches DB seed "FIXED_ASSET_VERIFY_CREATE" */}
+        {hasPermission("FIXED_ASSET_VERIFY_CREATE") && (
           <button
             onClick={handleCreate}
             disabled={createMut.isPending}
@@ -344,7 +445,7 @@ export default function VerificationsPage() {
                 <tr><td colSpan={7} className="px-4 py-12 text-center text-gray-500">Loading verifications...</td></tr>
               ) : verifications.length === 0 ? (
                 <tr><td colSpan={7} className="px-4 py-12 text-center text-gray-500">
-                  No verifications found. Click "New Verification" to start.
+                  No verifications found. Click &quot;New Verification&quot; to start.
                 </td></tr>
               ) : (
                 verifications.map((v) => {

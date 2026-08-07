@@ -40,7 +40,7 @@ export interface FixedAsset {
   vendor_id?: string;
   purchase_date: string;
   purchase_cost: number;
-  currency_id: string;
+  currency: string;
   base_cost: number;
   exchange_rate_id?: string;
   serial_number?: string;
@@ -197,7 +197,7 @@ export interface FixedAssetFormInput {
   vendor_id?: string;
   purchase_date: string;
   purchase_cost: number;
-  currency_id: string;
+  currency: string;
   base_cost: number;
   serial_number?: string;
   warranty_start?: string;
