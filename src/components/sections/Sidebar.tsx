@@ -49,6 +49,8 @@ import {
   CircleDollarSign,
   Banknote,
   Repeat,
+  HardHat,
+  Percent,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -211,6 +213,20 @@ const navGroups: NavGroup[] = [
     {id: "subscriptions", label: "Subscriptions", icon: "Repeat", path: "/dashboard/subscriptions", perm: "SUBSCRIPTION_READ" },
     ],
   },
+  {
+  id: 'contractors',
+  label: 'Contractors',
+  items: [
+    { id: 'contractors-list', label: 'All Contractors', icon: 'HardHat', path: '/dashboard/contractors', perm: 'CONTRACTOR_READ' },
+  ],
+},
+{
+  id: 'commissions',
+  label: 'Commissions',
+  items: [
+    { id: 'commissions-list', label: 'All Commissions', icon: 'Percent', path: '/dashboard/commissions', perm: 'COMMISSION_READ' },
+  ],
+},
   {
     id: "reports",
     label: "Reports",
