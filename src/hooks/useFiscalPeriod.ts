@@ -7,7 +7,11 @@ export function useFiscalPeriod() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    supabase.rpc("get_current_period").then(({ data }) => {
+    // FIXED: Add finance schema — RPC lives in finance schema
+    supabase.schema("finance").rpc("get_current_period").then(({ data, error }) => {
+      if (error) {
+        console.error("Period fetch error:", error.message);
+      }
       setCurrentPeriod(data?.[0] || null);
       setLoading(false);
     });

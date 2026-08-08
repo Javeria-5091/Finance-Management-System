@@ -11,7 +11,7 @@ import { cookies } from 'next/headers';
 function db() {
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     { cookies: { getAll: async () => (await cookies()).getAll(), setAll: () => {} } }
   );
 }
@@ -172,12 +172,17 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'factorId is required to unenroll MFA.' }, { status: 400 });
       }
 
-      // Optional security check: Agar unenroll ke waqt bhi code verify karwana chahein
-      if (code) {
-        const { data: challengeData, error: challengeErr } = await supabase.auth.mfa.challenge({ factorId });
-        if (!challengeErr && challengeData) {
-          await supabase.auth.mfa.verify({ factorId, challengeId: challengeData.id, code });
-        }
+      // CRITICAL: TOTP code is MANDATORY for unenroll — prevents attackers from removing MFA
+      if (!code) {
+        return NextResponse.json({ error: 'TOTP code is required to unenroll MFA.' }, { status: 400 });
+      }
+      const { data: challengeData, error: challengeErr } = await supabase.auth.mfa.challenge({ factorId });
+      if (challengeErr || !challengeData) {
+        return NextResponse.json({ error: 'MFA challenge failed: ' + (challengeErr?.message || 'unknown') }, { status: 400 });
+      }
+      const { error: verifyErr } = await supabase.auth.mfa.verify({ factorId, challengeId: challengeData.id, code });
+      if (verifyErr) {
+        return NextResponse.json({ error: 'Invalid TOTP code. Cannot unenroll MFA.' }, { status: 400 });
       }
 
       // FIXED: Correct method invocation for unenroll [4]

@@ -84,22 +84,14 @@ export async function POST(req: NextRequest) {
     });
 
     if (postErr) {
-      // Fallback: direct update if RPC doesn't exist
-      console.warn('DB posting engine not available, using direct update:', postErr.message);
-      
-      const { error: updateErr } = await supabase
-        .from('finance.journal_entries')
-        .update({ 
-          status: 'POSTED', 
-          posted_by: auth.userId, 
-          posted_at: new Date().toISOString(),
-          period_id: period.id,
-        })
-        .eq('id', journalId);
-
-      if (updateErr) {
-        return NextResponse.json({ error: 'Posting failed: ' + updateErr.message }, { status: 500 });
-      }
+      // CRITICAL: NEVER bypass the posting engine. If RPC fails, the journal
+      // must NOT be marked POSTED because no GL entries would be created.
+      // This prevents data corruption in Trial Balance, Balance Sheet, and P&L.
+      console.error('GL Posting engine failed:', postErr.message);
+      return NextResponse.json({ 
+        error: 'Posting engine unavailable. Journal NOT posted. Contact system administrator.',
+        details: postErr.message,
+      }, { status: 500 });
     }
 
     // ─── 7. AUDIT LOG ───

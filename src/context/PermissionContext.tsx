@@ -348,6 +348,7 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
       if (!assignedRole) {
         try {
           const { data: viewData, error: viewError } = await supabase
+            .schema("core")
             .from("v_user_roles")
             .select("role, role_name, role_id, is_active, effective_from, effective_to")
             .eq("user_id", user.id)
@@ -391,7 +392,8 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
 
           if (profileRole) {
             assignedRole = profileRole;
-            const { data: roleMatch } = await supabase
+          const { data: roleMatch } = await supabase
+              .schema("core")
               .from("v_roles")
               .select("id")
               .eq("name", assignedRole)
@@ -411,6 +413,7 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
       if (assignedRole === "CEO") {
         try {
           const { count, error: ceoErr } = await supabase
+            .schema("core")
             .from("v_user_roles")
             .select("*", { count: "exact", head: true })
             .eq("is_active", true)
@@ -418,6 +421,7 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
 
           if (!ceoErr && count && count > 0) {
             const { data: otherCEOs } = await supabase
+              .schema("core")
               .from("v_user_roles")
               .select("role, role_name, user_id")
               .eq("is_active", true)
@@ -430,6 +434,7 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
             if (isReallyCEO) {
               assignedRole = "FINANCE_HEAD";
               const { data: fhRole } = await supabase
+                .schema("core")
                 .from("v_roles")
                 .select("id")
                 .eq("name", "FINANCE_HEAD")
@@ -470,6 +475,7 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
       if (dbPermissions.length === 0 && roleId) {
         try {
           const { data: permData, error: permError } = await supabase
+            .schema("core")
             .from("v_role_permissions")
             .select("permission_code, perm_code")
             .eq("role_id", roleId)
@@ -497,7 +503,8 @@ export function PermissionProvider({ children }: { children: ReactNode }) {
         ? dbPermissions
         : (FALLBACK_PERMISSIONS[resolvedRole] || FALLBACK_PERMISSIONS.VIEWER);
 
-      setRole(assignedRole);
+      // FIXED: Store resolved role (not raw) so downstream sees correct role
+      setRole(resolvedRole);
       setPermissions(new Set(finalPermissions));
     } catch (err) {
       console.error("[PermCtx] Permission fetch error:", err);

@@ -45,7 +45,7 @@ export async function logAction({
       const { data: profile } = await supabase
         .from("profiles")
         .select("full_name")
-        .eq("id", finalUserId)
+        .eq("user_id", finalUserId) // FIXED: use user_id column, not id
         .single();
       finalUserName = profile?.full_name ?? null;
     }

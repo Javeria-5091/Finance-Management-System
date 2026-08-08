@@ -87,7 +87,7 @@ export async function getAuthUser(): Promise<AuthResult | NextResponse> {
       .select('role, organization_id')
       .eq('user_id', session.user.id)
       .maybeSingle();
-    if (profile?.role) role = profile.role === 'Admin' ? 'CEO' : profile.role;
+    if (profile?.role) role = profile.role; // Admin is Admin — don't silently escalate to CEO
     orgId = profile?.organization_id || null;
   }
 
@@ -99,7 +99,7 @@ export async function requirePermission(requiredPerm: string): Promise<AuthResul
   const auth = await getAuthUser();
   if (auth instanceof NextResponse) return auth; // 401
 
-  // CEO has all permissions
+  // CEO and Admin have all permissions
   if (auth.role === 'CEO' || auth.role === 'Admin') return auth;
 
   // Check against permission table via RPC

@@ -7,7 +7,8 @@ export function useAccounts(accountType?: string | string[]) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let query = supabase.from("postable_accounts").select("*").order("code");
+    // FIXED: Add finance schema — table lives in finance.postable_accounts
+    let query = supabase.schema("finance").from("postable_accounts").select("*").order("code");
     
     if (accountType) {
       if (Array.isArray(accountType)) {
@@ -17,8 +18,9 @@ export function useAccounts(accountType?: string | string[]) {
       }
     }
     
-    query.then(({ data }) => {
-      setAccounts(data as PostableAccount[] || []);
+    query.then(({ data, error }) => {
+      if (error) console.error("Accounts fetch error:", error.message);
+      setAccounts((data as PostableAccount[]) || []);
       setLoading(false);
     });
   }, [accountType]);

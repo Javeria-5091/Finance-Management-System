@@ -2,17 +2,12 @@
 // ================================================================
 // OSYSTIC Finance Management System — Commissions Page (P1)
 // ================================================================
-// Spec: Section 5.9 — Payroll, Contractors, Commissions, Team Payables
-// Convention: React Query, STATUS_STYLES, react-hot-toast,
-//              useAuth/usePermissions, logAudit object pattern
-// Route: src/app/dashboard/commissions/page.tsx
-// ================================================================
 
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { usePermissions } from '@/context/PermissionContext';
 import { useTheme } from '@/context/ThemeContext';
-import { logAudit } from '@/lib/logAction';
+
 import {
   useCommissionStats,
   useCommissions,
@@ -38,12 +33,12 @@ import {
   COMMISSION_STATUSES,
   PERSON_TYPES,
 } from '@/types/commission.types';
-import { formatCurrency, formatDate, formatNumber } from '@/lib/helpers';
+import { formatCurrency } from '@/lib/helpers';
 import {
   Plus, Search, Edit2, Trash2, ChevronLeft, ChevronRight,
-  Percent, DollarSign, CheckCircle, XCircle, Clock,
+  Percent, CheckCircle, Clock,
   TrendingUp, AlertTriangle, X, Loader2, FileText,
-  Users, FolderOpen, BarChart3, Eye, CreditCard, Ban, Banknote,
+  Users, FolderOpen, BarChart3, Ban, Banknote,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { supabase } from '@/lib/supabase';
@@ -249,11 +244,9 @@ export default function CommissionsPage() {
     try {
       if (editingCom) {
         await updateMut.mutateAsync({ id: editingCom.id, updates: payload });
-        logAudit.update('COMMISSION', editingCom.id, payload);
         toast.success('Commission updated');
       } else {
         await createMut.mutateAsync({ ...payload, created_by: user?.id });
-        logAudit.create('COMMISSION', null, payload);
         toast.success('Commission created');
       }
       setShowForm(false);
@@ -267,7 +260,6 @@ export default function CommissionsPage() {
     if (!deleteTarget) return;
     try {
       await deleteMut.mutateAsync(deleteTarget.id);
-      logAudit.delete('COMMISSION', deleteTarget.id, { name: deleteTarget.name });
       toast.success('Commission deleted');
       setShowDeleteModal(false);
       setDeleteTarget(null);
@@ -287,7 +279,6 @@ export default function CommissionsPage() {
     }
     try {
       await approveMut.mutateAsync({ id: com.id, approvedBy: user?.id || '' });
-      logAudit.update('COMMISSION', com.id, { action: 'APPROVED', approved_by: user?.id });
       toast.success('Commission approved');
     } catch (err: any) {
       toast.error(err.message || 'Failed to approve');
@@ -313,11 +304,6 @@ export default function CommissionsPage() {
     }
     try {
       await paidMut.mutateAsync({ id: payTarget.id, paymentDate: payDate, paymentRef: payRef });
-      logAudit.update('COMMISSION', payTarget.id, {
-        action: 'MARKED_PAID',
-        payment_date: payDate,
-        payment_ref: payRef,
-      });
       toast.success('Commission marked as paid');
       setShowPayModal(false);
       setPayTarget(null);
@@ -330,7 +316,6 @@ export default function CommissionsPage() {
     if (!canUpdate) return;
     try {
       await updateMut.mutateAsync({ id: com.id, updates: { status: 'CANCELLED' } });
-      logAudit.update('COMMISSION', com.id, { action: 'CANCELLED' });
       toast.success('Commission cancelled');
     } catch (err: any) {
       toast.error(err.message || 'Failed to cancel');

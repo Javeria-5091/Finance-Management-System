@@ -36,6 +36,13 @@ export default function InvoicesPage() {
   const [showForm, setShowForm] = useState(false);
   const [editingInvoice, setEditingInvoice] = useState<any>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [formData, setFormData] = useState({
+    client_name: '',
+    amount: '',
+    tax_amount: '0',
+    due_date: '',
+    notes: '',
+  });
   const [reasonModal, setReasonModal] = useState<{
     open: boolean; 
     title: string; 
@@ -230,7 +237,7 @@ export default function InvoicesPage() {
         </div>
         {canCreate && (
           <button 
-            onClick={() => { setEditingInvoice(null); setShowForm(true); }} 
+            onClick={() => { setEditingInvoice(null); setFormData({ client_name: '', amount: '', tax_amount: '0', due_date: '', notes: '' }); setShowForm(true); }} 
             className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium shadow-sm transition-colors"
           >
             <Plus size={16} /> Create Invoice
@@ -289,7 +296,7 @@ export default function InvoicesPage() {
                           {/* DRAFT actions */}
                           {isDraft && isCreator && hasPermission('INVOICE_UPDATE') && (
                             <button 
-                              onClick={() => { setEditingInvoice(inv); setShowForm(true); }} 
+                              onClick={() => { setEditingInvoice(inv); setFormData({ client_name: inv.client_name || '', amount: String(inv.amount || ''), tax_amount: String(inv.tax_amount || '0'), due_date: inv.due_date || '', notes: inv.notes || '' }); setShowForm(true); }} 
                               title="Edit" 
                               className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded-lg transition-colors"
                             >
@@ -383,7 +390,8 @@ export default function InvoicesPage() {
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Client Name *</label>
                   <input 
                     type="text" 
-                    defaultValue={editingInvoice?.client_name || ''} 
+                    value={formData.client_name}
+                    onChange={(e) => setFormData({ ...formData, client_name: e.target.value })}
                     placeholder="e.g., Tech Corp" 
                     className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
                   />
@@ -405,7 +413,8 @@ export default function InvoicesPage() {
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Amount *</label>
                   <input 
                     type="number" 
-                    defaultValue={editingInvoice?.amount || ''} 
+                    value={formData.amount}
+                    onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
                     placeholder="0.00" 
                     min="0"
                     className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
@@ -415,7 +424,8 @@ export default function InvoicesPage() {
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Tax Amount</label>
                   <input 
                     type="number" 
-                    defaultValue={editingInvoice?.tax_amount || '0'} 
+                    value={formData.tax_amount}
+                    onChange={(e) => setFormData({ ...formData, tax_amount: e.target.value })}
                     placeholder="0.00" 
                     min="0"
                     className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
@@ -425,7 +435,8 @@ export default function InvoicesPage() {
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Due Date *</label>
                   <input 
                     type="date" 
-                    defaultValue={editingInvoice?.due_date || ''} 
+                    value={formData.due_date}
+                    onChange={(e) => setFormData({ ...formData, due_date: e.target.value })}
                     className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
                   />
                 </div>
@@ -434,7 +445,8 @@ export default function InvoicesPage() {
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
                 <textarea 
-                  defaultValue={editingInvoice?.notes || ''} 
+                  value={formData.notes}
+                  onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
                   placeholder="Invoice details..." 
                   rows={3}
                   className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm resize-none"
@@ -449,11 +461,29 @@ export default function InvoicesPage() {
                   Cancel
                 </button>
                 <button 
-                  onClick={() => handleSubmit(editingInvoice ? 
-                    { ...editingInvoice, total_amount: parseFloat(editingInvoice.amount || 0) + parseFloat(editingInvoice.tax_amount || 0) } : {
-                      client_name: '', amount: 0, tax_amount: 0, outstanding_amount: 0, base_outstanding_amount: 0 
+                  onClick={() => {
+                    // Validate form
+                    if (!formData.client_name.trim()) { toast.error('Client name is required'); return; }
+                    if (!formData.amount || parseFloat(formData.amount) <= 0) { toast.error('Valid amount is required'); return; }
+                    if (!formData.due_date) { toast.error('Due date is required'); return; }
+                    
+                    const amount = parseFloat(formData.amount) || 0;
+                    const taxAmount = parseFloat(formData.tax_amount) || 0;
+                    const totalAmount = amount + taxAmount;
+                    
+                    handleSubmit(editingInvoice ? 
+                      { ...editingInvoice, client_name: formData.client_name, amount, tax_amount: taxAmount, due_date: formData.due_date, notes: formData.notes, total_amount: totalAmount } : {
+                      client_name: formData.client_name,
+                      amount,
+                      tax_amount: taxAmount,
+                      total_amount: totalAmount,
+                      due_date: formData.due_date,
+                      notes: formData.notes,
+                      outstanding_amount: totalAmount,
+                      base_outstanding_amount: totalAmount,
                     }
-                  )} 
+                  );
+                  }} 
                   disabled={!!saving}
                   className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium disabled:opacity-50"
                 >

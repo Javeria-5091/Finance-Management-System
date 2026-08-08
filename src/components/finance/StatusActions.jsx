@@ -19,7 +19,9 @@ export default function StatusActions({ record, module, onAction, isPosting }) {
   if (status === 'DRAFT') {
     if (isCreator && hasPermission(`${mod}_UPDATE`)) actions.push({ key: 'edit', label: 'Edit', icon: Pencil, variant: 'secondary' });
     if (isCreator && hasPermission(`${mod}_DELETE`)) actions.push({ key: 'delete', label: 'Delete', icon: Trash2, variant: 'danger' });
-    if (hasPermission(`${mod}_UPDATE`)) actions.push({ key: 'submit', label: 'Submit', icon: Send, variant: 'primary' });
+    // FIXED: Submit should check isCreator to prevent users from submitting others' drafts
+    if ((isCreator || hasPermission(`APPROVE_${mod}`)) && hasPermission(`${mod}_UPDATE`)) 
+      actions.push({ key: 'submit', label: 'Submit', icon: Send, variant: 'primary' });
   }
 
   // ═══════════════════════════════════════════════════════
@@ -28,7 +30,7 @@ export default function StatusActions({ record, module, onAction, isPosting }) {
   if (status === 'SUBMITTED') {
     if (hasPermission(`APPROVE_${mod}`) && !isCreator) actions.push({ key: 'verify', label: 'Verify', icon: CheckCircle, variant: 'primary' });
     if (hasPermission(`APPROVE_${mod}`) && !isCreator) actions.push({ key: 'approve', label: 'Approve', icon: CheckCircle, variant: 'primary' });
-    if (hasPermission(`${mod}_UPDATE`) || hasPermission('ADMIN_CONFIG')) actions.push({ key: 'reject', label: 'Reject', icon: XCircle, variant: 'danger', needsReason: true });
+    if (hasPermission(`${mod}_UPDATE`) || hasPermission('SETTINGS_MANAGE')) actions.push({ key: 'reject', label: 'Reject', icon: XCircle, variant: 'danger', needsReason: true });
   }
 
   // ═══════════════════════════════════════════════════════
@@ -37,7 +39,8 @@ export default function StatusActions({ record, module, onAction, isPosting }) {
   if (status === 'VERIFIED' || status === 'APPROVED') {
     if (status === 'VERIFIED' && hasPermission(`APPROVE_${mod}`) && !isCreator) 
       actions.push({ key: 'approve', label: 'Approve', icon: CheckCircle, variant: 'primary' });
-    if (hasPermission(`${mod}_UPDATE`)) 
+    // FIXED: Post requires APPROVE permission, not just UPDATE — posting creates GL entries
+    if (hasPermission(`APPROVE_${mod}`)) 
       actions.push({ key: 'post', label: 'Post', icon: CheckCircle, variant: 'success' });
   }
 
@@ -45,7 +48,9 @@ export default function StatusActions({ record, module, onAction, isPosting }) {
   // POSTED: reverse
   // ═══════════════════════════════════════════════════════
   if (status === 'POSTED') {
-    if (hasPermission(`${mod}_UPDATE`)) actions.push({ key: 'reverse', label: 'Reverse', icon: RotateCcw, variant: 'warning', needsReason: true });
+    // FIXED: Reverse requires ADMIN-level permission — reversals create offsetting GL entries
+    if (hasPermission('ADMIN_MIGRATION') || role === 'CEO' || role === 'Admin') 
+      actions.push({ key: 'reverse', label: 'Reverse', icon: RotateCcw, variant: 'warning', needsReason: true });
   }
 
   // ═══════════════════════════════════════════════════════

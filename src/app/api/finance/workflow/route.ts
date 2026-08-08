@@ -75,7 +75,7 @@ const MODULES: Record<string, {
     table: 'finance.budgets', permPrefix: 'BUDGET', amountField: 'total_amount', creatorField: 'submitted_by',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'BUDGET_UPDATE' },
-      approve: { from: ['SUBMITTED'], perm: 'BUDGET_UPDATE' },
+      approve: { from: ['SUBMITTED'], perm: 'BUDGET_APPROVE' },
       reject:  { from: ['SUBMITTED'], perm: 'BUDGET_UPDATE' },
       reopen:  { from: ['REJECTED'], perm: 'BUDGET_UPDATE' },
     },
@@ -144,8 +144,17 @@ export async function POST(req: NextRequest) {
       if (action === 'issue')   { updateData.issued_by = auth.userId; updateData.issued_at = now; }
     }
 
-    const { error: updateErr } = await supabase.from(config.table).update(updateData).eq('id', recordId);
+    // FIXED: Add WHERE clause on current status to prevent TOCTOU race condition
+    const { count, error: updateErr } = await supabase
+      .from(config.table)
+      .update(updateData)
+      .eq('id', recordId)
+      .eq('status', currentStatus); // Only update if status hasn't changed
+
     if (updateErr) return NextResponse.json({ error: 'Update failed: ' + updateErr.message }, { status: 500 });
+    if (count === 0) {
+      return NextResponse.json({ error: 'Concurrent modification detected. Record was modified by another user. Please refresh and try again.' }, { status: 409 });
+    }
 
     try {
       await supabase.from('audit.audit_log').insert({
@@ -153,7 +162,9 @@ export async function POST(req: NextRequest) {
         module: module.toUpperCase(), record_id: recordId,
         details: JSON.stringify({ from_status: currentStatus, to_status: updateData.status, amount: record[config.amountField], reason: reason || null }),
       });
-    } catch {}
+    } catch (auditErr: any) {
+      console.error('Audit log failed for workflow action:', auditErr);
+    }
 
     return NextResponse.json({ success: true, status: updateData.status, message: `${module.replace('_', ' ')} ${action.toUpperCase()} successfully` });
   } catch (err: any) {

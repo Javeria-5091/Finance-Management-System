@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { getAuthUser, requirePermission, enforceMakerChecker } from '@/lib/api-auth';
+import { getAuthUser, requirePermission } from '@/lib/api-auth';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -8,7 +8,8 @@ function getData<T = any>(res: any): T | null {
 
 export async function POST(req: NextRequest) {
   // ─── AUTH CHECK ───
-  const auth = await requirePermission('EXPENSE_CREATE');
+  // FIXED: Use APPROVE permission, not CREATE — posting to GL requires approval-level access
+  const auth = await requirePermission('APPROVE_EXPENSE');
   if (auth instanceof NextResponse) return auth;
 
   try {
@@ -17,24 +18,33 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'expenseId required' }, { status: 400 });
     }
 
-    // 1. Fetch expense
-    const expense = getData(await supabase.from("expenses").select("*").eq("id", expenseId).single());
+    // 1. Fetch expense (with org isolation)
+    const expense = getData(await supabase
+      .from("expenses")
+      .select("*")
+      .eq("id", expenseId)
+      .eq("organization_id", auth.orgId)
+      .single());
     if (!expense) {
       return NextResponse.json({ error: 'Expense not found' }, { status: 404 });
     }
     if (expense.status !== 'APPROVED') {
-      return NextResponse.json({ error: 'Only APPROVED expenses can be posted' }, { status: 400 });
+      return NextResponse.json({ error: 'Only APPROVED expenses can be posted. Current: ' + expense.status }, { status: 400 });
     }
 
-    // 2. Already posted?
+    // 2. Already posted? (Idempotency check)
     const existingJournal = getData(await supabase
       .from('finance.journal_entries')
-      .select('id')
+      .select('id, reference')
       .eq('source_type', 'EXPENSE')
       .eq('source_id', expenseId)
       .maybeSingle());
     if (existingJournal) {
-      return NextResponse.json({ error: 'Already posted to GL' }, { status: 400 });
+      return NextResponse.json({
+        error: 'Already posted to GL',
+        journalId: existingJournal.id,
+        reference: existingJournal.reference,
+      }, { status: 400 });
     }
 
     // 3. Open period
@@ -49,15 +59,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
     }
 
-    // 4. Find expense account
+    // 4. Find expense account (FIXED: escape LIKE wildcards)
     let expenseAccountId: string | null = null;
     if (expense.category) {
+      const escapedCategory = expense.category.replace(/[%_]/g, '\\$&');
       const matched = getData(await supabase
         .from('finance.chart_of_accounts')
         .select('id, code, name')
         .eq('account_type', 'OPERATING_EXPENSE')
         .eq('is_active', true)
-        .ilike('name', `%${expense.category}%`)
+        .ilike('name', `%${escapedCategory}%`)
         .limit(1)
         .single());
       expenseAccountId = matched?.id || null;
@@ -103,24 +114,17 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // 6. Reference number
-    const lastJournal = getData(await supabase
-      .from('finance.journal_entries')
-      .select('reference')
-      .like('reference', 'JE-EX-%')
-      .order('reference', { ascending: false })
-      .limit(1)
-      .single());
-    const nextNum = lastJournal ? parseInt(lastJournal.reference.replace('JE-EX-', '')) + 1 : 1;
-    const reference = `JE-EX-${String(nextNum).padStart(5, '0')}`;
+    // 6. Reference number (FIXED: use DB sequence instead of client-side increment)
+    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'JE-EX' });
+    const reference = numData || `JE-EX-${Date.now()}`;
 
-    // 7. Create journal header
+    // 7. Create journal header (FIXED: create as APPROVED, then post via engine)
     const journal = getData(await supabase
       .from('finance.journal_entries')
       .insert({
         reference,
         description: `Expense: ${expense.title}${expense.category ? ` [${expense.category}]` : ''}`,
-        status: 'POSTED',
+        status: 'APPROVED', // Not POSTED yet — use posting engine
         entry_date: expense.expense_date,
         period_id: period.id,
         project_id: expense.project_id,
@@ -129,6 +133,8 @@ export async function POST(req: NextRequest) {
         total_debit: expense.amount,
         total_credit: expense.amount,
         created_by: auth.userId,
+        approved_by: auth.userId,
+        approved_at: new Date().toISOString(),
       })
       .select()
       .single());
@@ -155,17 +161,49 @@ export async function POST(req: NextRequest) {
     ])).error;
 
     if (linesError) {
+      // Cleanup on failure
       await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
       return NextResponse.json({ error: 'Failed to create journal lines' }, { status: 500 });
     }
 
-    // 9. Update expense status
-    await supabase.from("expenses").update({
+    // 9. Post via GL engine (FIXED: use posting engine, not direct status update)
+    const { error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+      p_journal_id: journal.id,
+      p_posted_by: auth.userId,
+    });
+
+    if (postErr) {
+      // Rollback: delete lines and header
+      await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal.id);
+      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
+      return NextResponse.json({ error: 'GL posting failed: ' + postErr.message }, { status: 500 });
+    }
+
+    // 10. Update expense status
+    const { error: statusErr } = await supabase.from("expenses").update({
       status: 'POSTED',
       posted_at: new Date().toISOString(),
       journal_entry_id: journal.id,
       posted_by: auth.userId,
     }).eq("id", expenseId);
+
+    if (statusErr) {
+      console.error('Expense status update failed after GL post:', statusErr.message);
+      // GL entry exists but expense status not updated — manual reconciliation needed
+    }
+
+    // 11. Audit log
+    try {
+      await supabase.from('audit.audit_log').insert({
+        user_id: auth.userId,
+        action: 'EXPENSE_POSTED',
+        module: 'EXPENSE',
+        record_id: expenseId,
+        details: JSON.stringify({ reference, amount: expense.amount, journal_id: journal.id }),
+      });
+    } catch (auditErr: any) {
+      console.error('Audit log failed:', auditErr);
+    }
 
     return NextResponse.json({
       success: true,
