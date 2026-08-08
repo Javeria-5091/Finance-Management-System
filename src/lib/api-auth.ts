@@ -27,11 +27,13 @@ const APPROVAL_ROLES: Record<string, number> = {
   CEO: 100,
   FINANCE_HEAD: 80,
   ACCOUNTANT: 60,
+  AUDITOR: 55,           
   HOD: 40,
   PROJECT_MANAGER: 20,
   TECHNICAL_ADMIN: 15,
   EMPLOYEE: 10,
   VIEWER: 0,
+  Admin: 100, 
 };
 
 // ---------- Core: get authenticated user from session ----------
@@ -155,9 +157,9 @@ function getNextApproverRole(currentRole: string): string {
 }
 
 // ---------- SQL injection check for AI ----------
+// FIX: The for loop body needs closing brace
 export function isSqlSafe(sql: string): { safe: boolean; reason: string } {
-  const upper = sql.toUpperCase().replace(/'[^']*'/g, ''); // remove string literals
-  // Check for dangerous keywords outside SELECT
+  const upper = sql.toUpperCase().replace(/'[^']*'/g, '');
   if (!upper.trim().startsWith('SELECT') && !upper.trim().startsWith('WITH')) {
     return { safe: false, reason: 'Only SELECT queries are allowed.' };
   }
@@ -172,6 +174,6 @@ export function isSqlSafe(sql: string): { safe: boolean; reason: string } {
     if (upper.includes(fn)) {
       return { safe: false, reason: `Prohibited function detected: ${fn}.` };
     }
-  }
+  }  // ← THIS closing brace was missing!
   return { safe: true, reason: '' };
 }

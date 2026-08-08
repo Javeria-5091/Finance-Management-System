@@ -185,7 +185,7 @@ export default function TopNavbar({ onMenuClick, title }: TopNavbarProps) {
         </div> 
       </header> 
 
-      <AiChatSlideOver isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} />
+      <AiChatSlideOver isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} isDark={isDark} />
     </> 
   ); 
 } 

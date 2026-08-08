@@ -229,3 +229,115 @@ export interface Payment {
 export type PaymentFormData = Omit<Payment, "id" | "user_id" | "created_at">;
 export const PAYMENT_METHODS = ["Bank Transfer", "JazzCash", "EasyPaisa", "Cheque", "Cash"];
 export const PAYMENT_STATUSES = ["Pending", "Paid", "Partial Payment", "Overdue"];
+
+// =============================================================================
+// AI Types — Spec 9.9, 9.10
+// =============================================================================
+
+export interface AIConversation {
+  id: string;
+  user_id: string;
+  organization_id: string;
+  title: string | null;
+  status: 'active' | 'archived' | 'deleted';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AIMessage {
+  id: string;
+  conversation_id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  content_type: 'text' | 'json' | 'error';
+  classification: string | null;
+  metadata: {
+    request_id?: string;
+    tool?: string;
+    confidence?: 'high' | 'medium' | 'low';
+    warnings?: string[];
+    model?: string;
+  };
+  created_at: string;
+}
+
+export interface AIToolCall {
+  id: string;
+  message_id: string;
+  conversation_id: string;
+  user_id: string;
+  organization_id: string;
+  tool_name: string;
+  input_params: Record<string, any>;
+  input_hash: string | null;
+  permission_check: 'passed' | 'denied' | 'skipped';
+  user_role: string;
+  status: 'success' | 'error' | 'timeout' | 'blocked';
+  result_rows: number | null;
+  latency_ms: number;
+  model: string;
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface AIQueryAudit {
+  id: string;
+  tool_call_id: string | null;
+  conversation_id: string;
+  user_id: string;
+  organization_id: string;
+  question: string;
+  normalized_intent: string;
+  tool_or_report: string;
+  sql_or_params: Record<string, any> | null;
+  row_count: number;
+  timed_out: boolean;
+  result_hash: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface AISuggestion {
+  id: string;
+  user_id: string;
+  organization_id: string;
+  entity_type: string;
+  entity_id: string | null;
+  suggestion_type: 'account_coding' | 'duplicate' | 'reconciliation' | 'anomaly' | 'category';
+  suggestion_data: Record<string, any>;
+  confidence: number | null;
+  reasons: string[] | null;
+  status: 'pending' | 'accepted' | 'rejected' | 'expired';
+  created_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+}
+
+export interface AIFeedback {
+  id: string;
+  user_id: string;
+  organization_id: string;
+  message_id: string | null;
+  tool_call_id: string | null;
+  feedback_type: 'message_rating' | 'suggestion_rating' | 'correction' | 'general';
+  rating: number | null;
+  correction: string | null;
+  reason: string | null;
+  created_at: string;
+}
+
+// Spec 9.10 — AI Response Contract
+export interface AIResponseContract {
+  answer: string;
+  metric_or_report: string | null;
+  period: { from: string; to: string };
+  currency: string;
+  filters: { field: string; value: string }[];
+  data_as_of: string;
+  confidence: 'high' | 'medium' | 'low';
+  warnings: string[];
+  source_rows_or_report: string | null;
+  suggested_safe_actions: string[];
+  conversation_id?: string;
+  request_id?: string;
+}

@@ -1,21 +1,23 @@
 'use client';
 
 import { useEffect } from 'react';
-import { X, Sparkles } from 'lucide-react'; 
-import AiChat from './AiChat'; 
+import { X, Sparkles } from 'lucide-react';
+import AiChat from './AiChat';
 
 interface AiChatSlideOverProps {
   isOpen: boolean;
   onClose: () => void;
+  isDark?: boolean;
 }
 
-export default function AiChatSlideOver({ isOpen, onClose }: AiChatSlideOverProps) {
+export default function AiChatSlideOver({ isOpen, onClose, isDark = false }: AiChatSlideOverProps) {
   useEffect(() => {
     if (isOpen) {
       document.body.style.overflow = 'hidden';
     } else {
       document.body.style.overflow = 'unset';
     }
+    return () => { document.body.style.overflow = 'unset'; };
   }, [isOpen]);
 
   return (
@@ -28,25 +30,44 @@ export default function AiChatSlideOver({ isOpen, onClose }: AiChatSlideOverProp
       />
 
       <div
-        className={`fixed inset-y-0 right-0 z-50 w-full max-w-md flex flex-col bg-white dark:bg-gray-900 shadow-2xl border-l border-gray-200 dark:border-gray-800 transition-transform duration-300 ease-in-out ${
-          isOpen ? 'translate-x-0' : 'translate-x-full'
-        }`}
+        className={`fixed inset-y-0 right-0 z-50 w-full max-w-md flex flex-col shadow-2xl border-l transition-transform duration-300 ease-in-out ${
+          isDark
+            ? 'bg-gray-900 border-gray-800'
+            : 'bg-white border-gray-200'
+        } ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}
       >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-gray-800 shrink-0">
-          <div className="flex items-center gap-2">
-             <div className="p-1.5 bg-indigo-100 dark:bg-indigo-900/30 rounded-lg">
-                <Sparkles size={16} className="text-indigo-600 dark:text-indigo-400" />
-             </div>
-             <h2 className="text-base font-semibold text-gray-900 dark:text-white">OSYSTIC Finance AI</h2>
+        {/* ─── Header ─── */}
+        <div className={`flex items-center justify-between px-5 py-4 border-b shrink-0 ${
+          isDark ? 'border-gray-800' : 'border-gray-200'
+        }`}>
+          <div className="flex items-center gap-2.5">
+            <div className={`p-1.5 rounded-lg ${
+              isDark ? 'bg-indigo-900/30' : 'bg-indigo-100'
+            }`}>
+              <Sparkles size={16} className="text-indigo-500" />
+            </div>
+            <div>
+              <h2 className={`text-base font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                OSYSTIC Finance AI
+              </h2>
+              <p className={`text-[10px] ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                Read-only permission-aware copilot
+              </p>
+            </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            className={`p-1.5 rounded-lg transition-colors ${
+              isDark
+                ? 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
+                : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+            }`}
           >
             <X size={18} />
           </button>
         </div>
 
+        {/* ─── Chat Body ─── */}
         <div className="flex-1 min-h-0">
           <AiChat />
         </div>
