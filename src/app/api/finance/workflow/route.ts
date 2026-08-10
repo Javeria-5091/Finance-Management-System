@@ -156,11 +156,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Concurrent modification detected. Record was modified by another user. Please refresh and try again.' }, { status: 409 });
     }
 
+        //  FIX: Use RPC for audit log (correct columns, server-side IP, role snapshot, hash)
     try {
-      await supabase.from('audit.audit_log').insert({
-        user_id: auth.userId, action: `WORKFLOW_${action.toUpperCase()}`,
-        module: module.toUpperCase(), record_id: recordId,
-        details: JSON.stringify({ from_status: currentStatus, to_status: updateData.status, amount: record[config.amountField], reason: reason || null }),
+      await supabase.rpc('audit.log_action', {
+        p_user_id: auth.userId,
+        p_action: `WORKFLOW_${action.toUpperCase()}`,
+        p_entity_type: module.toUpperCase(),
+        p_entity_id: recordId,
+        p_description: `${module} ${action}: ${currentStatus} → ${updateData.status}${record[config.amountField] ? ` (Amount: ${record[config.amountField]})` : ''}`,
+        p_previous_status: currentStatus,
+        p_new_status: updateData.status,
+        p_reason: reason || null,
+        p_source_module: module.toLowerCase(),
+        p_severity: action === 'approve' ? 'medium' : 'info',
+        p_new_values: { amount: record[config.amountField], to_status: updateData.status },
       });
     } catch (auditErr: any) {
       console.error('Audit log failed for workflow action:', auditErr);

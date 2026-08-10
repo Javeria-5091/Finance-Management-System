@@ -94,16 +94,24 @@ export async function POST(req: NextRequest) {
       }, { status: 500 });
     }
 
-    // ─── 7. AUDIT LOG ───
+       //  FIX: Use RPC for correct audit columns
+        // ─── 7. AUDIT LOG ───
     try {
-      await supabase.from('audit.audit_log').insert({
-        user_id: auth.userId,
-        action: 'JOURNAL_POSTED',
-        module: 'JOURNAL',
-        record_id: journalId,
-        details: JSON.stringify({ reference: journal.reference, total_debit: journal.total_debit }),
+      await supabase.rpc('audit.log_action', {
+        p_user_id: auth.userId,
+        p_action: 'JOURNAL_POSTED',
+        p_entity_type: 'journal_entry',
+        p_entity_id: journalId,
+        p_description: `Posted journal entry: ${journal.reference}`,
+        p_previous_status: 'APPROVED',
+        p_new_status: 'POSTED',
+        p_source_module: 'accounting',
+        p_severity: 'high',
+        p_new_values: { reference: journal.reference, total_debit: journal.total_debit, total_credit: journal.total_credit },
       });
-    } catch {}
+    } catch (auditErr: any) {
+      console.error('Audit log failed for journal post:', auditErr);
+    }
 
     return NextResponse.json({ 
       success: true, 

@@ -271,76 +271,91 @@ export interface TrialBalanceRow {
   net_balance: number;
 }
 
-// ══════════════════════════════════════════
-// § 8: AUDIT LOG
-// ══════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// § 8: AUDIT LOG (Spec v1.3 Section 8 — Updated)
+// ══════════════════════════════════════════════════════════════════════════════
 
 export type AuditAction =
-  | 'INSERT'
-  | 'UPDATE'
-  | 'DELETE'
-  | 'STATUS_CHANGE'
-  | 'APPROVE'
-  | 'REJECT'
-  | 'REVERSE'
-  | 'LOGIN'
-  | 'LOGOUT'
-  | 'PERMISSION_CHANGE'
-  | 'EXPORT'
-  | 'PERIOD_CLOSE'
-  | 'PERIOD_REOPEN'
-  | 'AI_QUERY'
-  | 'RATE_CHANGE'
-  | 'CONFIG_CHANGE'
-  | 'POST'
-  | 'UNPOST';
+  | 'INSERT' | 'UPDATE' | 'DELETE' | 'STATUS_CHANGE'
+  | 'CREATE' | 'APPROVE' | 'REJECT' | 'REVERSE' | 'POST' | 'UNPOST'
+  | 'LOGIN' | 'LOGOUT' | 'ACCESS_DENIED' | 'ERROR'
+  | 'PERMISSION_CHANGE' | 'ROLE_CHANGE' | 'CONFIG_CHANGE'
+  | 'EXPORT' | 'VIEW' | 'IMPORT' | 'BULK_ACTION'
+  | 'PERIOD_CLOSE' | 'PERIOD_REOPEN'
+  | 'AI_QUERY' | 'AI_TOOL_CALL'
+  | 'RATE_CHANGE' | 'FISCAL_YEAR_CLOSED'
+  | 'WORKFLOW_SUBMIT' | 'WORKFLOW_VERIFY' | 'WORKFLOW_APPROVE'
+  | 'WORKFLOW_REJECT' | 'WORKFLOW_REVERSE' | 'WORKFLOW_CANCEL' | 'WORKFLOW_REOPEN';
+
+export type AuditSeverity = 'info' | 'low' | 'medium' | 'high' | 'critical';
 
 export interface AuditLog {
   id: string;
-  table_schema: string;
-  table_name: string;
-  record_id: string;
-  action: AuditAction;
+  // Actor (Spec 8.1)
+  user_id: string | null;
+  user_email: string | null;
+  user_name: string | null;
+  role_snapshot: string | null;
+  session_id: string | null;
+  auth_method: string | null;
+  // Event (Spec 8.1)
+  action: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  status: 'success' | 'denied' | 'error';
+  severity: AuditSeverity;
+  // Time and source (Spec 8.1)
+  created_at: string;
+  ip_address: string | null;
+  user_agent: string | null;
+  request_id: string | null;
+  // Change (Spec 8.1)
+  description: string | null;
   old_values: Record<string, unknown> | null;
   new_values: Record<string, unknown> | null;
   changed_columns: string[] | null;
-  changed_by: string;
-  changed_at: string;
-  ip_address: string | null;
-  user_agent: string | null;
   reason: string | null;
-  approval_ref_id: string | null;
+  // Workflow (Spec 8.1)
+  previous_status: string | null;
+  new_status: string | null;
+  approval_level: string | null;
+  approver_id: string | null;
+  approval_limit: number | null;
+  // Evidence (Spec 8.1)
+  attachment_ids: string[] | null;
+  import_batch_id: string | null;
+  external_ref: string | null;
+  related_journal_id: string | null;
+  related_payment_id: string | null;
+  // Source
   source_module: string | null;
-  source_id: string | null;
-  session_id: string | null;
+  source_table: string | null;
+  source_schema: string | null;
+  // Integrity
+  prev_hash: string | null;
+  entry_hash: string | null;
 }
 
-// View: with user info joined
+// View: with user info joined (from audit_log_enriched)
 export interface AuditLogEnriched extends AuditLog {
   changed_by_name: string | null;
   changed_by_email: string | null;
   changed_by_role: string | null;
+  changed_at: string;
+  table_name: string | null;
+  table_schema: string | null;
 }
-
-// ══════════════════════════════════════════
-// § 9: FILTER / QUERY TYPES
-// ══════════════════════════════════════════
 
 export interface AuditLogFilters {
   search?: string;
   module?: string;
-  action?: AuditAction | 'ALL';
+  action?: string | 'ALL';
+  severity?: AuditSeverity | 'ALL';
   dateFrom?: string;
   dateTo?: string;
   userId?: string;
   page?: number;
   pageSize?: number;
-}
-
-export interface COAFilters {
-  search?: string;
-  accountType?: AccountType | 'ALL';
-  status?: 'active' | 'inactive' | 'ALL';
 }
 
 // ══════════════════════════════════════════

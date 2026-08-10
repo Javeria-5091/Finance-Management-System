@@ -1,11 +1,12 @@
 import { supabase } from '@/lib/supabase';
-import type { AuditLogEnriched, AuditLogFilters } from '@/types/accounting.types';
+import type { AuditLogFilters } from '@/types/accounting.types';
 
-// ⭐ Audit tables 'audit' schema mein hain
 const SCHEMA = 'audit';
 
+// ✅ FIX: Use audit_log_enriched view which NOW EXISTS after migration fix
+// Returns enriched audit logs with user info joined
 export async function getAuditLogs(filters: AuditLogFilters = {}): Promise<{
-  data: AuditLogEnriched[];
+  data: any[];
   count: number;
 }> {
   const page = filters.page || 1;
@@ -20,7 +21,7 @@ export async function getAuditLogs(filters: AuditLogFilters = {}): Promise<{
 
   if (filters.search) {
     query = query.or(
-      `changed_by_name.ilike.%${filters.search}%,reason.ilike.%${filters.search}%,table_name.ilike.%${filters.search}%,record_id.ilike.%${filters.search}%`
+      `changed_by_name.ilike.%${filters.search}%,reason.ilike.%${filters.search}%,table_name.ilike.%${filters.search}%,entity_id.ilike.%${filters.search}%,description.ilike.%${filters.search}%,action.ilike.%${filters.search}%`
     );
   }
 
@@ -51,11 +52,12 @@ export async function getAuditLogs(filters: AuditLogFilters = {}): Promise<{
   if (error) throw error;
 
   return {
-    data: (data as AuditLogEnriched[]) || [],
+    data: data || [],
     count: count || 0,
   };
 }
 
+// ✅ FIX: Export with all spec-required columns
 export async function exportAuditLogsToCSV(filters: AuditLogFilters = {}): Promise<string> {
   let query = supabase
     .schema(SCHEMA)
@@ -64,7 +66,7 @@ export async function exportAuditLogsToCSV(filters: AuditLogFilters = {}): Promi
 
   if (filters.search) {
     query = query.or(
-      `changed_by_name.ilike.%${filters.search}%,reason.ilike.%${filters.search}%`
+      `changed_by_name.ilike.%${filters.search}%,reason.ilike.%${filters.search}%,description.ilike.%${filters.search}%`
     );
   }
 
@@ -87,40 +89,65 @@ export async function exportAuditLogsToCSV(filters: AuditLogFilters = {}): Promi
   const { data, error } = await query.order('changed_at', { ascending: false }).limit(10000);
   if (error) throw error;
 
+  // ✅ FIX: CSV headers match Spec 8.1 required fields
   const headers = [
-    'Timestamp', 'User', 'Email', 'Role', 'Action', 'Module', 'Table', 'Record ID', 'Changed Columns', 'Reason', 'IP Address',
+    'Timestamp', 'User ID', 'User Name', 'User Email', 'Role',
+    'Action', 'Module', 'Entity Type', 'Entity ID', 'Description',
+    'Previous Status', 'New Status', 'Severity', 'Status',
+    'Reason', 'IP Address', 'User Agent', 'Request ID', 'Entry Hash'
   ];
 
-  const rows = (data as AuditLogEnriched[]).map((log) => [
-    new Date(log.changed_at).toLocaleString(),
-    log.changed_by_name || 'Unknown',
+  const rows = (data || []).map((log: any) => [
+    new Date(log.changed_at).toISOString(),
+    log.user_id || '',
+    log.changed_by_name || '',
     log.changed_by_email || '',
     log.changed_by_role || '',
     log.action,
     log.source_module || '',
-    `${log.table_schema}.${log.table_name}`,
-    log.record_id,
-    log.changed_columns?.join(', ') || '',
-    log.reason || '',
+    log.entity_type || log.table_name || '',
+    log.entity_id || '',
+    `"${String(log.description || '').replace(/"/g, '""')}"`,
+    log.previous_status || '',
+    log.new_status || '',
+    log.severity || 'info',
+    log.status || 'success',
+    `"${String(log.reason || '').replace(/"/g, '""')}"`,
     log.ip_address || '',
+    log.user_agent || '',
+    log.request_id || '',
+    log.entry_hash || '',
   ]);
 
   const csvContent = [headers, ...rows]
     .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
     .join('\n');
 
+  // ✅ FIX: Log the export event itself (Spec 8.2)
+  try {
+    await supabase.rpc('audit.log_export_event', {
+      p_report_name: 'Audit Log Export',
+      p_report_type: 'audit',
+      p_format: 'csv',
+      p_row_count: rows.length,
+    });
+  } catch {
+    // Non-critical
+  }
+
   return csvContent;
 }
 
+// ✅ FIX: Get unique modules from enriched view
 export async function getAuditModules(): Promise<string[]> {
   const { data, error } = await supabase
     .schema(SCHEMA)
-    .from('audit_log')
+    .from('audit_log_enriched')
     .select('source_module')
     .not('source_module', 'is', null)
     .order('source_module');
 
   if (error) throw error;
-  const modules = [...new Set(data.map((d) => d.source_module as string))];
+  const modules = [...new Set(data.map((d: any) => d.source_module as string))];
   return modules.sort();
 }

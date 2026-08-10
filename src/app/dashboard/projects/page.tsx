@@ -58,7 +58,7 @@ export default function ProjectsPage() {
     return { budget, usedAmount, remaining, percentage, status, statusColor };
   }
 
-  async function handleSubmit(data: ProjectFormData) {
+    async function handleSubmit(data: ProjectFormData) {
     setFormLoading(true);
     const safeData = { ...data, end_date: data.end_date === "" ? null : data.end_date };
     let error = null;
@@ -66,11 +66,11 @@ export default function ProjectsPage() {
     if (editingData) {
       const res = await supabase.from("projects").update(safeData).eq("id", editingData.id);
       error = res.error;
-      if(!error && user) await logAction(user.id, "Project Updated", "Project", `Updated project: ${safeData.name}`);
+      if (!error) await logAction({ action: "UPDATE", entityType: "Project", entityId: editingData.id, description: `Updated project: ${safeData.name}`, sourceModule: "projects" });
     } else {
-      const res = await supabase.from("projects").insert({ ...safeData, user_id: user?.id });
+      const res = await supabase.from("projects").insert({ ...safeData, user_id: user?.id }).select("id").single();
       error = res.error;
-      if(!error && user) await logAction(user.id, "Project Created", "Project", `Created project: ${safeData.name}`);
+      if (!error && res.data?.id) await logAction({ action: "CREATE", entityType: "Project", entityId: res.data.id, description: `Created project: ${safeData.name}`, sourceModule: "projects" });
     }
 
     if (error) alert("Database Error: " + error.message);
@@ -82,10 +82,10 @@ export default function ProjectsPage() {
     if (!deleteId) return;
     const project = projects.find(p => p.id === deleteId);
     await supabase.from("projects").delete().eq("id", deleteId);
-    if(user && project) await logAction(user.id, "Project Deleted", "Project", `Deleted project: ${project.name}`);
+    if (project) await logAction({ action: "DELETE", entityType: "Project", entityId: deleteId, description: `Deleted project: ${project.name}`, severity: "high", sourceModule: "projects" });
     setDeleteId(null); fetchProjects();
   }
-
+  
   function getStatusColor(status: string) {
     if (status === "Active") return "bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400";
     if (status === "Completed") return "bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400";

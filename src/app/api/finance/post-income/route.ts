@@ -173,17 +173,23 @@ export async function POST(req: NextRequest) {
       console.error('Income status update failed after GL post:', statusErr.message);
     }
 
-    // 11. Audit log
+        // 11. Audit log
     try {
-      await supabase.from('audit.audit_log').insert({
-        user_id: auth.userId,
-        action: 'INCOME_POSTED',
-        module: 'INCOME',
-        record_id: incomeId,
-        details: JSON.stringify({ reference, amount: income.amount, journal_id: journal.id }),
+      await supabase.rpc('audit.log_action', {
+        p_user_id: auth.userId,
+        p_action: 'INCOME_POSTED',
+        p_entity_type: 'income',
+        p_entity_id: incomeId,
+        p_description: `Posted income to GL: ${reference}`,
+        p_previous_status: 'APPROVED',
+        p_new_status: 'POSTED',
+        p_source_module: 'income',
+        p_severity: 'high',
+        p_new_values: { reference, amount: income.amount, journal_id: journal.id },
+        p_related_journal_id: journal.id,
       });
     } catch (auditErr: any) {
-      console.error('Audit log failed:', auditErr);
+      console.error('Audit log failed for income post:', auditErr);
     }
 
     return NextResponse.json({

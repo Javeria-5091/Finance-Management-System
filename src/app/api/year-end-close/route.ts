@@ -308,25 +308,30 @@ export async function POST(req: NextRequest) {
       }, { status: 500 });
     }
 
-    // ─── 12. AUDIT LOG ───
+        // ─── 12. AUDIT LOG ───
     try {
-      await supabase.from('audit.audit_log').insert({
-        user_id: auth.userId,
-        action: 'YEAR_END_CLOSE',
-        module: 'FISCAL_YEAR',
-        record_id: fiscalYearId,
-        details: JSON.stringify({
+      await supabase.rpc('audit.log_action', {
+        p_user_id: auth.userId,
+        p_action: 'FISCAL_YEAR_CLOSED',
+        p_entity_type: 'fiscal_year',
+        p_entity_id: fiscalYearId,
+        p_description: `Year-end close: ${fy.name} — Net ${netIncome >= 0 ? 'Income' : 'Loss'} PKR ${Math.abs(netIncome).toLocaleString()}`,
+        p_previous_status: fy.status,
+        p_new_status: 'HARD_CLOSED',
+        p_source_module: 'finance',
+        p_severity: 'critical',
+        p_new_values: {
           reference,
           net_income: netIncome,
           total_revenue: totalRevenue,
           total_expenses: totalExpenses,
           accounts_closed: Object.keys(accountBalances).length,
-        }),
+          closing_journal_id: journal.id,
+        },
       });
     } catch (auditErr: any) {
       console.error('Audit log failed for year-end close:', auditErr);
     }
-
     return NextResponse.json({
       success: true,
       message: `Fiscal year closed. Net ${netIncome >= 0 ? 'Income' : 'Loss'}: PKR ${Math.abs(netIncome).toLocaleString()}`,

@@ -192,17 +192,23 @@ export async function POST(req: NextRequest) {
       // GL entry exists but expense status not updated — manual reconciliation needed
     }
 
-    // 11. Audit log
+        //  FIX: Use RPC for correct audit columns
     try {
-      await supabase.from('audit.audit_log').insert({
-        user_id: auth.userId,
-        action: 'EXPENSE_POSTED',
-        module: 'EXPENSE',
-        record_id: expenseId,
-        details: JSON.stringify({ reference, amount: expense.amount, journal_id: journal.id }),
+      await supabase.rpc('audit.log_action', {
+        p_user_id: auth.userId,
+        p_action: 'EXPENSE_POSTED',
+        p_entity_type: 'expense',
+        p_entity_id: expenseId,
+        p_description: `Posted expense to GL: ${reference}`,
+        p_previous_status: 'APPROVED',
+        p_new_status: 'POSTED',
+        p_source_module: 'expense',
+        p_severity: 'high',
+        p_new_values: { reference, amount: expense.amount, journal_id: journal.id },
+        p_related_journal_id: journal.id,
       });
     } catch (auditErr: any) {
-      console.error('Audit log failed:', auditErr);
+      console.error('Audit log failed for expense post:', auditErr);
     }
 
     return NextResponse.json({
