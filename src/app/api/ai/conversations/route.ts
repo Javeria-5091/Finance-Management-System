@@ -28,11 +28,14 @@ export async function GET() {
     }
 
     // ─── 2. Fetch conversations (RLS ensures user only sees own) ───
-    // ✅ FIX: schema-qualify as ai.ai_conversations (Spec 9.9). Previous `from('ai_conversations')`
-    // relied on search_path including `ai` schema, which is not standard on Supabase — query
-    // returned empty conversations list, breaking the chat history panel.
+    // ✅ REAL FIX: ai_conversations DOES exist in the 'ai' schema (confirmed in your SQL file).
+    // The problem is not the table's existence — it's that supabase-js requires
+    // .schema('ai').from('ai_conversations') to reach a non-public schema.
+    // Writing .from('ai.ai_conversations') makes it look for a table literally
+    // named "ai.ai_conversations" inside the public schema, which fails.
     const { data, error } = await supabase
-      .from('ai.ai_conversations')
+      .schema('ai')
+      .from('ai_conversations')
       .select('id, title, status, created_at, updated_at')
       .eq('user_id', session.user.id)
       .eq('status', 'active')

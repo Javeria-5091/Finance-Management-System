@@ -48,6 +48,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ─── 3. Get org_id from profile ───
+    // ✅ FIX: 'profiles' is in the PUBLIC schema (confirmed) — query unqualified.
     const { data: profile } = await supabase
       .from('profiles')
       .select('organization_id')
@@ -57,8 +58,12 @@ export async function POST(req: NextRequest) {
     const orgId = profile?.organization_id || '';
 
     // ─── 4. Insert feedback (Spec 9.9 — with conversation_id) ───
+    // ✅ FIX: ai_feedback lives in the 'ai' schema — must use .schema('ai').from('ai_feedback'),
+    // NOT .from('ai.ai_feedback'). The dotted string is not valid schema-qualification
+    // syntax in supabase-js; it was silently failing and returning a 500 every time.
     const { data, error } = await supabase
-      .from('ai.ai_feedback')
+      .schema('ai')
+      .from('ai_feedback')
       .insert({
         user_id: userId,
         organization_id: orgId,

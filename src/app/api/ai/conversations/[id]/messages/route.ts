@@ -1,14 +1,26 @@
 // =============================================================================
-// AI Feedback API — Spec 9.9 ai_feedback
-// Records user thumbs-up/down on AI responses for quality evaluation
+// AI Conversation Messages API — Spec 9.9
+// GET /api/ai/conversations/[id]/messages
+// Loads all messages for a given conversation (for "load past conversation")
+//
+// NOTE: This route was missing from the files you shared — AiChat.tsx calls
+// fetch(`/api/ai/conversations/${convId}/messages`) but no matching file existed
+// (what was pasted as "message/route.ts" was actually a duplicate of feedback/route.ts).
+// Without this file, clicking a past conversation in the history panel does nothing.
+// Place this at: app/api/ai/conversations/[id]/messages/route.ts
 // =============================================================================
 
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 
-export async function POST(req: NextRequest) {
+export async function GET(
+  req: Request,
+  { params }: { params: { id: string } }
+) {
   try {
+    const conversationId = params.id;
+
     // ─── 1. Auth check ───
     const cookieStore = await cookies();
     const supabase = createServerClient(
@@ -27,61 +39,56 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
     }
 
-    const userId = session.user.id;
-
-    // ─── 2. Parse body ───
-    const body = await req.json();
-    const { message_id, conversation_id, feedback_type, rating, correction, reason } = body;
-
-    // Validate required fields
-    if (!feedback_type) {
-      return NextResponse.json({ error: 'feedback_type is required' }, { status: 400 });
-    }
-
-    const validFeedbackTypes = ['message_rating', 'suggestion_rating', 'correction', 'general'];
-    if (!validFeedbackTypes.includes(feedback_type)) {
-      return NextResponse.json({ error: `feedback_type must be one of: ${validFeedbackTypes.join(', ')}` }, { status: 400 });
-    }
-
-    if (rating !== undefined && (rating < 1 || rating > 5)) {
-      return NextResponse.json({ error: 'rating must be between 1 and 5' }, { status: 400 });
-    }
-
-    // ─── 3. Get org_id from profile ───
-    // ✅ FIX: schema-qualify as core.profiles for consistency
-    const { data: profile } = await supabase
-      .from('core.profiles')
-      .select('organization_id')
-      .eq('user_id', userId)
+    // ─── 2. Verify the conversation belongs to this user (defense in depth, RLS also enforces this) ───
+    const { data: conv, error: convError } = await supabase
+      .schema('ai')
+      .from('ai_conversations')
+      .select('id, user_id')
+      .eq('id', conversationId)
       .maybeSingle();
 
-    const orgId = profile?.organization_id || '';
-
-    // ─── 4. Insert feedback ───
-    // ✅ FIX: schema-qualify as ai.ai_feedback (Spec 9.9)
-    const { data, error } = await supabase
-      .from('ai.ai_feedback')
-      .insert({
-        user_id: userId,
-        organization_id: orgId,
-        message_id: message_id || null,
-        conversation_id: conversation_id || null,
-        feedback_type,
-        rating: rating || null,
-        correction: correction || null,
-        reason: reason || null,
-      })
-      .select('id')
-      .single();
-
-    if (error) {
-      console.error('AI Feedback insert error:', error.message);
-      return NextResponse.json({ error: 'Failed to save feedback' }, { status: 500 });
+    if (convError) {
+      console.error('ai_conversations lookup error:', convError.message);
+      return NextResponse.json({ error: 'Failed to load conversation' }, { status: 500 });
+    }
+    if (!conv || conv.user_id !== session.user.id) {
+      return NextResponse.json({ error: 'Conversation not found' }, { status: 404 });
     }
 
-    return NextResponse.json({ success: true, id: data?.id });
+    // ─── 3. Fetch messages, oldest first ───
+    const { data, error } = await supabase
+      .schema('ai')
+      .from('ai_messages')
+      .select('id, role, content, classification, metadata, created_at')
+      .eq('conversation_id', conversationId)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.error('ai_messages fetch error:', error.message);
+      return NextResponse.json({ error: 'Failed to fetch messages' }, { status: 500 });
+    }
+
+    // ─── 4. Map DB rows back into the shape AiChat.tsx expects (AIMessage) ───
+    const messages = (data || []).map((m: any) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      tool: m.metadata?.tool ?? null,
+      confidence: m.metadata?.confidence ?? null,
+      period: m.metadata?.period ?? null,
+      currency: m.metadata?.currency ?? null,
+      filters: m.metadata?.filters ?? null,
+      data_as_of: m.metadata?.data_as_of ?? null,
+      warnings: m.metadata?.warnings ?? null,
+      source_rows_or_report: m.metadata?.source_rows_or_report ?? null,
+      suggested_safe_actions: m.metadata?.suggested_safe_actions ?? null,
+      timestamp: m.created_at,
+      feedbackGiven: null,
+    }));
+
+    return NextResponse.json({ messages });
   } catch (error: any) {
-    console.error('AI Feedback API error:', error.message);
+    console.error('AI Conversation Messages API error:', error.message);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

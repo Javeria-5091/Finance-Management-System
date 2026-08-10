@@ -287,3 +287,45 @@ VALUES
 ON CONFLICT (provider, model_id, purpose) DO NOTHING;
 
 COMMIT;
+
+-- ... (Aap ka pehle wala schema yahan rahe ga) ...
+
+-- =============================================================================
+-- FIX 1: AUDITOR & FINANCE HEAD RLS FOR AI LOGS (Spec 8.2 & 9.9)
+-- Normal users only see their own, but Auditors/CEO/Finance Head see org-wide AI activity
+-- =============================================================================
+
+-- Drop existing restrictive policies if they conflict, or create new ones
+DROP POLICY IF EXISTS users_own_query_audit ON ai.ai_query_audit;
+DROP POLICY IF EXISTS users_own_tool_calls ON ai.ai_tool_calls;
+
+-- Users see their own, OR Auditors/Finance/CEO see entire org
+CREATE POLICY read_ai_query_audit ON ai.ai_query_audit
+  FOR SELECT USING (
+    user_id = auth.uid() 
+    OR EXISTS (
+      SELECT 1 FROM core.user_roles ur
+      JOIN core.roles r ON r.id = ur.role_id
+      WHERE ur.user_id = auth.uid() 
+        AND r.name IN ('CEO', 'FINANCE_HEAD', 'AUDITOR', 'Admin')
+        AND ur.valid_from <= now() AND (ur.valid_to IS NULL OR ur.valid_to >= now())
+    )
+  );
+
+CREATE POLICY read_ai_tool_calls ON ai.ai_tool_calls
+  FOR SELECT USING (
+    user_id = auth.uid() 
+    OR EXISTS (
+      SELECT 1 FROM core.user_roles ur
+      JOIN core.roles r ON r.id = ur.role_id
+      WHERE ur.user_id = auth.uid() 
+        AND r.name IN ('CEO', 'FINANCE_HEAD', 'AUDITOR', 'Admin')
+        AND ur.valid_from <= now() AND (ur.valid_to IS NULL OR ur.valid_to >= now())
+    )
+  );
+
+-- =============================================================================
+-- FIX 2: Add timeout and cost tracking columns to ai_query_audit
+-- =============================================================================
+ALTER TABLE ai.ai_query_audit ADD COLUMN IF NOT EXISTS timeout_ms INTEGER DEFAULT 5000;
+ALTER TABLE ai.ai_query_audit ADD COLUMN IF NOT EXISTS estimated_cost NUMERIC(10,6) DEFAULT 0;
