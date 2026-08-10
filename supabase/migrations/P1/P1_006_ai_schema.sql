@@ -10,8 +10,8 @@ BEGIN;
 CREATE SCHEMA IF NOT EXISTS ai;
 
 -- 1. ai_conversations — Conversation metadata
--- Spec: user, organization, title, status, created_at
-CREATE TABLE ai.ai_conversations (
+-- Spec 9.9: user, organization, title, status, created_at
+CREATE TABLE IF NOT EXISTS ai.ai_conversations (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id       UUID NOT NULL REFERENCES auth.users(id),
   organization_id UUID NOT NULL,
@@ -22,21 +22,21 @@ CREATE TABLE ai.ai_conversations (
 );
 
 -- 2. ai_messages — User/assistant messages
--- Spec: conversation, role, content classification, timestamp
-CREATE TABLE ai.ai_messages (
+-- Spec 9.9: conversation, role, content classification, timestamp
+CREATE TABLE IF NOT EXISTS ai.ai_messages (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   conversation_id UUID NOT NULL REFERENCES ai.ai_conversations(id) ON DELETE CASCADE,
   role            TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
   content         TEXT NOT NULL,
   content_type    TEXT NOT NULL DEFAULT 'text' CHECK (content_type IN ('text','json','error')),
   classification  TEXT,  -- e.g. 'finance_qa', 'report_narrative', 'extraction', 'suggestion', 'refused'
-  metadata        JSONB DEFAULT '{}',  -- for tool name, confidence, etc.
+  metadata        JSONB DEFAULT '{}',  -- for tool name, confidence, period, currency, filters, warnings, etc.
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- 3. ai_tool_calls — Every tool invocation
--- Spec: tool, inputs hash, permission result, status, latency, model
-CREATE TABLE ai.ai_tool_calls (
+-- Spec 9.9: tool, inputs hash, permission result, status, latency, model
+CREATE TABLE IF NOT EXISTS ai.ai_tool_calls (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   message_id        UUID NOT NULL REFERENCES ai.ai_messages(id),
   conversation_id   UUID NOT NULL REFERENCES ai.ai_conversations(id),
@@ -44,8 +44,8 @@ CREATE TABLE ai.ai_tool_calls (
   organization_id   UUID NOT NULL,
   tool_name         TEXT NOT NULL,
   input_params      JSONB NOT NULL DEFAULT '{}',
-  input_hash        TEXT,  -- hash of inputs for dedup
-  permission_check  TEXT NOT NULL DEFAULT 'pending' CHECK (permission_check IN ('passed','denied','skipped')),
+  input_hash        TEXT,  -- Spec 9.9: hash of inputs for dedup and integrity
+  permission_check  TEXT NOT NULL DEFAULT 'passed' CHECK (permission_check IN ('passed','denied','skipped')),
   user_role         TEXT NOT NULL,
   status            TEXT NOT NULL DEFAULT 'success' CHECK (status IN ('success','error','timeout','blocked')),
   result_rows       INTEGER,
@@ -56,8 +56,8 @@ CREATE TABLE ai.ai_tool_calls (
 );
 
 -- 4. ai_query_audit — SQL/report execution record
--- Spec: question, SQL/report ID, parameters, row count, timeout, result hash
-CREATE TABLE ai.ai_query_audit (
+-- Spec 9.9: question, SQL/report ID, parameters, row count, timeout, result hash
+CREATE TABLE IF NOT EXISTS ai.ai_query_audit (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tool_call_id      UUID REFERENCES ai.ai_tool_calls(id),
   conversation_id   UUID NOT NULL REFERENCES ai.ai_conversations(id),
@@ -69,14 +69,14 @@ CREATE TABLE ai.ai_query_audit (
   sql_or_params     JSONB,      -- generated SQL or report parameters
   row_count         INTEGER,
   timed_out         BOOLEAN NOT NULL DEFAULT FALSE,
-  result_hash       TEXT,       -- hash of result for integrity
+  result_hash       TEXT,       -- Spec 9.9: hash of result for integrity
   status            TEXT NOT NULL DEFAULT 'success',
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- 5. ai_document_extractions — Draft extracted fields
--- Spec: file, document type, fields JSON, confidence, reviewer
-CREATE TABLE ai.ai_document_extractions (
+-- Spec 9.9: file, document type, fields JSON, confidence, reviewer
+CREATE TABLE IF NOT EXISTS ai.ai_document_extractions (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id         UUID NOT NULL REFERENCES auth.users(id),
   organization_id UUID NOT NULL,
@@ -92,8 +92,8 @@ CREATE TABLE ai.ai_document_extractions (
 );
 
 -- 6. ai_suggestions — Classification/reconciliation/anomaly suggestions
--- Spec: entity, suggestion type, confidence, accepted/rejected
-CREATE TABLE ai.ai_suggestions (
+-- Spec 9.9: entity, suggestion type, confidence, accepted/rejected
+CREATE TABLE IF NOT EXISTS ai.ai_suggestions (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id         UUID NOT NULL REFERENCES auth.users(id),
   organization_id UUID NOT NULL,
@@ -110,12 +110,14 @@ CREATE TABLE ai.ai_suggestions (
 );
 
 -- 7. ai_feedback — Human feedback for evaluation
--- Spec: suggestion/message, rating, correction, reason
-CREATE TABLE ai.ai_feedback (
+-- Spec 9.9: suggestion/message, rating, correction, reason
+-- FIX: Added conversation_id FK reference
+CREATE TABLE IF NOT EXISTS ai.ai_feedback (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id         UUID NOT NULL REFERENCES auth.users(id),
   organization_id UUID NOT NULL,
   message_id      UUID REFERENCES ai.ai_messages(id),
+  conversation_id UUID REFERENCES ai.ai_conversations(id),  -- FIX: FK reference added
   tool_call_id    UUID REFERENCES ai.ai_tool_calls(id),
   feedback_type   TEXT NOT NULL CHECK (feedback_type IN ('message_rating','suggestion_rating','correction','general')),
   rating          INTEGER CHECK (rating BETWEEN 1 AND 5),
@@ -125,15 +127,16 @@ CREATE TABLE ai.ai_feedback (
 );
 
 -- 8. ai_model_registry — Approved provider/model configuration
--- Spec: model, purpose, version, data policy, enabled
-CREATE TABLE ai.ai_model_registry (
+-- Spec 9.9: model, purpose, version, data policy, enabled
+-- Spec 9.11: data_policy must be restricted to approved values
+CREATE TABLE IF NOT EXISTS ai.ai_model_registry (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   provider        TEXT NOT NULL,       -- 'groq', 'openai', 'anthropic', etc.
   model_id        TEXT NOT NULL,       -- 'llama-3.3-70b-versatile', etc.
   display_name    TEXT NOT NULL,
   purpose         TEXT NOT NULL,       -- 'finance_qa', 'extraction', 'classification', 'forecasting'
   version         TEXT,
-  data_policy     TEXT NOT NULL DEFAULT 'no_storage',  -- 'no_storage', 'retention_30d', etc.
+  data_policy     TEXT NOT NULL DEFAULT 'no_storage' CHECK (data_policy IN ('no_storage','retention_30d','retention_90d')),
   max_tokens      INTEGER DEFAULT 4096,
   temperature     NUMERIC(3,2) DEFAULT 0.1,
   enabled         BOOLEAN NOT NULL DEFAULT TRUE,
@@ -145,8 +148,8 @@ CREATE TABLE ai.ai_model_registry (
 );
 
 -- 9. ai_prompt_versions — Versioned system/tool prompts
--- Spec: prompt key, version, checksum, approved_by
-CREATE TABLE ai.ai_prompt_versions (
+-- Spec 9.9: prompt key, version, checksum, approved_by
+CREATE TABLE IF NOT EXISTS ai.ai_prompt_versions (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   prompt_key      TEXT NOT NULL,       -- 'system_finance_qa', 'tool_selection', 'report_narrative', etc.
   version         INTEGER NOT NULL DEFAULT 1,
@@ -158,8 +161,8 @@ CREATE TABLE ai.ai_prompt_versions (
   UNIQUE (prompt_key, version)
 );
 
--- 10. ai_user_cost_tracking — Per-user cost tracking (not in spec but needed for 9.11 cost control)
-CREATE TABLE ai.ai_user_cost_tracking (
+-- 10. ai_user_cost_tracking — Per-user cost tracking (Spec 9.11 cost control)
+CREATE TABLE IF NOT EXISTS ai.ai_user_cost_tracking (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id         UUID NOT NULL REFERENCES auth.users(id),
   organization_id UUID NOT NULL,
@@ -175,16 +178,17 @@ CREATE TABLE ai.ai_user_cost_tracking (
 -- =============================================================================
 -- INDEXES
 -- =============================================================================
-CREATE INDEX idx_ai_conversations_user ON ai.ai_conversations(user_id, created_at DESC);
-CREATE INDEX idx_ai_conversations_org ON ai.ai_conversations(organization_id, created_at DESC);
-CREATE INDEX idx_ai_messages_conversation ON ai.ai_messages(conversation_id, created_at);
-CREATE INDEX idx_ai_tool_calls_user ON ai.ai_tool_calls(user_id, created_at DESC);
-CREATE INDEX idx_ai_tool_calls_conv ON ai.ai_tool_calls(conversation_id);
-CREATE INDEX idx_ai_query_audit_user ON ai.ai_query_audit(user_id, created_at DESC);
-CREATE INDEX idx_ai_suggestions_entity ON ai.ai_suggestions(entity_type, entity_id, status);
-CREATE INDEX idx_ai_suggestions_user ON ai.ai_suggestions(user_id, status);
-CREATE INDEX idx_ai_feedback_user ON ai.ai_feedback(user_id, created_at DESC);
-CREATE INDEX idx_ai_cost_user_date ON ai.ai_user_cost_tracking(user_id, period_date);
+CREATE INDEX IF NOT EXISTS idx_ai_conversations_user ON ai.ai_conversations(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_conversations_org ON ai.ai_conversations(organization_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_messages_conversation ON ai.ai_messages(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_tool_calls_user ON ai.ai_tool_calls(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_tool_calls_conv ON ai.ai_tool_calls(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_ai_query_audit_user ON ai.ai_query_audit(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_suggestions_entity ON ai.ai_suggestions(entity_type, entity_id, status);
+CREATE INDEX IF NOT EXISTS idx_ai_suggestions_user ON ai.ai_suggestions(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_ai_feedback_user ON ai.ai_feedback(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_feedback_conv ON ai.ai_feedback(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_ai_cost_user_date ON ai.ai_user_cost_tracking(user_id, period_date);
 
 -- =============================================================================
 -- RLS POLICIES — Users can only see their own data; auditors see org data
@@ -256,13 +260,30 @@ CREATE POLICY users_own_cost ON ai.ai_user_cost_tracking
   FOR ALL USING (user_id = auth.uid());
 
 -- =============================================================================
+-- UPDATED_AT auto-trigger for ai_conversations
+-- =============================================================================
+CREATE OR REPLACE FUNCTION ai.update_conversation_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_ai_conversations_updated_at ON ai.ai_conversations;
+CREATE TRIGGER trg_ai_conversations_updated_at
+  BEFORE UPDATE ON ai.ai_conversations
+  FOR EACH ROW EXECUTE FUNCTION ai.update_conversation_timestamp();
+
+-- =============================================================================
 -- SEED: Default model registry entry (Groq Llama 3.3)
 -- =============================================================================
-INSERT INTO ai.ai_model_registry (provider, model_id, display_name, purpose, version, max_tokens, temperature, rate_limit_rpm)
+INSERT INTO ai.ai_model_registry (provider, model_id, display_name, purpose, version, max_tokens, temperature, rate_limit_rpm, data_policy)
 VALUES
-  ('groq', 'llama-3.3-70b-versatile', 'Llama 3.3 70B', 'finance_qa', '1', 4096, 0.1, 30),
-  ('groq', 'llama-3.3-70b-versatile', 'Llama 3.3 70B', 'report_narrative', '1', 4096, 0.2, 30),
-  ('groq', 'llama-3.3-70b-versatile', 'Llama 3.3 70B', 'tool_selection', '1', 1024, 0.0, 30),
-  ('groq', 'llama-3.3-70b-versatile', 'Llama 3.3 70B', 'document_extraction', '1', 4096, 0.1, 10);
+  ('groq', 'llama-3.3-70b-versatile', 'Llama 3.3 70B', 'finance_qa', '1', 4096, 0.1, 30, 'no_storage'),
+  ('groq', 'llama-3.3-70b-versatile', 'Llama 3.3 70B', 'report_narrative', '1', 4096, 0.2, 30, 'no_storage'),
+  ('groq', 'llama-3.3-70b-versatile', 'Llama 3.3 70B', 'tool_selection', '1', 1024, 0.0, 30, 'no_storage'),
+  ('groq', 'llama-3.3-70b-versatile', 'Llama 3.3 70B', 'document_extraction', '1', 4096, 0.1, 10, 'no_storage')
+ON CONFLICT (provider, model_id, purpose) DO NOTHING;
 
 COMMIT;

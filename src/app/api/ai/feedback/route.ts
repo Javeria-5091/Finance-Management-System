@@ -1,6 +1,6 @@
 // =============================================================================
-// AI Feedback API — Spec 9.9 ai_feedback
-// Records user thumbs-up/down on AI responses for quality evaluation
+// AI Feedback API — Spec 9.9 (ai_feedback)
+// Records user thumbs-up/down on AI responses for quality evaluation (Spec 9.11)
 // =============================================================================
 
 import { createServerClient } from '@supabase/ssr';
@@ -56,14 +56,14 @@ export async function POST(req: NextRequest) {
 
     const orgId = profile?.organization_id || '';
 
-    // ─── 4. Insert feedback ───
+    // ─── 4. Insert feedback (Spec 9.9 — with conversation_id) ───
     const { data, error } = await supabase
-      .from('ai_feedback')
+      .from('ai.ai_feedback')
       .insert({
         user_id: userId,
         organization_id: orgId,
         message_id: message_id || null,
-        conversation_id: conversation_id || null,
+        conversation_id: conversation_id || null,  // Spec 9.9: FK reference
         feedback_type,
         rating: rating || null,
         correction: correction || null,

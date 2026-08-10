@@ -1,16 +1,13 @@
 // =============================================================================
-// AI Conversation Messages API — Spec 9.9
-// GET: Load all messages for a specific conversation
+// AI Feedback API — Spec 9.9 ai_feedback
+// Records user thumbs-up/down on AI responses for quality evaluation
 // =============================================================================
 
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 
-export async function GET(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function POST(req: NextRequest) {
   try {
     // ─── 1. Auth check ───
     const cookieStore = await cookies();
@@ -30,58 +27,61 @@ export async function GET(
       return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
     }
 
-    const { id: conversationId } = await params;
+    const userId = session.user.id;
 
-    if (!conversationId) {
-      return NextResponse.json({ error: 'Conversation ID is required' }, { status: 400 });
+    // ─── 2. Parse body ───
+    const body = await req.json();
+    const { message_id, conversation_id, feedback_type, rating, correction, reason } = body;
+
+    // Validate required fields
+    if (!feedback_type) {
+      return NextResponse.json({ error: 'feedback_type is required' }, { status: 400 });
     }
 
-    // ─── 2. Verify conversation belongs to this user (security) ───
-    const { data: conv } = await supabase
-      .from('ai_conversations')
-      .select('id, user_id')
-      .eq('id', conversationId)
-      .eq('user_id', session.user.id)
+    const validFeedbackTypes = ['message_rating', 'suggestion_rating', 'correction', 'general'];
+    if (!validFeedbackTypes.includes(feedback_type)) {
+      return NextResponse.json({ error: `feedback_type must be one of: ${validFeedbackTypes.join(', ')}` }, { status: 400 });
+    }
+
+    if (rating !== undefined && (rating < 1 || rating > 5)) {
+      return NextResponse.json({ error: 'rating must be between 1 and 5' }, { status: 400 });
+    }
+
+    // ─── 3. Get org_id from profile ───
+    // ✅ FIX: schema-qualify as core.profiles for consistency
+    const { data: profile } = await supabase
+      .from('core.profiles')
+      .select('organization_id')
+      .eq('user_id', userId)
       .maybeSingle();
 
-    if (!conv) {
-      return NextResponse.json({ error: 'Conversation not found' }, { status: 404 });
-    }
+    const orgId = profile?.organization_id || '';
 
-    // ─── 3. Fetch messages (RLS also protects, but explicit check above is defense-in-depth) ───
-    const { data: messages, error } = await supabase
-      .from('ai_messages')
-      .select('id, role, content, content_type, classification, metadata, created_at')
-      .eq('conversation_id', conversationId)
-      .order('created_at', { ascending: true });
+    // ─── 4. Insert feedback ───
+    // ✅ FIX: schema-qualify as ai.ai_feedback (Spec 9.9)
+    const { data, error } = await supabase
+      .from('ai.ai_feedback')
+      .insert({
+        user_id: userId,
+        organization_id: orgId,
+        message_id: message_id || null,
+        conversation_id: conversation_id || null,
+        feedback_type,
+        rating: rating || null,
+        correction: correction || null,
+        reason: reason || null,
+      })
+      .select('id')
+      .single();
 
     if (error) {
-      console.error('AI Messages fetch error:', error.message);
-      return NextResponse.json({ error: 'Failed to fetch messages' }, { status: 500 });
+      console.error('AI Feedback insert error:', error.message);
+      return NextResponse.json({ error: 'Failed to save feedback' }, { status: 500 });
     }
 
-    // ─── 4. Format for frontend ───
-    const formattedMessages = (messages || []).map((m: any) => {
-      const meta = m.metadata || {};
-      return {
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        tool: meta.tool || null,
-        confidence: meta.confidence || null,
-        period: null,
-        currency: 'PKR',
-        warnings: meta.warnings || [],
-        source_rows_or_report: null,
-        suggested_safe_actions: [],
-        timestamp: m.created_at,
-        feedbackGiven: null,
-      };
-    });
-
-    return NextResponse.json({ messages: formattedMessages });
+    return NextResponse.json({ success: true, id: data?.id });
   } catch (error: any) {
-    console.error('AI Messages API error:', error.message);
+    console.error('AI Feedback API error:', error.message);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

@@ -28,8 +28,11 @@ export async function GET() {
     }
 
     // ─── 2. Fetch conversations (RLS ensures user only sees own) ───
+    // ✅ FIX: schema-qualify as ai.ai_conversations (Spec 9.9). Previous `from('ai_conversations')`
+    // relied on search_path including `ai` schema, which is not standard on Supabase — query
+    // returned empty conversations list, breaking the chat history panel.
     const { data, error } = await supabase
-      .from('ai_conversations')
+      .from('ai.ai_conversations')
       .select('id, title, status, created_at, updated_at')
       .eq('user_id', session.user.id)
       .eq('status', 'active')

@@ -156,8 +156,7 @@ function getNextApproverRole(currentRole: string): string {
   return 'CEO';
 }
 
-// ---------- SQL injection check for AI ----------
-// FIX: The for loop body needs closing brace
+// ---------- SQL injection check for AI (Spec 9.5) ----------
 export function isSqlSafe(sql: string): { safe: boolean; reason: string } {
   const upper = sql.toUpperCase().replace(/'[^']*'/g, '');
   if (!upper.trim().startsWith('SELECT') && !upper.trim().startsWith('WITH')) {
@@ -174,6 +173,50 @@ export function isSqlSafe(sql: string): { safe: boolean; reason: string } {
     if (upper.includes(fn)) {
       return { safe: false, reason: `Prohibited function detected: ${fn}.` };
     }
-  }  // ← THIS closing brace was missing!
+  }
+  // Spec 9.5: Block multi-statement attempts (semicolon after valid query)
+  const statementCount = (sql.match(/;/g) || []).length;
+  if (statementCount > 1) {
+    return { safe: false, reason: 'Multiple statements detected. Only single read-only queries are permitted.' };
+  }
+  // Spec 9.5: Block comment obfuscation
+  if (/\/\*.*\*\//.test(sql) || /--/.test(sql)) {
+    return { safe: false, reason: 'SQL comments are not permitted.' };
+  }
   return { safe: true, reason: '' };
+}
+
+// ---------- AI Daily Limit Check (Spec 9.11) ----------
+// Reusable helper for any AI route to check per-user daily limits
+export async function checkAiDailyLimit(
+  supabase: any,
+  userId: string,
+  orgId: string,
+  maxRequests: number = 200,
+  maxCost: number = 2.0
+): Promise<{ allowed: boolean; reason: string }> {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const { data: existing } = await supabase
+      .from('ai.ai_user_cost_tracking')
+      .select('request_count, estimated_cost')
+      .eq('user_id', userId)
+      .eq('organization_id', orgId)
+      .eq('period_date', today)
+      .maybeSingle();
+
+    const requests = existing?.request_count || 0;
+    const cost = parseFloat(existing?.estimated_cost || '0');
+
+    if (requests >= maxRequests) {
+      return { allowed: false, reason: `Daily AI request limit (${maxRequests}) reached.` };
+    }
+    if (cost >= maxCost) {
+      return { allowed: false, reason: 'Daily AI cost limit reached. Contact administrator.' };
+    }
+    return { allowed: true, reason: '' };
+  } catch {
+    // Fail-safe: allow on error
+    return { allowed: true, reason: '' };
+  }
 }
