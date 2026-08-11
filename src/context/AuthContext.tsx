@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
+import { logAudit, logSecurityEvent } from '@/lib/logAction';
 import type { UserProfile } from '@/types';
 import type { User } from '@supabase/supabase-js';
 
@@ -28,11 +29,9 @@ export const useAuth = () => {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  // CRITICAL: loading stays TRUE until BOTH session AND profile are loaded
   const [loading, setLoading] = useState(true);
   const [sessionChecked, setSessionChecked] = useState(false);
 
-  // Fetch profile whenever user changes
   const fetchProfile = useCallback(async (authUser: User | null) => {
     if (!authUser) {
       setProfile(null);
@@ -48,7 +47,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (error) {
         console.error("Profile fetch error:", error.message);
-        // Set a default profile with 'User' role on error
         setProfile({
           id: "",
           user_id: authUser.id,
@@ -56,18 +54,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           role: "User",
           created_at: "",
           email: authUser.email || "",
-          can_create_project: false,
-          can_edit_project: false,
-          can_delete_project: false,
-          can_add_income: false,
-          can_edit_income: false,
-          can_delete_income: false,
-          can_add_expense: false,
-          can_edit_expense: false,
-          can_delete_expense: false,
-          can_create_invoice: false,
-          can_edit_invoice: false,
-          can_delete_invoice: false,
+          can_create_project: false, can_edit_project: false, can_delete_project: false,
+          can_add_income: false, can_edit_income: false, can_delete_income: false,
+          can_add_expense: false, can_edit_expense: false, can_delete_expense: false,
+          can_create_invoice: false, can_edit_invoice: false, can_delete_invoice: false,
         });
       } else if (data) {
         const profileData: UserProfile = {
@@ -93,7 +83,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         console.log("Profile Loaded Successfully. Role:", profileData.role);
         setProfile(profileData);
       } else {
-        // No profile found — set default profile
         console.warn("No profile found for user:", authUser.email, "— using default profile");
         setProfile({
           id: "",
@@ -102,24 +91,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           role: "Viewer",
           created_at: "",
           email: authUser.email || "",
-          can_create_project: false,
-          can_edit_project: false,
-          can_delete_project: false,
-          can_add_income: false,
-          can_edit_income: false,
-          can_delete_income: false,
-          can_add_expense: false,
-          can_edit_expense: false,
-          can_delete_expense: false,
-          can_create_invoice: false,
-          can_edit_invoice: false,
-          can_delete_invoice: false,
+          can_create_project: false, can_edit_project: false, can_delete_project: false,
+          can_add_income: false, can_edit_income: false, can_delete_income: false,
+          can_add_expense: false, can_edit_expense: false, can_delete_expense: false,
+          can_create_invoice: false, can_edit_invoice: false, can_delete_invoice: false,
         });
       }
     } catch (err) {
       console.error("Profile exception:", err);
     } finally {
-      // Profile fetch complete — now safe to set loading = false
       setLoading(false);
     }
   }, []);
@@ -128,33 +108,46 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     supabase.auth.getSession().then(({ data }) => {
       if (data?.session?.user) {
         setUser(data.session.user);
-        // Fetch profile BEFORE setting loading = false
         fetchProfile(data.session.user);
       } else {
         setUser(null);
         setProfile(null);
-        setLoading(false); // No session = no loading
+        setLoading(false);
       }
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       const authUser = session?.user ?? null;
+
+      // ✅ AUDIT (Spec 8.2): Log session events
+      if (event === 'TOKEN_REFRESHED') {
+        // Silent token refresh — no audit needed
+      } else if (event === 'SIGNED_IN' && authUser) {
+        // Login audit is handled in login/page.tsx, but if session restores
+        // via cookie (page refresh), log it as a session restore
+        if (!sessionChecked) {
+          setSessionChecked(true);
+          logSecurityEvent({ eventType: 'LOGIN_SUCCESS', userId: authUser.id, userEmail: authUser.email });
+        }
+      } else if (event === 'SIGNED_OUT') {
+        // ✅ AUDIT: Session termination (Spec 8.2)
+        logAudit.logout();
+      }
+
       setUser(authUser);
       if (!authUser) {
         setProfile(null);
         setLoading(false);
       } else {
-        // Fetch profile for the new session, keep loading true until done
         setLoading(true);
         await fetchProfile(authUser);
       }
     });
 
     return () => subscription.unsubscribe();
-  }, [fetchProfile]);
+  }, [fetchProfile, sessionChecked]);
 
   const role = profile?.role || 'User';
-  // Support both legacy 'Admin' and new 'CEO' as admin
   const isAdmin = role === 'Admin' || role === 'CEO';
 
   const hasPermission = (permission: keyof UserProfile): boolean => {
@@ -170,10 +163,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signIn = async (email: string, password: string) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
+    // Note: login success/failure audit is handled in login/page.tsx
+    // because that's where the actual form submit happens
     return error?.message || null;
   };
 
   const signOut = async () => {
+    // ✅ AUDIT: Explicit session termination before signOut (Spec 8.2)
+    // logAudit.logout() is also called from onAuthStateChange SIGNED_OUT
+    // but we call it here too in case the event doesn't fire reliably
+    try {
+      logAudit.logout();
+    } catch {}
     await supabase.auth.signOut();
     setUser(null);
     setProfile(null);

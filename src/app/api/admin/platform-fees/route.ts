@@ -75,7 +75,7 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        await supabase.rpc('audit.log_action', {
+        supabase.schema('audit').rpc('log_action', {
           p_user_id: auth.userId,
           p_action: 'PLATFORM_FEE_CREATED',
           p_entity_type: 'platform_fee',
@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        await supabase.rpc('audit.log_action', {
+        supabase.schema('audit').rpc('log_action', {
           p_user_id: auth.userId,
           p_action: 'PLATFORM_FEE_UPDATED',
           p_entity_type: 'platform_fee',

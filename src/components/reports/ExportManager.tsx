@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Download, FileSpreadsheet, FileText, Lock, ChevronDown } from "lucide-react";
-import { logAction } from "@/lib/logAction";
+import { logExportEvent } from "@/lib/logAction";
 
 export interface ExportManagerProps {
   /** Report identifier for audit logging */
@@ -35,9 +35,18 @@ export default function ExportManager({
     setExporting(true);
     try {
       const csv = getCsvData();
+      const rowCount = csv.split('\n').length - 1; // approximate row count
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       downloadBlob(blob, `${reportName.replace(/\s+/g, "_")}_${dateStamp()}.csv`);
-      await logExport("CSV");
+      // ✅ FIX: Use logExportEvent RPC (writes to audit.export_events per Spec 8.2)
+      await logExportEvent({
+        reportName,
+        reportType: reportId,
+        format: 'csv',
+        filters: activeFilters,
+        rowCount,
+        fileSizeBytes: blob.size,
+      });
     } catch (e) {
       console.error("CSV export failed:", e);
     } finally {
@@ -52,30 +61,19 @@ export default function ExportManager({
     try {
       const blob = await getPdfData();
       downloadBlob(blob, `${reportName.replace(/\s+/g, "_")}_${dateStamp()}.pdf`);
-      await logExport("PDF");
+      // ✅ FIX: Use logExportEvent RPC (writes to audit.export_events per Spec 8.2)
+      await logExportEvent({
+        reportName,
+        reportType: reportId,
+        format: 'pdf',
+        filters: activeFilters,
+        fileSizeBytes: blob.size,
+      });
     } catch (e) {
       console.error("PDF export failed:", e);
     } finally {
       setExporting(false);
       setOpen(false);
-    }
-  };
-
-  const logExport = async (fileType: string) => {
-    try {
-      await logAction({
-        action: "EXPORT_REPORT",
-        entityType: "report",
-        description: `Exported ${reportName} as ${fileType}`,
-        newValues: {
-          report_id: reportId,
-          report_name: reportName,
-          file_type: fileType,
-          filters: activeFilters,
-        },
-      });
-    } catch {
-      /* audit log best-effort */
     }
   };
 

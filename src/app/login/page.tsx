@@ -2,6 +2,7 @@
 import { useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { logAudit } from "@/lib/logAction";
 import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
 import Link from "next/link";
@@ -30,12 +31,14 @@ export default function LoginPage() {
       const { data, error: signInErr } = await supabase.auth.signInWithPassword({ email, password });
 
       if (signInErr) {
+        // ✅ AUDIT: Log failed login attempt (Spec 8.2)
+        logAudit.loginFailed(email);
         setError(signInErr.message || "Login failed");
         setLoading(false);
         return;
       }
 
-      // Supabase listFactors returns { all, totp, phone, webauthn } - NOT { factors }
+      // Supabase listFactors returns { all, totp, phone, webauthn }
       const { data: factorData, error: factorErr } = await supabase.auth.mfa.listFactors();
       const verifiedFactors = factorData?.all?.filter((f: any) => f.status === "verified") || [];
 
@@ -58,8 +61,12 @@ export default function LoginPage() {
         return;
       }
 
+      // ✅ AUDIT: Log successful login (Spec 8.2)
+      logAudit.login();
       router.push("/dashboard");
     } catch (err: any) {
+      // ✅ AUDIT: Log unexpected login error
+      logAudit.loginFailed(email);
       setError(err.message || "Login failed");
     } finally {
       setLoading(false);
@@ -80,11 +87,16 @@ export default function LoginPage() {
       });
 
       if (verifyErr) {
+        // ✅ AUDIT: Log MFA verification failure (Spec 8.2)
+        logSecurityEventFromClient("MFA_VERIFICATION_FAILURE", false, { factor_id: mfaFactorId });
         setError("Invalid code. Please try again.");
         setMfaLoading(false);
         return;
       }
 
+      // ✅ AUDIT: Log MFA verification success + full login (Spec 8.2)
+      logSecurityEventFromClient("MFA_VERIFICATION_SUCCESS", true, { factor_id: mfaFactorId });
+      logAudit.login();
       router.push("/dashboard");
     } catch (err: any) {
       setError(err.message || "MFA verification failed");
@@ -146,4 +158,11 @@ export default function LoginPage() {
       </div>
     </main>
   );
+}
+
+// Helper: direct security event call for login-page-only events where we don't have a user session yet
+function logSecurityEventFromClient(eventType: string, success: boolean, details?: Record<string, any>) {
+  import('@/lib/logAction').then(({ logSecurityEvent }) => {
+    logSecurityEvent({ eventType, success, details });
+  }).catch(() => {});
 }

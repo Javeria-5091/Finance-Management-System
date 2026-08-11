@@ -124,7 +124,7 @@ export async function POST(req: NextRequest) {
 
       // Audit log
       try {
-        await supabase.rpc('audit.log_action', {
+        supabase.schema('audit').rpc('log_action', {
           p_user_id: auth.userId,
           p_action: 'USER_CREATED',
           p_entity_type: 'user',
@@ -190,7 +190,7 @@ export async function POST(req: NextRequest) {
         .eq('id', userId);
 
       try {
-        await supabase.rpc('audit.log_action', {
+        supabase.schema('audit').rpc('log_action', {
           p_user_id: auth.userId,
           p_action: 'ROLE_ASSIGNED',
           p_entity_type: 'user',
@@ -221,7 +221,7 @@ export async function POST(req: NextRequest) {
 
       // Log the password reset request
       try {
-        await supabase.rpc('audit.log_action', {
+        supabase.schema('audit').rpc('log_action', {
           p_user_id: auth.userId,
           p_action: 'PASSWORD_RESET_REQUESTED',
           p_entity_type: 'user',
@@ -279,7 +279,7 @@ export async function PATCH(req: NextRequest) {
     }
 
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: isActive === false ? 'USER_DEACTIVATED' : 'USER_UPDATED',
         p_entity_type: 'user',

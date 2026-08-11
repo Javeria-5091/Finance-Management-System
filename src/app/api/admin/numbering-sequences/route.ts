@@ -84,7 +84,7 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        await supabase.rpc('audit.log_action', {
+        supabase.schema('audit').rpc('log_action', {
           p_user_id: auth.userId,
           p_action: 'SEQUENCE_CREATED',
           p_entity_type: 'numbering_sequence',
@@ -124,7 +124,7 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        await supabase.rpc('audit.log_action', {
+        supabase.schema('audit').rpc('log_action', {
           p_user_id: auth.userId,
           p_action: 'SEQUENCE_UPDATED',
           p_entity_type: 'numbering_sequence',
@@ -157,7 +157,7 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        await supabase.rpc('audit.log_action', {
+        supabase.schema('audit').rpc('log_action', {
           p_user_id: auth.userId,
           p_action: 'SEQUENCE_RESET',
           p_entity_type: 'numbering_sequence',

@@ -226,13 +226,11 @@ export const updateTaxRuleSetStatus = async (id: string, status: string, userId?
     .select()
     .single();
 
-  // YEH LINE MISSING THI — Error throw karo, warna silent fail hota hai
   if (error) {
     console.error(' [TAX] DB Error:', error);
     throw error;
   }
 
-  // YEH BHI MISSING THI — Agar data null aaye to bhi throw karo
   if (!data) {
     console.error(' [TAX] No data returned for id:', id);
     throw new Error('Update failed — no data returned. Check RLS policies or if row exists.');

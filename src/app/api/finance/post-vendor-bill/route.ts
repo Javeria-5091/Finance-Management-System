@@ -84,7 +84,7 @@ export async function POST(req: NextRequest) {
     if (budgetCheck.blocked) {
       if (force_budget_override && ['CEO', 'FINANCE_HEAD', 'Admin'].includes(auth.role)) {
         try {
-          await supabase.rpc('audit.log_action', {
+          supabase.schema('audit').rpc('log_action', {
             p_user_id: auth.userId,
             p_action: 'BUDGET_OVERRIDE',
             p_entity_type: 'vendor_bill',
@@ -360,7 +360,7 @@ export async function POST(req: NextRequest) {
 
     // 11. Audit log
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'VENDOR_BILL_POSTED',
         p_entity_type: 'vendor_bill',

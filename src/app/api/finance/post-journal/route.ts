@@ -72,8 +72,8 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 5. Verify balance ──
-    const totalDebit = journalLines.reduce((sum: number, l: any) => sum + (Number(l.debit) || 0), 0);
-    const totalCredit = journalLines.reduce((sum: number, l: any) => sum + (Number(l.credit) || 0), 0);
+    const totalDebit = journalLines.reduce((sum: number, l: any) => sum + (Number(l.debit_amount) || 0), 0);
+    const totalCredit = journalLines.reduce((sum: number, l: any) => sum + (Number(l.credit_amount) || 0), 0);
 
     if (Math.abs(totalDebit - totalCredit) > 0.02) {
       return NextResponse.json({
@@ -157,7 +157,7 @@ export async function POST(req: NextRequest) {
 
     // ── 10. Audit log ──
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'JOURNAL_POSTED',
         p_entity_type: 'journal_entry',

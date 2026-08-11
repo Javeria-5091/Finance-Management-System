@@ -75,7 +75,7 @@ export async function PATCH(
     }
 
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'CREDIT_NOTE_UPDATED',
         p_entity_type: 'credit_note',
@@ -258,7 +258,7 @@ export async function POST(
     }).eq('id', id);
 
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'CREDIT_NOTE_POSTED',
         p_entity_type: 'credit_note',

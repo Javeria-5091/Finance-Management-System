@@ -158,7 +158,7 @@ export async function POST(req: NextRequest) {
 
         //  FIX: Use RPC for audit log (correct columns, server-side IP, role snapshot, hash)
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: `WORKFLOW_${action.toUpperCase()}`,
         p_entity_type: module.toUpperCase(),

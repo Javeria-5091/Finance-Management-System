@@ -127,7 +127,7 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'PROJECT_CREATED',
         p_entity_type: 'project',

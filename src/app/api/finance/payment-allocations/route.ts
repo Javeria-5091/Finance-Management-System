@@ -139,7 +139,7 @@ export async function POST(req: NextRequest) {
 
     // Audit log
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'PAYMENT_ALLOCATED',
         p_entity_type: 'payment_receipt',

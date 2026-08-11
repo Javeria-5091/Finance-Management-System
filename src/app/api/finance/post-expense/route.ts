@@ -81,7 +81,7 @@ export async function POST(req: NextRequest) {
       if (force_budget_override && ['CEO', 'FINANCE_HEAD', 'Admin'].includes(auth.role)) {
         // Allow with override — log the override in audit
         try {
-          await supabase.rpc('audit.log_action', {
+          supabase.schema('audit').rpc('log_action', {
             p_user_id: auth.userId,
             p_action: 'BUDGET_OVERRIDE',
             p_entity_type: 'expense',
@@ -267,7 +267,7 @@ export async function POST(req: NextRequest) {
 
         //  FIX: Use RPC for correct audit columns
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'EXPENSE_POSTED',
         p_entity_type: 'expense',

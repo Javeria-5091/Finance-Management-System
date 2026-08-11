@@ -114,7 +114,7 @@ export async function POST(req: NextRequest) {
         .from('finance.chart_of_accounts')
         .select('id, code, name')
         .eq('account_type', 'EQUITY')
-        .eq('code', '3000') // Retained Earnings — adjust code as per your CoA
+        .eq('code', 'account_type' ) // Retained Earnings — adjust code as per your CoA
         .eq('organization_id', orgId)   // ← SECURITY FIX
         .single()
     );
@@ -184,8 +184,8 @@ export async function POST(req: NextRequest) {
     }
 
     // Verify balance
-    const totalDebit = journalLines.reduce((s: number, l: any) => s + l.debit, 0);
-    const totalCredit = journalLines.reduce((s: number, l: any) => s + l.credit, 0);
+    const totalDebit = journalLines.reduce((s: number, l: any) => s + l.debit_amount, 0);
+    const totalCredit = journalLines.reduce((s: number, l: any) => s + l.credit_amount, 0);
     if (Math.abs(totalDebit - totalCredit) > 0.02) {
       return NextResponse.json({
         error: `Closing entry is unbalanced! Debit: ${totalDebit}, Credit: ${totalCredit}`,
@@ -270,7 +270,7 @@ export async function POST(req: NextRequest) {
 
     // ── 12. Audit log ──
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'YEAR_END_CLOSED',
         p_entity_type: 'fiscal_year',

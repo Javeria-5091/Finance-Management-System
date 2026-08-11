@@ -130,7 +130,7 @@ export async function PATCH(
     }
 
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'PROJECT_UPDATED',
         p_entity_type: 'project',
@@ -191,7 +191,7 @@ export async function DELETE(
     }
 
     try {
-      await supabase.rpc('audit.log_action', {
+      supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'PROJECT_DEACTIVATED',
         p_entity_type: 'project',
