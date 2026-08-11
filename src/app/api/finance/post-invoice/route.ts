@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { requirePermission } from '@/lib/api-auth';
+import { checkBudgetForTransaction, createBudgetAlertNotifications } from '@/services/budget-check.service';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -8,10 +9,17 @@ function getData<T = any>(res: any): T | null {
 
 // ─── POST: Post approved invoice to General Ledger ───
 // Spec: When invoice is ISSUED → DR Accounts Receivable, CR Revenue
-// For each line item: DR/CR based on account type
+// Spec 5.4: Budget check before posting — for revenue/invoice context this is informational
+//           (invoices generate revenue, not expense, so budget BLOCK does not apply to revenue budgets
+//            but project budget tracking is still validated for context)
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('APPROVE_INVOICE');
   if (auth instanceof NextResponse) return auth;
+
+  const orgId = auth.orgId;
+  if (!orgId) {
+    return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
+  }
 
   try {
     const { invoiceId } = await req.json();
@@ -24,7 +32,7 @@ export async function POST(req: NextRequest) {
       .from('invoices')
       .select('*, invoice_lines(*)')
       .eq('id', invoiceId)
-      .eq('organization_id', auth.orgId)
+      .eq('organization_id', orgId)
       .single());
 
     if (!invoice) {
@@ -51,6 +59,37 @@ export async function POST(req: NextRequest) {
         journalId: existingJournal.id,
         reference: existingJournal.reference,
       }, { status: 400 });
+    }
+
+    // ─── BUDGET CHECK (Spec 5.4: Informational budget context for invoices) ───
+    // For invoices, budget check is informational only — invoices generate revenue and do NOT
+    // consume expense budgets. However, we still check project budgets to provide visibility
+    // and create threshold notifications if relevant. Budget is never BLOCKED for invoices.
+    let budgetCheckResult: any = null;
+    if (invoice.project_id) {
+      const budgetCheck = await checkBudgetForTransaction({
+        project_id: invoice.project_id,
+        amount: Number(invoice.total_amount) || 0,
+        currency: invoice.currency || 'PKR',
+        organization_id: orgId,
+      });
+
+      // Create notifications if budget thresholds are relevant
+      if (budgetCheck.notifications && budgetCheck.notifications.length > 0) {
+        await createBudgetAlertNotifications(
+          budgetCheck.notifications,
+          orgId,
+          auth.userId,
+          invoiceId
+        );
+      }
+
+      budgetCheckResult = {
+        informational: true,
+        warning: budgetCheck.warning,
+        checks: budgetCheck.checks,
+        note: 'Budget check is informational for invoices (revenue). Expense budget enforcement applies to post-expense and post-vendor-bill only.',
+      };
     }
 
     // 3. Get open period
@@ -170,7 +209,7 @@ export async function POST(req: NextRequest) {
         created_by: auth.userId,
         approved_by: auth.userId,
         approved_at: new Date().toISOString(),
-        organization_id: auth.orgId,
+        organization_id: orgId,
       })
       .select()
       .single());
@@ -235,6 +274,7 @@ export async function POST(req: NextRequest) {
           tax: totalTax,
           journal_id: journal.id,
           currency: invoice.currency || 'PKR',
+          budget_context: budgetCheckResult,
         },
         p_related_journal_id: journal.id,
       });
@@ -249,6 +289,7 @@ export async function POST(req: NextRequest) {
       totalDebit,
       totalCredit,
       message: `Invoice posted to GL: ${reference}`,
+      budget_check: budgetCheckResult,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });

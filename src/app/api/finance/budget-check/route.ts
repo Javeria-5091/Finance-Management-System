@@ -1,19 +1,34 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
 import { requirePermission } from '@/lib/api-auth';
-
-function getData<T = any>(res: any): T | null {
-  return res?.data ?? null;
-}
+import {
+  checkBudgetForTransaction,
+  createBudgetAlertNotifications,
+  getBudgetPolicy,
+  type BudgetPolicyConfig,
+} from '@/services/budget-check.service';
 
 // ─── POST: Check budget before posting a transaction ───
-// Spec: "Warn or block transactions that exceed budget based on configurable policy."
+// Spec 5.4: "Warn or block transactions that exceed budget based on configurable policy."
+// Spec 13.4: "Budget threshold reached → Project Manager, HOD, Finance, CEO according to severity"
+//
+// This endpoint can be called:
+//   (a) Proactively by the frontend before submitting an expense/bill
+//   (b) Automatically by posting routes (post-expense, post-vendor-bill) before GL posting
+//
+// Query params:
+//   ?force_allow=true  — bypass HARD_BLOCK (CEO/Finance Head override, requires APPROVE_EXPENSE)
+
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('EXPENSE_READ');
   if (auth instanceof NextResponse) return auth;
 
+  const orgId = auth.orgId;
+  if (!orgId) {
+    return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
+  }
+
   try {
-    const { budget_id, project_id, department, category, amount, currency } = await req.json();
+    const { budget_id, project_id, department, category, amount, currency, force_allow } = await req.json();
 
     if (!amount) {
       return NextResponse.json({ error: 'amount is required' }, { status: 400 });
@@ -24,129 +39,97 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Amount must be greater than 0' }, { status: 400 });
     }
 
-    const results: any[] = [];
+    // Run the budget check using the centralized service
+    const result = await checkBudgetForTransaction({
+      budget_id,
+      project_id,
+      department,
+      category,
+      amount: transactionAmount,
+      currency,
+      organization_id: orgId,
+    });
 
-    // Check project budget if project_id provided
-    if (project_id) {
-      const budget = getData(await supabase
-        .from('finance.budgets')
-        .select('*')
-        .eq('project_id', project_id)
-        .eq('status', 'APPROVED')
-        .maybeSingle());
+    // Handle CEO/Finance Head override with force_allow
+    let finalAllowed = result.allowed;
+    let overrideMessage: string | null = null;
 
-      if (budget) {
-        const totalBudget = Number(budget.total_amount) || 0;
-        const committed = Number(budget.committed_amount) || 0;
-        const actual = Number(budget.actual_amount) || 0;
-        const available = totalBudget - committed - actual;
-
-        const exceedsBudget = transactionAmount > available;
-        const utilizationPercent = totalBudget > 0 ? ((actual + transactionAmount) / totalBudget) * 100 : 0;
-
-        results.push({
-          type: 'PROJECT_BUDGET',
-          budget_id: budget.id,
-          total_budget: totalBudget,
-          committed: committed,
-          actual: actual,
-          available: available,
-          transaction_amount: transactionAmount,
-          exceeds_budget: exceedsBudget,
-          utilization_after_transaction: utilizationPercent.toFixed(1) + '%',
-          warning_level: utilizationPercent >= 100 ? 'BLOCKED' : utilizationPercent >= 90 ? 'WARNING' : utilizationPercent >= 75 ? 'CAUTION' : 'OK',
-        });
+    if (force_allow && result.blocked) {
+      // Only CEO, FINANCE_HEAD, or Admin can force-allow blocked transactions
+      const overrideRoles = ['CEO', 'FINANCE_HEAD', 'Admin'];
+      if (overrideRoles.includes(auth.role)) {
+        finalAllowed = true;
+        overrideMessage = `Budget override applied by ${auth.role}. Original result was BLOCKED.`;
+      } else {
+        return NextResponse.json({
+          error: 'force_allow requires CEO or FINANCE_HEAD role',
+          allowed: false,
+          blocked: true,
+          checks: result.checks,
+        }, { status: 403 });
       }
     }
 
-    // Check category/department budget
-    if (category || department) {
-      let catQuery = supabase
-        .from('finance.budgets')
-        .select('*')
-        .eq('status', 'APPROVED')
-        .eq('organization_id', auth.orgId);
-
-      if (category) catQuery = catQuery.eq('category', category);
-      if (department) catQuery = catQuery.eq('department', department);
-
-      const { data: catBudgets } = await catQuery;
-
-      if (catBudgets && catBudgets.length > 0) {
-        for (const budget of catBudgets) {
-          const totalBudget = Number(budget.total_amount) || 0;
-          const committed = Number(budget.committed_amount) || 0;
-          const actual = Number(budget.actual_amount) || 0;
-          const available = totalBudget - committed - actual;
-
-          const exceedsBudget = transactionAmount > available;
-          const utilizationPercent = totalBudget > 0 ? ((actual + transactionAmount) / totalBudget) * 100 : 0;
-
-          results.push({
-            type: 'CATEGORY_BUDGET',
-            budget_id: budget.id,
-            category: budget.category,
-            department: budget.department,
-            total_budget: totalBudget,
-            committed,
-            actual,
-            available,
-            transaction_amount: transactionAmount,
-            exceeds_budget: exceedsBudget,
-            utilization_after_transaction: utilizationPercent.toFixed(1) + '%',
-            warning_level: utilizationPercent >= 100 ? 'BLOCKED' : utilizationPercent >= 90 ? 'WARNING' : utilizationPercent >= 75 ? 'CAUTION' : 'OK',
-          });
-        }
-      }
+    // Create threshold alert notifications in DB (Spec 13.4)
+    if (result.notifications && result.notifications.length > 0) {
+      await createBudgetAlertNotifications(
+        result.notifications,
+        orgId,
+        auth.userId,
+        `budget-check-${Date.now()}`
+      );
     }
 
-    // Check budget by ID if provided directly
-    if (budget_id) {
-      const budget = getData(await supabase
-        .from('finance.budgets')
-        .select('*')
-        .eq('id', budget_id)
-        .eq('organization_id', auth.orgId)
-        .maybeSingle());
+    // Build response
+    const response: any = {
+      allowed: finalAllowed,
+      blocked: result.blocked && !finalAllowed,
+      warning: result.warning,
+      enforcement_mode: result.enforcement_mode,
+      policy: result.policy,
+      checks: result.checks,
+      message: overrideMessage || result.message,
+      notification_count: result.notifications?.length || 0,
+    };
 
-      if (budget) {
-        const totalBudget = Number(budget.total_amount) || 0;
-        const committed = Number(budget.committed_amount) || 0;
-        const actual = Number(budget.actual_amount) || 0;
-        const available = totalBudget - committed - actual;
-
-        const exceedsBudget = transactionAmount > available;
-        const utilizationPercent = totalBudget > 0 ? ((actual + transactionAmount) / totalBudget) * 100 : 0;
-
-        results.push({
-          type: 'DIRECT_BUDGET',
-          budget_id: budget.id,
-          total_budget: totalBudget,
-          committed,
-          actual,
-          available,
-          transaction_amount: transactionAmount,
-          exceeds_budget: exceedsBudget,
-          utilization_after_transaction: utilizationPercent.toFixed(1) + '%',
-          warning_level: utilizationPercent >= 100 ? 'BLOCKED' : utilizationPercent >= 90 ? 'WARNING' : utilizationPercent >= 75 ? 'CAUTION' : 'OK',
-        });
-      }
+    if (overrideMessage) {
+      response.override = {
+        applied: true,
+        overridden_by: auth.userId,
+        overridden_role: auth.role,
+        original_blocked: result.blocked,
+      };
     }
 
-    // Determine overall result
-    const hasBlocked = results.some(r => r.warning_level === 'BLOCKED');
-    const hasWarning = results.some(r => r.warning_level === 'WARNING');
+    return NextResponse.json(response);
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
+
+// ─── GET: Fetch current organization budget policy configuration ───
+// Returns the configurable policy (enforcement_mode, thresholds)
+
+export async function GET(req: NextRequest) {
+  const auth = await requirePermission('EXPENSE_READ');
+  if (auth instanceof NextResponse) return auth;
+
+  const orgId = auth.orgId;
+  if (!orgId) {
+    return NextResponse.json({ error: 'Organization ID not found in auth context' }, { status: 400 });
+  }
+
+  try {
+    const policy: BudgetPolicyConfig = await getBudgetPolicy(orgId);
 
     return NextResponse.json({
-      allowed: !hasBlocked,
-      blocked: hasBlocked,
-      warning: hasWarning,
-      checks: results,
-      message: hasBlocked
-        ? 'Transaction BLOCKED: exceeds one or more budget limits'
-        : hasWarning
-          ? 'WARNING: Transaction approaches budget limit'
-          : 'OK: Within all budget limits',
+      policy,
+      explanation: {
+        enforcement_mode: "'WARN_ONLY' = transactions allowed with warnings only. 'HARD_BLOCK' = transactions exceeding budget are blocked unless overridden by CEO/Finance Head.",
+        caution_threshold: 'Utilization % at which CAUTION alert triggers (advisory)',
+        warning_threshold: 'Utilization % at which WARNING alert triggers (escalation to HOD)',
+        block_threshold: 'Utilization % at which BLOCKED triggers (transaction rejected in HARD_BLOCK mode)',
+      },
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });

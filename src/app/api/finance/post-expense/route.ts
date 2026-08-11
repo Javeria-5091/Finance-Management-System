@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { getAuthUser, requirePermission } from '@/lib/api-auth';
+import { requirePermission } from '@/lib/api-auth';
+import { checkBudgetForTransaction, createBudgetAlertNotifications } from '@/services/budget-check.service';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -12,8 +13,13 @@ export async function POST(req: NextRequest) {
   const auth = await requirePermission('APPROVE_EXPENSE');
   if (auth instanceof NextResponse) return auth;
 
+  const orgId = auth.orgId;
+  if (!orgId) {
+    return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
+  }
+
   try {
-    const { expenseId } = await req.json();
+    const { expenseId, force_budget_override } = await req.json();
     if (!expenseId) {
       return NextResponse.json({ error: 'expenseId required' }, { status: 400 });
     }
@@ -23,7 +29,7 @@ export async function POST(req: NextRequest) {
       .from("expenses")
       .select("*")
       .eq("id", expenseId)
-      .eq("organization_id", auth.orgId)
+      .eq("organization_id", orgId)
       .single());
     if (!expense) {
       return NextResponse.json({ error: 'Expense not found' }, { status: 404 });
@@ -45,6 +51,73 @@ export async function POST(req: NextRequest) {
         journalId: existingJournal.id,
         reference: existingJournal.reference,
       }, { status: 400 });
+    }
+
+    // ─── BUDGET CHECK (Spec 5.4: Warn or block transactions exceeding budget) ───
+    // Check budget before posting to GL. If HARD_BLOCK policy is active and budget
+    // is exceeded, the transaction is rejected unless force_budget_override is provided
+    // by a CEO or FINANCE_HEAD.
+    const budgetCheck = await checkBudgetForTransaction({
+      project_id: expense.project_id || undefined,
+      department: expense.department || undefined,
+      category: expense.category || undefined,
+      amount: expense.amount,
+      currency: expense.currency || 'PKR',
+      organization_id: orgId,
+    });
+
+    // Create budget threshold alert notifications (Spec 13.4)
+    if (budgetCheck.notifications && budgetCheck.notifications.length > 0) {
+      await createBudgetAlertNotifications(
+        budgetCheck.notifications,
+        orgId,
+        auth.userId,
+        expenseId
+      );
+    }
+
+    // Enforce budget block (unless overridden by authorized role)
+    if (budgetCheck.blocked) {
+      if (force_budget_override && ['CEO', 'FINANCE_HEAD', 'Admin'].includes(auth.role)) {
+        // Allow with override — log the override in audit
+        try {
+          await supabase.rpc('audit.log_action', {
+            p_user_id: auth.userId,
+            p_action: 'BUDGET_OVERRIDE',
+            p_entity_type: 'expense',
+            p_entity_id: expenseId,
+            p_description: `Budget override on expense posting by ${auth.role}. Budget was exceeded but posting allowed.`,
+            p_previous_status: 'APPROVED',
+            p_new_status: 'APPROVED',
+            p_source_module: 'budget',
+            p_severity: 'high',
+            p_new_values: {
+              budget_checks: budgetCheck.checks.map(c => ({
+                budget_id: c.budget_id,
+                warning_level: c.warning_level,
+                utilization_after: c.utilization_after,
+              })),
+              override_by: auth.userId,
+              override_role: auth.role,
+              expense_amount: expense.amount,
+            },
+          });
+        } catch (overrideAuditErr: any) {
+          console.error('Budget override audit log failed:', overrideAuditErr);
+        }
+      } else {
+        // BLOCKED — return budget check results with 422 status
+        return NextResponse.json({
+          error: 'Transaction blocked: exceeds budget limit',
+          allowed: false,
+          blocked: true,
+          warning: budgetCheck.warning,
+          enforcement_mode: budgetCheck.enforcement_mode,
+          budget_checks: budgetCheck.checks,
+          message: budgetCheck.message,
+          hint: 'CEO or FINANCE_HEAD can override by passing force_budget_override: true',
+        }, { status: 422 });
+      }
     }
 
     // 3. Open period
@@ -204,7 +277,13 @@ export async function POST(req: NextRequest) {
         p_new_status: 'POSTED',
         p_source_module: 'expense',
         p_severity: 'high',
-        p_new_values: { reference, amount: expense.amount, journal_id: journal.id },
+        p_new_values: {
+          reference,
+          amount: expense.amount,
+          journal_id: journal.id,
+          budget_warning: budgetCheck.warning,
+          budget_overridden: !!force_budget_override,
+        },
         p_related_journal_id: journal.id,
       });
     } catch (auditErr: any) {
@@ -216,6 +295,7 @@ export async function POST(req: NextRequest) {
       journalId: journal.id,
       reference,
       message: `Posted ${reference}`,
+      budget_check: budgetCheck.blocked ? { overridden: true } : { warning: budgetCheck.warning, checks: budgetCheck.checks.length },
     });
 
   } catch (err: any) {
