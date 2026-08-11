@@ -218,7 +218,7 @@ CRITICAL RULES:
 
       rawSql = sqlResult.text.replace(/```sql\n?/g, '').replace(/```\n?/g, '').replace(/;+\s*$/g, '').trim();
       
-      const safetyCheck = isSqlSafe(rawSql);
+      const safetyCheck = await isSqlSafe(rawSql);
       if (!safetyCheck.safe) {
         queryStatus = 'blocked';
         queryWarnings.push(safetyCheck.reason);

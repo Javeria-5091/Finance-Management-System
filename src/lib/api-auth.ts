@@ -6,6 +6,10 @@ import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+// ✅ FIX: the published libpg-query package exports "parse" (and "parseSync"),
+// NOT "parseQuery". Importing parseQuery caused
+// "Module '\"libpg-query\"' has no exported member 'parseQuery'".
+import { parse } from 'libpg-query';
 
 // ---------- Types ----------
 export interface AuthResult {
@@ -16,6 +20,8 @@ export interface AuthResult {
 }
 
 // ---------- Blocklist: SQL keywords that must NEVER appear in AI-generated queries ----------
+// NOTE: kept for defense-in-depth / fast-fail, but isSqlSafe() below no longer
+// relies on this list alone — real validation now happens via AST parsing.
 export const DANGEROUS_SQL_KEYWORDS = [
   'DROP', 'ALTER', 'CREATE', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',
   'GRANT', 'REVOKE', 'EXECUTE', 'COPY', 'REFRESH MATERIALIZED',
@@ -176,32 +182,119 @@ function getNextApproverRole(currentRole: string): string {
   return 'CEO';
 }
 
-// ---------- Blocklist: Schemas that AI must NEVER query directly ----------
-const BLOCKED_SCHEMAS = ['core.', 'auth.', 'storage.', 'audit.', 'ai.', 'information_schema.', 'pg_'];
-const ALLOWED_SCHEMAS = ['reporting.', 'finance.', 'public.'];
+// =============================================================================
+// AI SQL SAFETY — Spec 9.5
+// =============================================================================
 
-// ---------- SQL injection & Schema check for AI (Spec 9.5) ----------
-export function isSqlSafe(sql: string): { safe: boolean; reason: string } {
-  const upper = sql.toUpperCase().replace(/'[^']*'/g, '');
-  if (!upper.trim().startsWith('SELECT') && !upper.trim().startsWith('WITH')) {
-    return { safe: false, reason: 'Only SELECT/WITH queries are allowed.' };
+// ---------- Schemas the AI is ever allowed to touch ----------
+// NOTE: 'finance' was intentionally removed from the allowlist. After running
+// migration P1_007_ai_security_hardening.sql, the DB role that actually
+// executes these queries (ai_readonly_role) has ZERO grants on finance.*
+// tables — so any query touching finance.* now fails closed at the database
+// layer too. This app-level list just gives a clean error earlier, before
+// the request even reaches Postgres.
+const ALLOWED_SCHEMAS = new Set(['reporting', 'public']);
+const BLOCKED_SCHEMAS = new Set(['core', 'auth', 'storage', 'audit', 'ai', 'pg_catalog', 'information_schema']);
+
+// Functions that must never appear in an AI-generated query, regardless of
+// which schema they're called from.
+const DANGEROUS_FUNCTIONS = [
+  'pg_read_file', 'pg_read_binary_file', 'pg_write_file', 'pg_ls_dir',
+  'lo_import', 'lo_export', 'dblink', 'dblink_exec', 'dblink_connect',
+  'pg_terminate_backend', 'pg_reload_conf', 'pg_sleep', 'set_config',
+];
+
+// Statement node types that must never appear anywhere in the parsed tree —
+// including nested inside a CTE, which a regex-based check cannot see.
+const FORBIDDEN_NODE_TYPES = [
+  'InsertStmt', 'UpdateStmt', 'DeleteStmt', 'TruncateStmt',
+  'CreateStmt', 'DropStmt', 'AlterTableStmt', 'GrantStmt', 'GrantRoleStmt',
+  'CopyStmt', 'DoStmt', 'CreateFunctionStmt', 'CreateRoleStmt',
+  'AlterRoleStmt', 'VacuumStmt', 'ExecuteStmt', 'PrepareStmt',
+  'ViewStmt', 'IndexStmt', 'CreateSchemaStmt', 'TransactionStmt',
+];
+
+// Recursively collect every table reference (RangeVar) and function call
+// (FuncCall) node in a parsed statement, and throw immediately if any
+// data-modifying / DDL statement node is found anywhere in the tree.
+function walkAstNode(node: any, rangeVars: any[], funcCalls: string[]): void {
+  if (!node || typeof node !== 'object') return;
+
+  if (Array.isArray(node)) {
+    for (const item of node) walkAstNode(item, rangeVars, funcCalls);
+    return;
   }
-  
-  // Block dangerous keywords
-  for (const kw of DANGEROUS_SQL_KEYWORDS) {
-    if (upper.includes(kw)) return { safe: false, reason: `Prohibited keyword: ${kw}` };
+
+  for (const forbidden of FORBIDDEN_NODE_TYPES) {
+    if (node[forbidden]) {
+      throw new Error(`Disallowed statement type detected: ${forbidden}`);
+    }
   }
 
-  // Spec 9.5: Block multi-statement and comments
-  if ((sql.match(/;/g) || []).length > 1) return { safe: false, reason: 'Multiple statements blocked.' };
-  if (/\/\*.*\*\//.test(sql) || /--/.test(sql)) return { safe: false, reason: 'SQL comments blocked.' };
+  if (node.RangeVar) rangeVars.push(node.RangeVar);
 
-  // Spec 9.5: Schema Allowlist enforcement
-  const lowerSql = sql.toLowerCase();
-  for (const blocked of BLOCKED_SCHEMAS) {
-    const regex = new RegExp(`\\b${blocked.replace('.', '\\.')}`);
-    if (regex.test(lowerSql)) {
-      return { safe: false, reason: `Access to schema '${blocked}' is prohibited. Use reporting views.` };
+  if (node.FuncCall) {
+    const nameParts = (node.FuncCall.funcname || [])
+      .map((n: any) => n?.String?.sval ?? n?.String?.str)
+      .filter(Boolean);
+    if (nameParts.length) funcCalls.push(nameParts.join('.').toLowerCase());
+  }
+
+  for (const key of Object.keys(node)) {
+    walkAstNode(node[key], rangeVars, funcCalls);
+  }
+}
+
+// ---------- SQL safety check for AI (Spec 9.5) — real AST parsing ----------
+// Replaces the old regex/keyword-based check, which could be bypassed by
+// comment obfuscation, unusual whitespace, or nested/CTE-hidden writes.
+// This parses the query with Postgres's own grammar (via libpg-query), so
+// it sees the query the exact same way the database will.
+export async function isSqlSafe(sql: string): Promise<{ safe: boolean; reason: string }> {
+  let parsed: any;
+  try {
+    // ✅ FIX: use parse(), not parseQuery() — see import comment above.
+    parsed = await parse(sql);
+  } catch {
+    return { safe: false, reason: 'Query failed to parse as valid SQL.' };
+  }
+
+  const stmts = parsed?.stmts ?? [];
+  if (stmts.length !== 1) {
+    return { safe: false, reason: 'Only a single SELECT statement is allowed.' };
+  }
+
+  const topStmt = stmts[0]?.stmt;
+  if (!topStmt?.SelectStmt) {
+    return { safe: false, reason: 'Only SELECT (or WITH ... SELECT) statements are allowed.' };
+  }
+
+  const rangeVars: any[] = [];
+  const funcCalls: string[] = [];
+  try {
+    walkAstNode(topStmt, rangeVars, funcCalls);
+  } catch (err: any) {
+    return { safe: false, reason: err.message };
+  }
+
+  // Every table/view reference must be schema-qualified and allowlisted.
+  for (const rv of rangeVars) {
+    const schema = rv.schemaname;
+    if (!schema) {
+      return {
+        safe: false,
+        reason: `Table "${rv.relname}" must be schema-qualified, e.g. reporting.${rv.relname}.`,
+      };
+    }
+    if (BLOCKED_SCHEMAS.has(schema) || !ALLOWED_SCHEMAS.has(schema)) {
+      return { safe: false, reason: `Access to schema "${schema}" is not permitted.` };
+    }
+  }
+
+  // No dangerous system/file/superuser functions anywhere in the tree.
+  for (const fn of funcCalls) {
+    if (DANGEROUS_FUNCTIONS.some((d) => fn.includes(d))) {
+      return { safe: false, reason: `Function "${fn}" is not permitted.` };
     }
   }
 

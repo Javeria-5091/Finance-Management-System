@@ -36,12 +36,12 @@ SELECT
   fa.currency,
   fa.opening_balance,
   fa.opening_balance
-    + COALESCE(SUM(jl.debit_amount)  FILTER (WHERE je.status = 'posted'), 0)
-    - COALESCE(SUM(jl.credit_amount) FILTER (WHERE je.status = 'posted'), 0)
+    + COALESCE(SUM(jl.debit_amount)  FILTER (WHERE je.status = 'POSTED'), 0)
+    - COALESCE(SUM(jl.credit_amount) FILTER (WHERE je.status = 'POSTED'), 0)
                                                                   AS current_balance,
   fa.opening_balance
-    + COALESCE(SUM(jl.base_debit)  FILTER (WHERE je.status = 'posted'), 0)
-    - COALESCE(SUM(jl.base_credit) FILTER (WHERE je.status = 'posted'), 0)
+    + COALESCE(SUM(jl.base_debit)  FILTER (WHERE je.status = 'POSTED'), 0)
+    - COALESCE(SUM(jl.base_credit) FILTER (WHERE je.status = 'POSTED'), 0)
                                                                   AS current_balance_base,
   org.base_currency,
   fa.is_active,
@@ -65,3 +65,4 @@ GROUP BY
 -- and GRANT SELECT ON reporting.v_cash_position TO <that_role>;
 GRANT USAGE ON SCHEMA reporting TO postgres, authenticated, anon;
 GRANT SELECT ON reporting.v_cash_position TO postgres, authenticated;
+
