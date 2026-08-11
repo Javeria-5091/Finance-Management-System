@@ -272,7 +272,11 @@ export interface TrialBalanceRow {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// § 8: AUDIT LOG (Spec v1.3 Section 8 — Updated)
+// § 8: AUDIT LOG (Spec v1.3 Section 8 — Revised to match 01_audit_schema_v1_3_spec.sql)
+//
+// NOTE: this interface is a 1:1 mirror of the `public.v_audit_log` view columns.
+// If a column is renamed/added/removed in the SQL migration, mirror it here too
+// so the frontend never silently drifts from the database contract.
 // ══════════════════════════════════════════════════════════════════════════════
 
 export type AuditAction =
@@ -282,12 +286,18 @@ export type AuditAction =
   | 'PERMISSION_CHANGE' | 'ROLE_CHANGE' | 'CONFIG_CHANGE'
   | 'EXPORT' | 'VIEW' | 'IMPORT' | 'BULK_ACTION'
   | 'PERIOD_CLOSE' | 'PERIOD_REOPEN'
-  | 'AI_QUERY' | 'AI_TOOL_CALL'
+  // AI actions (Spec 8.2: "AI question, generated query/tool, result access,
+  // document extraction, recommendation acceptance/rejection, and detected
+  // policy violation") — mirrors audit.log_ai_event() p_action examples.
+  | 'AI_QUERY' | 'AI_TOOL_CALL' | 'AI_EXTRACTION'
+  | 'AI_SUGGESTION_ACCEPTED' | 'AI_SUGGESTION_REJECTED'
+  | 'AI_POLICY_VIOLATION_DETECTED'
   | 'RATE_CHANGE' | 'FISCAL_YEAR_CLOSED'
   | 'WORKFLOW_SUBMIT' | 'WORKFLOW_VERIFY' | 'WORKFLOW_APPROVE'
   | 'WORKFLOW_REJECT' | 'WORKFLOW_REVERSE' | 'WORKFLOW_CANCEL' | 'WORKFLOW_REOPEN';
 
 export type AuditSeverity = 'info' | 'low' | 'medium' | 'high' | 'critical';
+export type AuditStatus = 'success' | 'denied' | 'error';
 
 export interface AuditLog {
   id: string;
@@ -302,10 +312,11 @@ export interface AuditLog {
   action: string;
   entity_type: string | null;
   entity_id: string | null;
-  status: 'success' | 'denied' | 'error';
+  status: AuditStatus;
   severity: AuditSeverity;
   // Time and source (Spec 8.1)
   created_at: string;
+  org_timezone: string | null;
   ip_address: string | null;
   user_agent: string | null;
   request_id: string | null;
@@ -315,45 +326,70 @@ export interface AuditLog {
   new_values: Record<string, unknown> | null;
   changed_columns: string[] | null;
   reason: string | null;
+  approval_comments: string | null;
   // Workflow (Spec 8.1)
   previous_status: string | null;
   new_status: string | null;
   approval_level: string | null;
-  approver_id: string | null;
-  approval_limit: number | null;
+  delegated_authority: string | null;
+  limit_decision: string | null;
   // Evidence (Spec 8.1)
   attachment_ids: string[] | null;
   import_batch_id: string | null;
   external_ref: string | null;
   related_journal_id: string | null;
   related_payment_id: string | null;
+  // Spec 8.3 REQUIRED filter dimensions: project + amount
+  project_id: string | null;
+  amount: number | null;
+  amount_currency: string | null;
   // Source
   source_module: string | null;
   source_table: string | null;
   source_schema: string | null;
-  // Integrity
-  prev_hash: string | null;
+  // AI field group (Spec 8.1 "AI" row / 9.9 ai_query_audit-equivalent)
+  ai_question: string | null;
+  ai_normalized_intent: string | null;
+  ai_selected_tool: string | null;
+  ai_generated_sql: string | null;
+  ai_template_id: string | null;
+  ai_row_count: number | null;
+  ai_model: string | null;
+  ai_latency_ms: number | null;
+  ai_cost_usd: number | null;
+  ai_input_tokens: number | null;
+  ai_output_tokens: number | null;
+  ai_refusal_reason: string | null;
+  // Misc
+  error_message: string | null;
+  // Integrity (Spec 8.3)
   entry_hash: string | null;
 }
 
-// View: with user info joined (from audit_log_enriched)
-export interface AuditLogEnriched extends AuditLog {
-  changed_by_name: string | null;
-  changed_by_email: string | null;
-  changed_by_role: string | null;
-  changed_at: string;
-  table_name: string | null;
-  table_schema: string | null;
-}
+/**
+ * @deprecated The `audit.audit_log_enriched` view this used to map to does
+ * not exist in the schema. `public.v_audit_log` already carries user_name /
+ * user_email / role_snapshot as point-in-time snapshots, so no separate
+ * "enriched" shape is needed. Kept as an alias only so older imports don't
+ * break at compile time — prefer `AuditLog` directly in new code.
+ */
+export type AuditLogEnriched = AuditLog;
 
 export interface AuditLogFilters {
   search?: string;
   module?: string;
   action?: string | 'ALL';
   severity?: AuditSeverity | 'ALL';
+  status?: AuditStatus | 'ALL';
   dateFrom?: string;
   dateTo?: string;
   userId?: string;
+  // Spec 8.3 REQUIRED filters that were previously missing end-to-end
+  projectId?: string;
+  minAmount?: number;
+  maxAmount?: number;
+  approvalLevel?: string;
+  aiTool?: string;
   page?: number;
   pageSize?: number;
 }

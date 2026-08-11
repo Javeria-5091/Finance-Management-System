@@ -1,6 +1,13 @@
 // src/lib/logAction.ts
-// ✅ COMPLETE REWRITE: Unified audit logging per Spec v1.3 Section 8
+// ✅ REVISED: Unified audit logging per Spec v1.3 Section 8, aligned with
+// 01_audit_schema_v1_3_spec.sql (project/amount filters + AI field group).
 import { supabase } from "./supabase";
+
+// ✅ FIX: schema-qualified Postgres functions must be invoked through
+// `.schema('audit').rpc('fn_name', ...)`. Passing 'audit.fn_name' as the
+// rpc() name string (as the previous version did) does not resolve through
+// PostgREST and every call was silently failing.
+const AUDIT_SCHEMA = "audit";
 
 // ═══════════════════════════════════════════════════════════════
 // Types matching Spec 8.1 required fields
@@ -20,8 +27,19 @@ export interface LogActionParams {
   requestId?: string;
   previousStatus?: string;
   newStatus?: string;
-  // Auto-filled if not provided
   approvalLevel?: string;
+  approvalComments?: string;
+  delegatedAuthority?: string;
+  limitDecision?: string;
+  // ✅ FIX (Spec 8.3): project + amount are required audit filter
+  // dimensions and were previously not captured at the point of action.
+  projectId?: string | null;
+  amount?: number | null;
+  amountCurrency?: string | null;
+  relatedJournalId?: string | null;
+  relatedPaymentId?: string | null;
+  attachmentIds?: string[] | null;
+  // Auto-filled if not provided
   userId?: string | null;
   userEmail?: string | null;
   userName?: string | null;
@@ -43,6 +61,15 @@ export async function logAction({
   previousStatus,
   newStatus,
   approvalLevel,
+  approvalComments,
+  delegatedAuthority,
+  limitDecision,
+  projectId = null,
+  amount = null,
+  amountCurrency = null,
+  relatedJournalId = null,
+  relatedPaymentId = null,
+  attachmentIds = null,
   userId,
   userEmail,
   userName,
@@ -78,8 +105,8 @@ export async function logAction({
       }
     }
 
-    // ✅ Use RPC for server-side execution (gets real IP, role snapshot, hash)
-    const { error } = await supabase.rpc("audit.log_action", {
+    // ✅ FIX: use .schema('audit').rpc(...) instead of rpc('audit.log_action', ...)
+    const { error } = await supabase.schema(AUDIT_SCHEMA).rpc("log_action", {
       p_user_id: finalUserId,
       p_user_email: finalUserEmail,
       p_user_name: finalUserName,
@@ -98,11 +125,23 @@ export async function logAction({
       p_previous_status: previousStatus || null,
       p_new_status: newStatus || null,
       p_approval_level: approvalLevel || null,
+      p_approval_comments: approvalComments || null,
+      p_delegated_authority: delegatedAuthority || null,
+      p_limit_decision: limitDecision || null,
+      p_project_id: projectId || null,
+      p_amount: amount ?? null,
+      p_amount_currency: amountCurrency || null,
+      p_related_journal_id: relatedJournalId || null,
+      p_related_payment_id: relatedPaymentId || null,
+      p_attachment_ids: attachmentIds || null,
     });
 
     if (error) {
       console.error("Failed to log action via RPC, falling back to direct insert:", error);
-      // Fallback: direct insert to v_audit_log
+      // Fallback: direct insert into v_audit_log (public schema, auto-updatable
+      // simple view over audit.audit_log — INSERT is granted per the schema).
+      // Note: this path skips the hash-chain and role_snapshot lookup that the
+      // RPC performs, so it should only ever be hit if the RPC itself is down.
       await supabase.from("v_audit_log").insert({
         user_id: finalUserId,
         user_email: finalUserEmail,
@@ -120,6 +159,12 @@ export async function logAction({
         request_id: requestId,
         previous_status: previousStatus,
         new_status: newStatus,
+        approval_level: approvalLevel,
+        project_id: projectId,
+        amount,
+        amount_currency: amountCurrency,
+        related_journal_id: relatedJournalId,
+        related_payment_id: relatedPaymentId,
       });
     }
   } catch (err) {
@@ -151,7 +196,8 @@ export async function logSecurityEvent(params: {
       } catch { /* continue */ }
     }
 
-    await supabase.rpc("audit.log_security_event", {
+    // ✅ FIX: schema-qualified rpc call
+    await supabase.schema(AUDIT_SCHEMA).rpc("log_security_event", {
       p_user_id: finalUserId,
       p_user_email: finalUserEmail,
       p_event_type: params.eventType,
@@ -196,7 +242,8 @@ export async function logExportEvent(params: {
       finalUserName = profile?.full_name ?? null;
     }
 
-    await supabase.rpc("audit.log_export_event", {
+    // ✅ FIX: schema-qualified rpc call
+    await supabase.schema(AUDIT_SCHEMA).rpc("log_export_event", {
       p_user_id: finalUserId,
       p_user_email: finalUserEmail,
       p_user_name: finalUserName,
@@ -213,26 +260,155 @@ export async function logExportEvent(params: {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// ✅ NEW: AI event logging — fills the Spec 8.1 "AI" field group and
+// Spec 8.2 "AI question, generated query/tool, result access, document
+// extraction, recommendation acceptance/rejection, and detected policy
+// violation" requirement, which had no writer anywhere in the frontend.
+// The AI gateway (Section 9.3) should call this after every question,
+// tool call, or Text-to-SQL execution — success, refusal, or error alike.
+// ═══════════════════════════════════════════════════════════════
+export async function logAIEvent(params: {
+  action?:
+    | "AI_QUERY"
+    | "AI_TOOL_CALL"
+    | "AI_EXTRACTION"
+    | "AI_SUGGESTION_ACCEPTED"
+    | "AI_SUGGESTION_REJECTED"
+    | "AI_POLICY_VIOLATION_DETECTED";
+  status?: "success" | "denied" | "error";
+  severity?: "info" | "low" | "medium" | "high" | "critical";
+  entityType?: string;
+  entityId?: string;
+  projectId?: string | null;
+  question?: string;
+  normalizedIntent?: string;
+  selectedTool?: string;
+  generatedSql?: string;
+  templateId?: string;
+  rowCount?: number;
+  model?: string;
+  latencyMs?: number;
+  costUsd?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  refusalReason?: string;
+  requestId?: string;
+  userId?: string | null;
+  userEmail?: string | null;
+}): Promise<void> {
+  try {
+    let finalUserId = params.userId ?? null;
+    let finalUserEmail = params.userEmail ?? null;
+    let finalUserName: string | null = null;
+
+    if (!finalUserId) {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          finalUserId = user.id;
+          finalUserEmail = user.email ?? null;
+        }
+      } catch { /* continue */ }
+    }
+
+    if (finalUserId) {
+      try {
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("full_name")
+          .eq("user_id", finalUserId)
+          .single();
+        finalUserName = profile?.full_name ?? null;
+      } catch { /* non-critical */ }
+    }
+
+    await supabase.schema(AUDIT_SCHEMA).rpc("log_ai_event", {
+      p_user_id: finalUserId,
+      p_user_email: finalUserEmail,
+      p_user_name: finalUserName,
+      p_action: params.action || "AI_QUERY",
+      p_status: params.status || "success",
+      p_severity: params.severity || "info",
+      p_entity_type: params.entityType || null,
+      p_entity_id: params.entityId || null,
+      p_project_id: params.projectId || null,
+      p_ai_question: params.question || null,
+      p_ai_normalized_intent: params.normalizedIntent || null,
+      p_ai_selected_tool: params.selectedTool || null,
+      p_ai_generated_sql: params.generatedSql || null,
+      p_ai_template_id: params.templateId || null,
+      p_ai_row_count: params.rowCount ?? null,
+      p_ai_model: params.model || null,
+      p_ai_latency_ms: params.latencyMs ?? null,
+      p_ai_cost_usd: params.costUsd ?? null,
+      p_ai_input_tokens: params.inputTokens ?? null,
+      p_ai_output_tokens: params.outputTokens ?? null,
+      p_ai_refusal_reason: params.refusalReason || null,
+      p_request_id: params.requestId || null,
+    });
+  } catch (err) {
+    console.error("AI event log error:", err);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Convenience functions — consistent object-parameter interface
 // ═══════════════════════════════════════════════════════════════
 export const logAudit = {
-  create: (entityType: string, entityId: string, description: string, newValues?: any) =>
-    logAction({ action: "CREATE", entityType, entityId, description, newValues }),
+  create: (
+    entityType: string,
+    entityId: string,
+    description: string,
+    newValues?: any,
+    opts?: { projectId?: string; amount?: number; amountCurrency?: string }
+  ) =>
+    logAction({
+      action: "CREATE", entityType, entityId, description, newValues,
+      projectId: opts?.projectId, amount: opts?.amount, amountCurrency: opts?.amountCurrency,
+    }),
 
-  update: (entityType: string, entityId: string, description: string, oldValues?: any, newValues?: any, reason?: string) =>
-    logAction({ action: "UPDATE", entityType, entityId, description, oldValues, newValues, reason }),
+  update: (
+    entityType: string,
+    entityId: string,
+    description: string,
+    oldValues?: any,
+    newValues?: any,
+    reason?: string,
+    opts?: { projectId?: string; amount?: number; amountCurrency?: string }
+  ) =>
+    logAction({
+      action: "UPDATE", entityType, entityId, description, oldValues, newValues, reason,
+      projectId: opts?.projectId, amount: opts?.amount, amountCurrency: opts?.amountCurrency,
+    }),
 
   delete: (entityType: string, entityId: string, description: string, oldValues?: any) =>
     logAction({ action: "DELETE", entityType, entityId, description, oldValues, severity: "high" }),
 
-  approve: (entityType: string, entityId: string, description: string, approvalLevel?: string) =>
-    logAction({ action: "APPROVE", entityType, entityId, description, approvalLevel, severity: "medium" }),
+  approve: (
+    entityType: string,
+    entityId: string,
+    description: string,
+    approvalLevel?: string,
+    opts?: { amount?: number; amountCurrency?: string; approvalComments?: string }
+  ) =>
+    logAction({
+      action: "APPROVE", entityType, entityId, description, approvalLevel, severity: "medium",
+      amount: opts?.amount, amountCurrency: opts?.amountCurrency, approvalComments: opts?.approvalComments,
+    }),
 
   reject: (entityType: string, entityId: string, description: string, reason?: string) =>
     logAction({ action: "REJECT", entityType, entityId, description: description + (reason ? ` - Reason: ${reason}` : ""), reason, severity: "medium" }),
 
-  post: (entityType: string, entityId: string, description: string) =>
-    logAction({ action: "POST", entityType, entityId, description, severity: "high" }),
+  post: (
+    entityType: string,
+    entityId: string,
+    description: string,
+    opts?: { relatedJournalId?: string; amount?: number; amountCurrency?: string }
+  ) =>
+    logAction({
+      action: "POST", entityType, entityId, description, severity: "high",
+      relatedJournalId: opts?.relatedJournalId, amount: opts?.amount, amountCurrency: opts?.amountCurrency,
+    }),
 
   reverse: (entityType: string, entityId: string, description: string, reason?: string) =>
     logAction({ action: "REVERSE", entityType, entityId, description, reason, severity: "critical" }),
@@ -274,7 +450,20 @@ export const logAudit = {
   configChange: (entityType: string, entityId: string, description: string, oldValues?: any, newValues?: any) =>
     logAction({ action: "CONFIG_CHANGE", entityType, entityId, description, oldValues, newValues, severity: "medium", sourceModule: "admin" }),
 
-  workflowAction: (module: string, entityId: string, action: string, fromStatus: string, toStatus: string, amount?: number, reason?: string) =>
+  // ✅ FIX: `amount` was previously only interpolated into the description
+  // string and never reached the structured `amount` column — the 8.3
+  // amount filter could never actually find these events. Now passed
+  // through as p_amount so it lands in audit.audit_log.amount.
+  workflowAction: (
+    module: string,
+    entityId: string,
+    action: string,
+    fromStatus: string,
+    toStatus: string,
+    amount?: number,
+    reason?: string,
+    opts?: { projectId?: string; amountCurrency?: string; approvalLevel?: string }
+  ) =>
     logAction({
       action: `WORKFLOW_${action.toUpperCase()}`,
       entityType: module,
@@ -285,5 +474,23 @@ export const logAudit = {
       reason,
       sourceModule: module,
       severity: action === "approve" ? "medium" : "info",
+      amount,
+      projectId: opts?.projectId,
+      amountCurrency: opts?.amountCurrency,
+      approvalLevel: opts?.approvalLevel,
     }),
+
+  // ✅ NEW: convenience wrappers around logAIEvent for the common cases
+  // called out in Spec 8.2.
+  aiQuery: (question: string, selectedTool: string, opts?: { rowCount?: number; model?: string; latencyMs?: number }) =>
+    logAIEvent({ action: "AI_QUERY", question, selectedTool, ...opts }),
+
+  aiRefused: (question: string, refusalReason: string) =>
+    logAIEvent({ action: "AI_QUERY", status: "denied", severity: "medium", question, refusalReason }),
+
+  aiSuggestionAccepted: (entityType: string, entityId: string, selectedTool: string) =>
+    logAIEvent({ action: "AI_SUGGESTION_ACCEPTED", entityType, entityId, selectedTool }),
+
+  aiSuggestionRejected: (entityType: string, entityId: string, selectedTool: string) =>
+    logAIEvent({ action: "AI_SUGGESTION_REJECTED", entityType, entityId, selectedTool }),
 };

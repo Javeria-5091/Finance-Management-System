@@ -5,6 +5,7 @@ import { useState, useEffect } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/context/PermissionContext";
 import { supabase } from "@/lib/supabase";
+import type { AuditLog } from "@/types/accounting.types";
 import {
   Shield,
   Search,
@@ -19,25 +20,13 @@ import {
   CheckCircle,
   XCircle,
   Loader2,
+  Sparkles,
 } from "lucide-react";
 
-interface AuditLogEntry {
-  id: string;
-  user_id: string | null;
-  user_email: string | null;
-  user_name: string | null;
-  action: string;
-  entity_type: string;
-  entity_id: string | null;
-  description: string | null;
-  old_values: Record<string, any> | null;
-  new_values: Record<string, any> | null;
-  ip_address: string | null;
-  user_agent: string | null;
-  status: string;
-  error_message: string | null;
-  created_at: string;
-}
+// ✅ FIX: reuse the single shared AuditLog type (mirrors public.v_audit_log)
+// instead of a local, incomplete interface — otherwise this page silently
+// drops project_id / amount / AI fields that the view now returns.
+type AuditLogEntry = AuditLog;
 
 export default function AuditLogPage() {
   const { user } = useAuth();
@@ -52,6 +41,10 @@ export default function AuditLogPage() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // ✅ NEW: Spec 8.3 required filters that had no UI anywhere before.
+  const [projectIdFilter, setProjectIdFilter] = useState("");
+  const [minAmount, setMinAmount] = useState("");
+  const [maxAmount, setMaxAmount] = useState("");
 
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
@@ -69,39 +62,62 @@ export default function AuditLogPage() {
     if (!permLoading && hasAccess) {
       fetchLogs();
     }
-  }, [permLoading, hasAccess, page, searchTerm, actionFilter, statusFilter, dateFrom, dateTo]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [permLoading, hasAccess, page, searchTerm, actionFilter, statusFilter, dateFrom, dateTo, projectIdFilter, minAmount, maxAmount]);
+
+  const buildBaseQuery = () => {
+    // v_audit_log lives in the public schema (default) and is
+    // security_invoker, so RLS from Appendix A applies automatically.
+    let query = supabase
+      .from("v_audit_log")
+      .select("*", { count: "exact" });
+
+    if (searchTerm) {
+      query = query.or(
+        `description.ilike.%${searchTerm}%,user_email.ilike.%${searchTerm}%,user_name.ilike.%${searchTerm}%,entity_type.ilike.%${searchTerm}%`
+      );
+    }
+
+    if (actionFilter !== "all") {
+      query = query.eq("action", actionFilter);
+    }
+
+    if (statusFilter !== "all") {
+      query = query.eq("status", statusFilter);
+    }
+
+    if (dateFrom) {
+      query = query.gte("created_at", dateFrom);
+    }
+
+    if (dateTo) {
+      query = query.lte("created_at", dateTo + "T23:59:59");
+    }
+
+    // ✅ NEW: project + amount filters (Spec 8.3)
+    if (projectIdFilter) {
+      query = query.eq("project_id", projectIdFilter);
+    }
+
+    if (minAmount) {
+      query = query.gte("amount", Number(minAmount));
+    }
+
+    if (maxAmount) {
+      query = query.lte("amount", Number(maxAmount));
+    }
+
+    return query;
+  };
 
   const fetchLogs = async () => {
     setLoading(true);
     setError(null);
 
     try {
-      // ✅ FIX: Use v_audit_log view which maps to audit.audit_log
-      let query = supabase
-        .from("v_audit_log")
-        .select("*", { count: "exact" })
+      const query = buildBaseQuery()
         .order("created_at", { ascending: false })
         .range((page - 1) * pageSize, page * pageSize - 1);
-
-      if (searchTerm) {
-        query = query.or(`description.ilike.%${searchTerm}%,user_email.ilike.%${searchTerm}%,entity_type.ilike.%${searchTerm}%`);
-      }
-
-      if (actionFilter !== "all") {
-        query = query.eq("action", actionFilter);
-      }
-
-      if (statusFilter !== "all") {
-        query = query.eq("status", statusFilter);
-      }
-
-      if (dateFrom) {
-        query = query.gte("created_at", dateFrom);
-      }
-
-      if (dateTo) {
-        query = query.lte("created_at", dateTo + "T23:59:59");
-      }
 
       const { data, error: fetchError, count } = await query;
 
@@ -125,39 +141,44 @@ export default function AuditLogPage() {
 
   const exportLogs = async () => {
     try {
-      let query = supabase
-        .from("v_audit_log")
-        .select("*")
+      const { data } = await buildBaseQuery()
         .order("created_at", { ascending: false })
         .limit(10000);
 
-      if (searchTerm) {
-        query = query.or(`description.ilike.%${searchTerm}%,user_email.ilike.%${searchTerm}%`);
-      }
-
-      if (actionFilter !== "all") {
-        query = query.eq("action", actionFilter);
-      }
-
-      if (statusFilter !== "all") {
-        query = query.eq("status", statusFilter);
-      }
-
-      const { data } = await query;
-
       if (data) {
+        // ✅ FIX: export columns now include project/amount/AI fields
+        // (Spec 8.3 required filter/export set + Spec 8.1 AI field group).
         const csv = [
-          ["Timestamp", "User", "Action", "Entity", "Entity ID", "Description", "Status", "IP Address"].join(","),
+          [
+            "Timestamp", "User", "User Email", "Role", "Action", "Entity", "Entity ID",
+            "Project ID", "Amount", "Amount Currency",
+            "Description", "Previous Status", "New Status", "Approval Level",
+            "Severity", "Status", "Reason", "IP Address",
+            "AI Question", "AI Tool", "AI Model",
+          ].join(","),
           ...data.map((log: any) =>
             [
               new Date(log.created_at).toISOString(),
+              log.user_name || "",
               log.user_email || "",
+              log.role_snapshot || "",
               log.action,
               log.entity_type,
               log.entity_id || "",
+              log.project_id || "",
+              log.amount ?? "",
+              log.amount_currency || "",
               `"${(log.description || "").replace(/"/g, '""')}"`,
+              log.previous_status || "",
+              log.new_status || "",
+              log.approval_level || "",
+              log.severity || "info",
               log.status,
+              `"${(log.reason || "").replace(/"/g, '""')}"`,
               log.ip_address || "",
+              `"${(log.ai_question || "").replace(/"/g, '""')}"`,
+              log.ai_selected_tool || "",
+              log.ai_model || "",
             ].join(",")
           ),
         ].join("\n");
@@ -169,6 +190,19 @@ export default function AuditLogPage() {
         a.download = `audit-log-${new Date().toISOString().split("T")[0]}.csv`;
         a.click();
         URL.revokeObjectURL(url);
+
+        // ✅ FIX: correct schema-qualified rpc call — logs the export event
+        // itself per Spec 8.2 ("...export, print, download...").
+        try {
+          await supabase.schema("audit").rpc("log_export_event", {
+            p_report_name: "Audit Log Export",
+            p_report_type: "audit",
+            p_format: "csv",
+            p_row_count: data.length,
+          });
+        } catch {
+          // Non-critical
+        }
       }
     } catch (err) {
       console.error("Export error:", err);
@@ -245,7 +279,7 @@ export default function AuditLogPage() {
       </div>
 
       {/* Filters */}
-      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -269,10 +303,14 @@ export default function AuditLogPage() {
             <option value="DELETE">Delete</option>
             <option value="APPROVE">Approve</option>
             <option value="REJECT">Reject</option>
+            <option value="POST">Post</option>
+            <option value="REVERSE">Reverse</option>
             <option value="LOGIN">Login</option>
             <option value="LOGOUT">Logout</option>
             <option value="VIEW">View</option>
             <option value="EXPORT">Export</option>
+            <option value="AI_QUERY">AI Query</option>
+            <option value="AI_TOOL_CALL">AI Tool Call</option>
           </select>
 
           <select
@@ -297,6 +335,32 @@ export default function AuditLogPage() {
             type="date"
             value={dateTo}
             onChange={(e) => { setDateTo(e.target.value); setPage(1); }}
+            className="px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+          />
+        </div>
+
+        {/* ✅ NEW: Project + Amount filters — Spec 8.3 required these and
+            they previously had no UI anywhere. */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2 border-t border-gray-100 dark:border-gray-700">
+          <input
+            type="text"
+            placeholder="Project ID"
+            value={projectIdFilter}
+            onChange={(e) => { setProjectIdFilter(e.target.value); setPage(1); }}
+            className="px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+          />
+          <input
+            type="number"
+            placeholder="Min amount"
+            value={minAmount}
+            onChange={(e) => { setMinAmount(e.target.value); setPage(1); }}
+            className="px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+          />
+          <input
+            type="number"
+            placeholder="Max amount"
+            value={maxAmount}
+            onChange={(e) => { setMaxAmount(e.target.value); setPage(1); }}
             className="px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
           />
         </div>
@@ -333,6 +397,7 @@ export default function AuditLogPage() {
                   <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">User</th>
                   <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Action</th>
                   <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Entity</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Amount</th>
                   <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Description</th>
                   <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Status</th>
                   <th className="text-left px-4 py-3 text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Details</th>
@@ -361,7 +426,8 @@ export default function AuditLogPage() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className="inline-flex px-2 py-0.5 rounded text-xs font-medium bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400">
+                        {log.action.startsWith("AI_") && <Sparkles className="w-3 h-3" />}
                         {log.action}
                       </span>
                     </td>
@@ -371,8 +437,13 @@ export default function AuditLogPage() {
                         <span className="text-xs text-gray-400 ml-1">#{log.entity_id.slice(0, 8)}</span>
                       )}
                     </td>
+                    <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300 whitespace-nowrap">
+                      {log.amount != null
+                        ? `${log.amount.toLocaleString()} ${log.amount_currency || ""}`
+                        : "—"}
+                    </td>
                     <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300 max-w-[300px] truncate">
-                      {log.description || ""}
+                      {log.description || log.ai_question || ""}
                     </td>
                     <td className="px-4 py-3">{getStatusBadge(log.status)}</td>
                     <td className="px-4 py-3">
@@ -443,6 +514,7 @@ export default function AuditLogPage() {
                   <p className="text-xs text-gray-500 dark:text-gray-400 uppercase">User</p>
                   <p className="text-sm text-gray-900 dark:text-white mt-1">{selectedLog.user_name || "Unknown"}</p>
                   <p className="text-xs text-gray-500">{selectedLog.user_email || ""}</p>
+                  <p className="text-xs text-gray-500">{selectedLog.role_snapshot || ""}</p>
                 </div>
                 <div>
                   <p className="text-xs text-gray-500 dark:text-gray-400 uppercase">Action</p>
@@ -455,6 +527,23 @@ export default function AuditLogPage() {
                 <div>
                   <p className="text-xs text-gray-500 dark:text-gray-400 uppercase">Entity ID</p>
                   <p className="text-sm text-gray-900 dark:text-white mt-1 font-mono">{selectedLog.entity_id || "N/A"}</p>
+                </div>
+                {/* ✅ NEW: project + amount (Spec 8.3) */}
+                <div>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 uppercase">Project ID</p>
+                  <p className="text-sm text-gray-900 dark:text-white mt-1 font-mono">{selectedLog.project_id || "N/A"}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 uppercase">Amount</p>
+                  <p className="text-sm text-gray-900 dark:text-white mt-1">
+                    {selectedLog.amount != null
+                      ? `${selectedLog.amount.toLocaleString()} ${selectedLog.amount_currency || ""}`
+                      : "N/A"}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 uppercase">Approval Level</p>
+                  <p className="text-sm text-gray-900 dark:text-white mt-1">{selectedLog.approval_level || "N/A"}</p>
                 </div>
                 <div>
                   <p className="text-xs text-gray-500 dark:text-gray-400 uppercase">IP Address</p>
@@ -479,6 +568,54 @@ export default function AuditLogPage() {
                   <p className="text-sm text-red-600 dark:text-red-400 mt-1 bg-red-50 dark:bg-red-900/20 p-3 rounded-lg">
                     {selectedLog.error_message}
                   </p>
+                </div>
+              )}
+
+              {/* ✅ NEW: AI field group — Spec 8.1 "AI" row. Only rendered
+                  when the row actually carries AI data (source_module='ai'). */}
+              {(selectedLog.ai_question || selectedLog.ai_selected_tool) && (
+                <div className="border border-purple-200 dark:border-purple-800 rounded-lg p-3 bg-purple-50 dark:bg-purple-900/10">
+                  <p className="text-xs text-purple-700 dark:text-purple-400 uppercase font-medium mb-2 flex items-center gap-1">
+                    <Sparkles className="w-3.5 h-3.5" /> AI Activity
+                  </p>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    {selectedLog.ai_question && (
+                      <div className="col-span-2">
+                        <p className="text-xs text-gray-500 dark:text-gray-400">Question</p>
+                        <p className="text-gray-900 dark:text-white">{selectedLog.ai_question}</p>
+                      </div>
+                    )}
+                    {selectedLog.ai_selected_tool && (
+                      <div>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">Tool</p>
+                        <p className="text-gray-900 dark:text-white">{selectedLog.ai_selected_tool}</p>
+                      </div>
+                    )}
+                    {selectedLog.ai_model && (
+                      <div>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">Model</p>
+                        <p className="text-gray-900 dark:text-white">{selectedLog.ai_model}</p>
+                      </div>
+                    )}
+                    {selectedLog.ai_row_count != null && (
+                      <div>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">Rows Returned</p>
+                        <p className="text-gray-900 dark:text-white">{selectedLog.ai_row_count}</p>
+                      </div>
+                    )}
+                    {selectedLog.ai_latency_ms != null && (
+                      <div>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">Latency</p>
+                        <p className="text-gray-900 dark:text-white">{selectedLog.ai_latency_ms} ms</p>
+                      </div>
+                    )}
+                    {selectedLog.ai_refusal_reason && (
+                      <div className="col-span-2">
+                        <p className="text-xs text-red-500">Refusal Reason</p>
+                        <p className="text-red-600 dark:text-red-400">{selectedLog.ai_refusal_reason}</p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
