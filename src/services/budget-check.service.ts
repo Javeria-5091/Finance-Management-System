@@ -353,7 +353,8 @@ export async function createBudgetAlertNotifications(
     }));
 
     const { error } = await supabase
-      .from('core.notifications')
+      .schema('core')
+      .from('notifications')
       .insert(notificationRecords);
 
     if (error) {

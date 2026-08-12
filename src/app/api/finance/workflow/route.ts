@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser, checkApprovalLimit } from '@/lib/api-auth';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
+import { workflowActionSchema, validateBody } from '@/lib/validations';
 
 function db() {
   return createServerClient(
@@ -88,9 +89,13 @@ export async function POST(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
 
   try {
-    const { module, recordId, action, reason } = await req.json();
-    if (!module || !recordId || !action)
-      return NextResponse.json({ error: 'module, recordId, and action are required' }, { status: 400 });
+    // P0 FIX: Zod input validation
+    const rawBody = await req.json();
+    const validation = validateBody(workflowActionSchema, rawBody);
+    if (!validation.success) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
+    }
+    const { module, recordId, action, reason } = validation.data;
 
     const config = MODULES[module];
     if (!config) return NextResponse.json({ error: `Unknown module: ${module}` }, { status: 400 });

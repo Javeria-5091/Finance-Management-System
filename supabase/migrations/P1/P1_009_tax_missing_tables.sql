@@ -1,22 +1,114 @@
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
 -- P1_009_tax_missing_tables.sql
--- Creates the 3 missing tax tables required by Spec Section 10.2:
---   1. finance.tax_computations        — stores computed tax liability per period
---   2. finance.tax_credits_and_withholding  — WHT credits, tax credits, adjustments
---   3. finance.tax_payments_and_refunds     — actual tax payments to FBR & refunds
+-- Creates the missing tax tables required by Spec Section 10.2:
+--   0. finance.tax_returns              -- tax return filings (was missing from 023)
+--   1. finance.tax_computations         -- stores computed tax liability per period
+--   2. finance.tax_credits_and_withholding -- WHT credits, tax credits, adjustments
+--   3. finance.tax_payments_and_refunds    -- actual tax payments to FBR & refunds
 --
--- Also attaches audit triggers to all three.
+-- Also attaches audit triggers to all four tables.
 --
 -- Run AFTER P1_002 (payroll) and 023_tax_configuration (tax base tables).
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
 
 BEGIN;
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
+-- 0. finance.tax_returns
+-- Tax return filing records -- referenced by computations, credits, payments.
+-- This table was missing from 023_tax_configuration.sql and is required
+-- before the other three tables can be created (FK dependency).
+-- =================================================================
+CREATE TABLE IF NOT EXISTS finance.tax_returns (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id   UUID NOT NULL REFERENCES core.organization_config(id),
+  tax_rule_set_id   UUID REFERENCES finance.tax_rule_sets(id),
+  fiscal_year_id    UUID REFERENCES finance.fiscal_years(id),
+  period_id         UUID REFERENCES finance.accounting_periods(id),
+  tax_reconciliation_id UUID REFERENCES finance.tax_reconciliations(id),
+
+  -- What type of return
+  tax_type          TEXT NOT NULL DEFAULT 'corporate'
+                    CHECK (tax_type IN ('corporate', 'sales', 'withholding', 'presumptive')),
+
+  -- Filing period
+  tax_year          TEXT NOT NULL,
+  period_start      DATE NOT NULL,
+  period_end        DATE NOT NULL,
+
+  -- Filing status workflow
+  status            TEXT NOT NULL DEFAULT 'DRAFT'
+                    CHECK (status IN (
+                      'DRAFT', 'PREPARED', 'UNDER_REVIEW', 'APPROVED',
+                      'FILED', 'ACKNOWLEDGED', 'ASSESSED', 'ADJUSTED', 'CANCELLED'
+                    )),
+
+  -- Filing details
+  filing_reference  TEXT,            -- FBR acknowledgement / PRS number
+  filing_date       DATE,
+  due_date          DATE,
+  acknowledged_date DATE,
+  assessed_date     DATE,
+
+  -- Amounts declared on the return
+  declared_income       NUMERIC(18,2) DEFAULT 0,
+  declared_taxable      NUMERIC(18,2) DEFAULT 0,
+  declared_tax          NUMERIC(18,2) DEFAULT 0,
+  declared_wht_credits  NUMERIC(18,2) DEFAULT 0,
+  declared_net_payable  NUMERIC(18,2) DEFAULT 0,
+
+  -- Assessment results (filled after FBR processes)
+  assessed_income       NUMERIC(18,2),
+  assessed_tax          NUMERIC(18,2),
+  assessed_penalty      NUMERIC(18,2) DEFAULT 0,
+  assessed_surcharge    NUMERIC(18,2) DEFAULT 0,
+  assessed_total_due    NUMERIC(18,2),
+
+  -- Workflow
+  prepared_by       UUID,
+  prepared_at       TIMESTAMPTZ,
+  reviewed_by       UUID,
+  reviewed_at       TIMESTAMPTZ,
+  approved_by       UUID,
+  approved_at       TIMESTAMPTZ,
+
+  -- Attachments / evidence
+  attachment_ids    UUID[],
+  filing_json       JSONB,           -- full return payload for audit
+
+  notes             TEXT,
+  created_by        UUID,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_tax_ret_org     ON finance.tax_returns(organization_id);
+CREATE INDEX idx_tax_ret_fy      ON finance.tax_returns(fiscal_year_id);
+CREATE INDEX idx_tax_ret_period  ON finance.tax_returns(period_id);
+CREATE INDEX idx_tax_ret_status  ON finance.tax_returns(status);
+CREATE INDEX idx_tax_ret_type    ON finance.tax_returns(tax_type);
+CREATE INDEX idx_tax_ret_recon   ON finance.tax_returns(tax_reconciliation_id);
+
+ALTER TABLE finance.tax_returns ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "tax_ret_select" ON finance.tax_returns
+  FOR SELECT TO authenticated
+  USING (organization_id = (SELECT id FROM core.organization_config LIMIT 1));
+CREATE POLICY "tax_ret_insert" ON finance.tax_returns
+  FOR INSERT TO authenticated
+  WITH CHECK (organization_id = (SELECT id FROM core.organization_config LIMIT 1));
+CREATE POLICY "tax_ret_update" ON finance.tax_returns
+  FOR UPDATE TO authenticated
+  USING (organization_id = (SELECT id FROM core.organization_config LIMIT 1));
+CREATE POLICY "tax_ret_delete" ON finance.tax_returns
+  FOR DELETE TO authenticated
+  USING (organization_id = (SELECT id FROM core.organization_config LIMIT 1));
+CREATE POLICY "tax_ret_service" ON finance.tax_returns FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+-- =================================================================
 -- 1. finance.tax_computations
 -- Stores the computed tax liability for each period/type.
 -- Populated by the tax computation engine, reviewed before filing.
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
 CREATE TABLE IF NOT EXISTS finance.tax_computations (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES core.organization_config(id),
@@ -82,10 +174,10 @@ CREATE POLICY "tax_comp_delete" ON finance.tax_computations
   USING (organization_id = (SELECT id FROM core.organization_config LIMIT 1));
 CREATE POLICY "tax_comp_service" ON finance.tax_computations FOR ALL TO service_role USING (true) WITH CHECK (true);
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
 -- 2. finance.tax_credits_and_withholding
 -- WHT deductions received, tax credits, and withholding adjustments.
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
 CREATE TABLE IF NOT EXISTS finance.tax_credits_and_withholding (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES core.organization_config(id),
@@ -153,10 +245,10 @@ CREATE POLICY "tax_cw_delete" ON finance.tax_credits_and_withholding
   USING (organization_id = (SELECT id FROM core.organization_config LIMIT 1));
 CREATE POLICY "tax_cw_service" ON finance.tax_credits_and_withholding FOR ALL TO service_role USING (true) WITH CHECK (true);
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
 -- 3. finance.tax_payments_and_refunds
 -- Actual tax payments made to FBR and refunds received.
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
 CREATE TABLE IF NOT EXISTS finance.tax_payments_and_refunds (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id UUID NOT NULL REFERENCES core.organization_config(id),
@@ -223,9 +315,13 @@ CREATE POLICY "tax_pay_delete" ON finance.tax_payments_and_refunds
   USING (organization_id = (SELECT id FROM core.organization_config LIMIT 1));
 CREATE POLICY "tax_pay_service" ON finance.tax_payments_and_refunds FOR ALL TO service_role USING (true) WITH CHECK (true);
 
--- ═══════════════════════════════════════════════════════════════════════════
--- Attach audit triggers to all 3 new tables
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
+-- Attach audit triggers to all 4 tables (including tax_returns)
+-- =================================================================
+CREATE TRIGGER tax_returns_audit
+  AFTER INSERT OR UPDATE OR DELETE ON finance.tax_returns
+  FOR EACH ROW EXECUTE FUNCTION audit.trigger_audit_log();
+
 CREATE TRIGGER tax_computations_audit
   AFTER INSERT OR UPDATE OR DELETE ON finance.tax_computations
   FOR EACH ROW EXECUTE FUNCTION audit.trigger_audit_log();
@@ -238,27 +334,21 @@ CREATE TRIGGER tax_payments_ref_audit
   AFTER INSERT OR UPDATE OR DELETE ON finance.tax_payments_and_refunds
   FOR EACH ROW EXECUTE FUNCTION audit.trigger_audit_log();
 
--- ═══════════════════════════════════════════════════════════════════════════
--- Also add trigger to tax_returns (was missing even though table existed)
--- ═══════════════════════════════════════════════════════════════════════════
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_trigger t
-    JOIN pg_class c ON c.oid = t.tgrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'finance' AND c.relname = 'tax_returns' AND t.tgname = 'tax_returns_audit'
-  ) THEN
-    CREATE TRIGGER tax_returns_audit
-      AFTER INSERT OR UPDATE OR DELETE ON finance.tax_returns
-      FOR EACH ROW EXECUTE FUNCTION audit.trigger_audit_log();
-    RAISE NOTICE 'Attached audit trigger to finance.tax_returns';
-  END IF;
-END $$;
+-- =================================================================
+-- Auto updated_at triggers for all 4 tables
+-- =================================================================
+CREATE TRIGGER tax_ret_uat BEFORE UPDATE ON finance.tax_returns
+  FOR EACH ROW EXECUTE FUNCTION finance.fn_tax_updated_at();
+CREATE TRIGGER tax_comp_uat BEFORE UPDATE ON finance.tax_computations
+  FOR EACH ROW EXECUTE FUNCTION finance.fn_tax_updated_at();
+CREATE TRIGGER tax_cw_uat BEFORE UPDATE ON finance.tax_credits_and_withholding
+  FOR EACH ROW EXECUTE FUNCTION finance.fn_tax_updated_at();
+CREATE TRIGGER tax_pay_uat BEFORE UPDATE ON finance.tax_payments_and_refunds
+  FOR EACH ROW EXECUTE FUNCTION finance.fn_tax_updated_at();
 
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
 -- Permissions (aligned with existing TAX_* permissions from 012c)
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
 -- Permissions are already handled by the org-scoped RLS above.
 -- If you want column-level grants for specific roles, add them here.
 

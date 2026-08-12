@@ -6,6 +6,7 @@ import { useTheme } from "@/context/ThemeContext"; // IMPORT KIYA
 import Sidebar from "@/components/sections/Sidebar";
 import TopNavbar from "@/components/sections/TopNavbar";
 import { ShieldAlert } from "lucide-react";
+import { ErrorBoundary } from "@/components/ErrorBoundary"; // FIX 9.3: Error Boundary
 
 const ADMIN_ONLY_ROUTES = [
   "/dashboard/admin",
@@ -62,7 +63,10 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           toggleTheme={toggleTheme}
         />
         <main className="flex-1 p-6 overflow-y-auto bg-gray-50 dark:bg-gray-900 transition-colors">
-          {children}
+          {/* FIX 9.3: Error Boundary wraps all dashboard content to prevent white-screen crashes */}
+          <ErrorBoundary>
+            {children}
+          </ErrorBoundary>
         </main>
       </div>
     </div>

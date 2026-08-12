@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { requirePermission } from '@/lib/api-auth';
 import { checkBudgetForTransaction, createBudgetAlertNotifications } from '@/services/budget-check.service';
+import { postExpenseSchema, validateBody } from '@/lib/validations';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -19,10 +20,13 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { expenseId, force_budget_override } = await req.json();
-    if (!expenseId) {
-      return NextResponse.json({ error: 'expenseId required' }, { status: 400 });
+    // P0 FIX: Zod input validation
+    const rawBody = await req.json();
+    const validation = validateBody(postExpenseSchema, rawBody);
+    if (!validation.success) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
     }
+    const { expenseId, force_budget_override } = validation.data;
 
     // 1. Fetch expense (with org isolation)
     const expense = getData(await supabase

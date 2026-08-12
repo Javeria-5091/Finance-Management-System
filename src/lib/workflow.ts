@@ -37,8 +37,8 @@ export async function postJournal(journalId: string) {
   try {
     const cookieStore = await cookies();
     const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || '';
-    // FIXED: URL typo — actual file is post-journel (misspelled in route)
-    const res = await fetch(`${baseUrl}/api/finance/post-journel`, {
+    // FIX Bug 8.2: URL was 'post-journel' (misspelled). Corrected to 'post-journal'.
+    const res = await fetch(`${baseUrl}/api/finance/post-journal`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

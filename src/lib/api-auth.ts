@@ -111,12 +111,24 @@ export async function getAuthSupabase(req?: Request) {
   const header = req?.headers.get('authorization');
   const bearer = header?.startsWith('Bearer ') ? header.slice(7) : null;
 
+  // FIX Bug 7.5: Proper setAll implementation for bearer token refresh.
+  // Previously setAll: () => {} meant refreshed tokens were never persisted.
+  const setAllCookies = (cookiesToSet: any[]) => {
+    try {
+      cookiesToSet.forEach(({ name, value, options }: any) =>
+        cookieStore.set(name, value, options)
+      );
+    } catch {
+      // Server Component — read-only cookies
+    }
+  };
+
   const supabase = bearer
     ? createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
         global: { headers: { Authorization: `Bearer ${bearer}` } },
       })
     : createServerClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
-        cookies: { getAll: () => cookieStore.getAll(), setAll: () => {} },
+        cookies: { getAll: () => cookieStore.getAll(), setAll: setAllCookies },
       });
 
   const { data, error } = await supabase.auth.getUser();
@@ -136,7 +148,7 @@ export async function requirePermission(requiredPerm: string): Promise<AuthResul
     const supabase = createServerClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      { cookies: { getAll: async () => (await cookies()).getAll(), setAll: () => {} } }
+      { cookies: { getAll: async () => (await cookies()).getAll(), setAll: (c: any) => { try { c.forEach((cookie: any) => cookieStore.set(cookie.name, cookie.value)); } catch {} } } }
     );
 
     // Try RPC first
@@ -305,12 +317,9 @@ export async function isSqlSafe(sql: string): Promise<{ safe: boolean; reason: s
 export function injectScope(sql: string, orgId: string, userId: string, enforceUserScope: boolean): string {
   const cleanSql = sql.replace(/;\s*$/, '').trim();
 
-  // ✅ FIX: execute_ai_readonly_query does `EXECUTE query_string INTO result`
-  // into a `jsonb` variable, so the final query MUST return a single jsonb
-  // value (one row, one column) — never a raw multi-column/multi-row SELECT.
-  // Without the jsonb_agg wrapper this always failed with
-  // "Query execution failed", regardless of whether the underlying
-  // view/table existed or had data.
+  // SECURITY FIX: Use parameterized query via EXECUTE ... USING instead of
+  // string interpolation of userId. This prevents SQL injection even if
+  // AST validation is bypassed.
   return `
     SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
       WITH llm_query AS (
@@ -318,10 +327,16 @@ export function injectScope(sql: string, orgId: string, userId: string, enforceU
       )
       SELECT * FROM llm_query
       WHERE 1=1
-      ${enforceUserScope ? `AND user_id = '${userId}'` : ''}
+      ${enforceUserScope ? 'AND user_id = $1' : ''}
       LIMIT 200
     ) t;
   `;
+}
+
+// Parameter values for the injected scope query
+// Returns parameters to pass to EXECUTE ... USING
+export function getScopeParams(userId: string, enforceUserScope: boolean): any[] {
+  return enforceUserScope ? [userId] : [];
 }
 
 // ---------- AI Daily Limit Check (Spec 9.11) ----------
@@ -365,6 +380,9 @@ export async function checkAiDailyLimit(
     return { allowed: true, reason: '' };
   } catch (err: any) {
     console.error('checkAiDailyLimit unexpected error:', err.message);
-    return { allowed: true, reason: '' };
+    // SECURITY FIX: On error, DENY access instead of allowing.
+    // Previously returned { allowed: true } which meant any DB error
+    // completely bypassed rate limiting → unlimited AI requests.
+    return { allowed: false, reason: 'Rate limit check failed. Please try again later.' };
   }
 }

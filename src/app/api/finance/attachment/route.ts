@@ -94,13 +94,20 @@ export async function POST(req: NextRequest) {
       if (fileBase64 && FILE_SIGNATURES[fileType]) {
         const sigCheck = validateFileSignature(fileBase64, fileType);
         if (!sigCheck.valid) {
-          // Audit the rejected file
+          // Audit the rejected file — FIX 8.1: Use audit.log_action() RPC, not direct insert.
+          // The audit.audit_log table does not have 'module' or 'details' columns.
           try {
-            await supabase.from('audit.audit_log').insert({
-              user_id: auth.userId,
-              action: 'ATTACHMENT_REJECTED_CORRUPT',
-              module: 'ATTACHMENT',
-              details: JSON.stringify({ entityType, entityId, fileName, fileType, reason: sigCheck.reason }),
+            await supabase.schema('audit').rpc('log_action', {
+              p_user_id: auth.userId,
+              p_action: 'ATTACHMENT_REJECTED_CORRUPT',
+              p_entity_type: 'attachment',
+              p_entity_id: entityId || 'unknown',
+              p_description: `Corrupted file rejected: ${fileName} (${fileType}). ${sigCheck.reason}`,
+              p_previous_status: null,
+              p_new_status: 'REJECTED',
+              p_source_module: 'attachment',
+              p_severity: 'medium',
+              p_new_values: { entityType, entityId, fileName, fileType, reason: sigCheck.reason },
             });
           } catch {}
           return NextResponse.json({ error: `File appears to be corrupted or not a valid ${fileType.split('/')[1].toUpperCase()}. ${sigCheck.reason}` }, { status: 400 });
@@ -114,11 +121,17 @@ export async function POST(req: NextRequest) {
         const isDuplicate = await checkDuplicateHash(fileHash, auth.orgId);
         if (isDuplicate) {
           try {
-            await supabase.from('audit.audit_log').insert({
-              user_id: auth.userId,
-              action: 'ATTACHMENT_REJECTED_DUPLICATE',
-              module: 'ATTACHMENT',
-              details: JSON.stringify({ entityType, entityId, fileName, fileHash }),
+            await supabase.schema('audit').rpc('log_action', {
+              p_user_id: auth.userId,
+              p_action: 'ATTACHMENT_REJECTED_DUPLICATE',
+              p_entity_type: 'attachment',
+              p_entity_id: entityId || 'unknown',
+              p_description: `Duplicate file rejected: ${fileName} (hash: ${fileHash?.slice(0,12)}...)`,
+              p_previous_status: null,
+              p_new_status: 'REJECTED',
+              p_source_module: 'attachment',
+              p_severity: 'low',
+              p_new_values: { entityType, entityId, fileName, fileHash },
             });
           } catch {}
           return NextResponse.json({ error: 'A file with identical content already exists. Duplicate attachment rejected.' }, { status: 409 });
@@ -136,13 +149,19 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'Failed to generate upload URL: ' + error.message }, { status: 500 });
       }
 
-      // Audit log with file hash
+      // Audit log with file hash — FIX 8.1: Use audit.log_action() RPC
       try {
-        await supabase.from('audit.audit_log').insert({
-          user_id: auth.userId,
-          action: 'ATTACHMENT_UPLOAD_INITIATED',
-          module: 'ATTACHMENT',
-          details: JSON.stringify({ entityType, entityId, fileName: safeName, fileType, path: storagePath, file_hash: fileHash }),
+        await supabase.schema('audit').rpc('log_action', {
+          p_user_id: auth.userId,
+          p_action: 'ATTACHMENT_UPLOAD_INITIATED',
+          p_entity_type: entityType,
+          p_entity_id: entityId,
+          p_description: `Upload initiated: ${safeName} (${fileType}) for ${entityType}/${entityId}`,
+          p_previous_status: null,
+          p_new_status: 'UPLOADING',
+          p_source_module: 'attachment',
+          p_severity: 'info',
+          p_new_values: { fileName: safeName, fileType, path: storagePath, file_hash: fileHash },
         });
 
         // Store hash in attachments table if it exists
@@ -177,11 +196,17 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        await supabase.from('audit.audit_log').insert({
-          user_id: auth.userId,
-          action: 'ATTACHMENT_DOWNLOADED',
-          module: 'ATTACHMENT',
-          details: JSON.stringify({ path: entityId }),
+        await supabase.schema('audit').rpc('log_action', {
+          p_user_id: auth.userId,
+          p_action: 'ATTACHMENT_DOWNLOADED',
+          p_entity_type: 'attachment',
+          p_entity_id: entityId,
+          p_description: `Attachment downloaded: ${entityId}`,
+          p_previous_status: null,
+          p_new_status: 'DOWNLOADED',
+          p_source_module: 'attachment',
+          p_severity: 'info',
+          p_new_values: { path: entityId },
         });
       } catch {}
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { requirePermission } from '@/lib/api-auth';
+import { yearEndCloseSchema, validateBody } from '@/lib/validations';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -21,11 +22,13 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { fiscal_year_id, description } = await req.json();
-
-    if (!fiscal_year_id) {
-      return NextResponse.json({ error: 'fiscal_year_id is required' }, { status: 400 });
+    // P0 FIX: Zod input validation (was manual/inconsistent before)
+    const rawBody = await req.json();
+    const validation = validateBody(yearEndCloseSchema, rawBody);
+    if (!validation.success) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
     }
+    const { fiscal_year_id, description } = validation.data;
 
     // ── 1. Fetch fiscal year (WITH org_id filter — Spec 4.2 FIX) ──
     const fiscalYear = getData(
@@ -109,18 +112,21 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 5. Get Retained Earnings account ──
+    // FIX Bug 3.1.3: Was .eq('code', 'account_type') which never matches.
+    // Now searches by EQUITY type + name containing 'Retained Earnings' or code '3000'.
     const retainedEarningsAccount = getData(
       await supabase
         .from('finance.chart_of_accounts')
         .select('id, code, name')
         .eq('account_type', 'EQUITY')
-        .eq('code', 'account_type' ) // Retained Earnings — adjust code as per your CoA
-        .eq('organization_id', orgId)   // ← SECURITY FIX
-        .single()
+        .eq('organization_id', orgId)
+        .or('code.eq.3000,name.ilike.%retained%earnings%')
+        .eq('is_active', true)
+        .maybeSingle()
     );
 
     if (!retainedEarningsAccount) {
-      return NextResponse.json({ error: 'Retained Earnings account (3000) not found' }, { status: 400 });
+      return NextResponse.json({ error: 'Retained Earnings account not found. Create an EQUITY account with code 3000 or name containing "Retained Earnings".' }, { status: 400 });
     }
 
     // ── 6. Build closing journal lines ──
@@ -134,6 +140,8 @@ export async function POST(req: NextRequest) {
     const journalLines: any[] = [];
     let lineNum = 1;
 
+    // FIX Bug 3.1.1: Use debit_amount/credit_amount (matching DB columns), not debit/credit.
+
     // DR Revenue accounts to zero them out
     for (const acct of revenueLines) {
       const balance = Math.abs(Number(acct.balance) || 0);
@@ -141,8 +149,8 @@ export async function POST(req: NextRequest) {
         journalLines.push({
           line_number: lineNum++,
           account_id: acct.account_id,
-          debit: balance,
-          credit: 0,
+          debit_amount: balance,
+          credit_amount: 0,
           description: `Year-End Close: Zero revenue account ${acct.account_code || acct.code}`,
         });
       }
@@ -155,8 +163,8 @@ export async function POST(req: NextRequest) {
         journalLines.push({
           line_number: lineNum++,
           account_id: acct.account_id,
-          debit: 0,
-          credit: balance,
+          debit_amount: 0,
+          credit_amount: balance,
           description: `Year-End Close: Zero expense account ${acct.account_code || acct.code}`,
         });
       }
@@ -168,8 +176,8 @@ export async function POST(req: NextRequest) {
       journalLines.push({
         line_number: lineNum++,
         account_id: retainedEarningsAccount.id,
-        debit: 0,
-        credit: netIncome,
+        debit_amount: 0,
+        credit_amount: netIncome,
         description: `Year-End Close: Transfer net profit to Retained Earnings`,
       });
     } else {
@@ -177,15 +185,16 @@ export async function POST(req: NextRequest) {
       journalLines.push({
         line_number: lineNum++,
         account_id: retainedEarningsAccount.id,
-        debit: Math.abs(netIncome),
-        credit: 0,
+        debit_amount: Math.abs(netIncome),
+        credit_amount: 0,
         description: `Year-End Close: Transfer net loss to Retained Earnings`,
       });
     }
 
-    // Verify balance
-    const totalDebit = journalLines.reduce((s: number, l: any) => s + l.debit_amount, 0);
-    const totalCredit = journalLines.reduce((s: number, l: any) => s + l.credit_amount, 0);
+    // FIX Bug 3.1.2: Balance check now reads correct property names (debit_amount/credit_amount).
+    // Previously read l.debit_amount but objects had l.debit → always 0, so unbalanced entries passed.
+    const totalDebit = journalLines.reduce((s: number, l: any) => s + (Number(l.debit_amount) || 0), 0);
+    const totalCredit = journalLines.reduce((s: number, l: any) => s + (Number(l.credit_amount) || 0), 0);
     if (Math.abs(totalDebit - totalCredit) > 0.02) {
       return NextResponse.json({
         error: `Closing entry is unbalanced! Debit: ${totalDebit}, Credit: ${totalCredit}`,

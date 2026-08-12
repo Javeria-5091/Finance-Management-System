@@ -1,12 +1,11 @@
+// FIX 8.4: notification service now uses correct schema.
+// The notifications table lives in 'core' schema, not 'public'.
+// Using .schema('core') explicitly to avoid ambiguity.
+
 import { supabase } from '@/lib/supabase';
 import { getAuthUser } from '@/lib/api-auth';
 import { cookies } from 'next/headers';
 import { createServerClient } from '@supabase/ssr';
-
-// ─── Notification Service ───
-// Provides notification creation, retrieval, and management
-// Spec: Dashboards, exports, notifications, month-end closing
-// Used by: /api/notifications/route.ts, and can be called from any workflow/posting route
 
 function createDB() {
   return createServerClient(
@@ -22,16 +21,26 @@ export const notificationService = {
     userId: string;
     title: string;
     message: string;
-    type: 'APPROVAL_PENDING' | 'PAYMENT_DUE' | 'BUDGET_ALERT' | 'SYSTEM' | 'WORKFLOW' | 'REMINDER' | 'OVERDUE' | 'INFO';
-    priority?: 'low' | 'medium' | 'high' | 'urgent';
+    type: 'APPROVAL_PENDING' | 'PAYMENT_DUE' | 'BUDGET_ALERT' | 'SYSTEM' | 'WORKFLOW' | 'REMINDER' | 'OVERDUE' | 'INFO' | 'BUDGET_CAUTION' | 'BUDGET_WARNING' | 'BUDGET_BLOCKED' | 'BUDGET_EXCEEDED';
+    priority?: 'low' | 'medium' | 'high' | 'urgent' | 'info' | 'critical';
     actionUrl?: string;
     entityType?: string;
     entityId?: string;
     organizationId?: string;
+    // FIX 8.4: Additional fields for budget alert notifications (Spec 13.4)
+    recipientRoles?: string[];
+    sourceEntityType?: string;
+    sourceEntityId?: string;
+    relatedEntityType?: string;
+    relatedEntityId?: string;
+    triggeredBy?: string;
+    metadata?: any;
   }) {
     const db = createDB();
+    // FIX 8.4: Use .schema('core') explicitly — table is in core schema
     const { data, error } = await db
-      .from('core.notifications')
+      .schema('core')
+      .from('notifications')
       .insert({
         user_id: params.userId,
         title: params.title,
@@ -43,6 +52,13 @@ export const notificationService = {
         entity_id: params.entityId || null,
         is_read: false,
         organization_id: params.organizationId || null,
+        recipient_roles: params.recipientRoles || null,
+        source_entity_type: params.sourceEntityType || null,
+        source_entity_id: params.sourceEntityId || null,
+        related_entity_type: params.relatedEntityType || null,
+        related_entity_id: params.relatedEntityId || null,
+        triggered_by: params.triggeredBy || null,
+        metadata: params.metadata || null,
       })
       .select()
       .single();
@@ -117,8 +133,10 @@ export const notificationService = {
   // Get unread count for a user
   async getUnreadCount(userId: string): Promise<number> {
     const db = createDB();
+    // FIX 8.4: Use .schema('core') explicitly
     const { count } = await db
-      .from('core.notifications')
+      .schema('core')
+      .from('notifications')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', userId)
       .eq('is_read', false);
@@ -129,7 +147,8 @@ export const notificationService = {
   async markAsRead(notificationIds: string[], userId: string) {
     const db = createDB();
     const { error } = await db
-      .from('core.notifications')
+      .schema('core')
+      .from('notifications')
       .update({ is_read: true, read_at: new Date().toISOString() })
       .in('id', notificationIds)
       .eq('user_id', userId);
@@ -140,7 +159,8 @@ export const notificationService = {
   async markAllAsRead(userId: string) {
     const db = createDB();
     const { error } = await db
-      .from('core.notifications')
+      .schema('core')
+      .from('notifications')
       .update({ is_read: true, read_at: new Date().toISOString() })
       .eq('user_id', userId)
       .eq('is_read', false);

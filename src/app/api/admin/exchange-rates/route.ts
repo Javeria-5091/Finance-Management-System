@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
 
       for (const rate of rates) {
         const {
-          from_currency, to_currency, rate, effective_date,
+          from_currency, to_currency, rate:any, effective_date,
           source, valid_until, notes,
         } = rate;
 
