@@ -1,107 +1,210 @@
+// ============================================================
+// OSYSTIC FINANCE — AI Schema Reference
+// Concise schema for Text-to-SQL generation (Spec 9.5)
+// ONLY includes tables/views the AI is allowed to query.
+// ============================================================
 
-// ============================================================
-// OSYSTIC FINANCE MANAGEMENT SYSTEM — COMPLETE DATABASE SCHEMA
-// Version 1.3 | Aligned with Implementation Specification v1.3//
-//  Generated from actual schema.sql (69 tables, 6 schemas)// 
-// ============================================================//
-// SCHEMAS: core | finance | public | audit | ai | reporting (views)//
-// USAGE: This file is the AI reference schema for text-to-SQL.// 
-// Every table, column, type, constraint, and relationship is listed.// 
-// For type definitions, see src/types/*.ts files.//
-// ============================================================// 
-// IMPORTANT NAMING CONVENTIONS//
-// ============================================================// 
-// - Database columns: snake_case
-// - TypeScript types: PascalCase interfaces, camelCase fields//
-// - Enums: UPPER_SNAKE_CASE in DB, PascalCase in TS// 
-// - JSONB columns: marked with [JSONB]// 
-// - Generated columns: marked with [GENERATED]// 
-// - Views: listed separately in each schema section// 
-// ============================================================
-// export const DATABASE_SCHEMA = `
-// -- ============================================================
-// -- PART 1: CORE SCHEMA (Identity, Authorization, Organization)
-// ============================================================
-// -- Tables: organizations, organization_config, roles, permissions,
-// --          role_permissions, user_roles-- 
-// ============================================================
-// -- SCHEMA: core
-// -- ============================================================
-// -- 1.1 organizations-- Purpose: Company/legal entity master record
-// -- Organization-configurable, supports multi-org future
-// -- ============================================================
-// CREATE TABLE core.organizations (    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),    name            VARCHAR(100) NOT NULL,    legal_name      VARCHAR(200),    type            VARCHAR(50) NOT NULL DEFAULT 'COMPANY'        
-// -- COMPANY | SOLE_PROPRIETOR | PARTNERSHIP | AOP | OTHER,    tax_registration VARCHAR(100),    ntn             VARCHAR(50),    base_currency   VARCHAR(3) NOT NULL DEFAULT 'PKR',    timezone        VARCHAR(50) DEFAULT 'Asia/Karachi',    date_format     VARCHAR(20),    number_format   VARCHAR(20),    fiscal_year_start_month INTEGER NOT NULL DEFAULT 7,    
-// -- July for Pakistan (Jul-Jun fiscal year)    is_active       BOOLEAN NOT NULL DEFAULT true,    address         TEXT,    city            VARCHAR(100),    country         VARCHAR(100) DEFAULT 'Pakistan',    phone           VARCHAR(50),    email           VARCHAR(255),    website         VARCHAR(500),    logo_url        TEXT,    config          JSONB,  
-// -- [JSONB] extensible organization configuration    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),    updated_at      TIMESTAMPTZ);
-// -- 1.2 organization_config
-// -- Purpose: Active organization runtime configuration singleton
-// -- Fetched by apps for base_currency, timezone, formats, precision
-// -- ============================================================
-// CREATE TABLE core.organization_config (    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),    org_name                VARCHAR(200) NOT NULL,    base_currency           VARCHAR(3) NOT NULL DEFAULT 'PKR',    enabled_currencies      TEXT[] NOT NULL DEFAULT '{PKR,USD}',    timezone                VARCHAR(50) NOT NULL DEFAULT 'Asia/Karachi',    date_format             VARCHAR(20) NOT NULL DEFAULT 'DD/MM/YYYY',    number_format           VARCHAR(20) NOT NULL DEFAULT 'en-PK',    fiscal_year_start_month INTEGER NOT NULL DEFAULT 7,    fiscal_year_end_month   INTEGER NOT NULL DEFAULT 6,    decimal_precision       INTEGER NOT NULL DEFAULT 2,    rounding_method         VARCHAR(20) NOT NULL DEFAULT 'HALF_UP'        
-// -- HALF_UP | HALF_DOWN | CEILING | FLOOR | UP | DOWN,    logo_url                TEXT,    active                  BOOLEAN NOT NULL DEFAULT true,    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),    updated_at              TIMESTAMPTZ);
-// -- 1.3 roles
-// -- Purpose: Configurable RBAC roles with hierarchy level
-// -- System roles cannot be deleted
-// -- ============================================================
-// CREATE TABLE core.roles (    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),    name          VARCHAR(100) NOT NULL UNIQUE,  
-// -- CEO, FINANCE_HEAD, ACCOUNTANT, AUDITOR, HOD, PROJECT_MANAGER, TECHNICAL_ADMIN, EMPLOYEE, VIEWER    display_name  VARCHAR(200) NOT NULL,    description   TEXT,    is_system     BOOLEAN NOT NULL DEFAULT false,  
-// -- system_role flag: prevents deletion    level         INTEGER NOT NULL DEFAULT 0, 
-//  -- hierarchy: CEO=100, FINANCE_HEAD=80, ACCOUNTANT=60, AUDITOR=55, HOD=40, PM=20, TECH_ADMIN=15, EMPLOYEE=10, VIEWER=0    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),    updated_at    TIMESTAMPTZ);
-// -- 1.4 permissions-- Purpose: Atomic permission definitions
-// -- Each row = one action on one resource
-// -- ============================================================
-// CREATE TABLE core.permissions (    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),    code        VARCHAR(200) NOT NULL UNIQUE,  
-// -- e.g. 'expenses.create', 'invoices.approve', 'journals.post'    name        VARCHAR(200) NOT NULL,    module      VARCHAR(50) NOT NULL,  
-// -- expenses, invoices, journals, reports, etc.    action      VARCHAR(50) NOT NULL,  
-// -- create, read, update, delete, approve, post, export, etc.    description TEXT,    is_system   BOOLEAN NOT NULL DEFAULT false,  
-// -- sensitive flag for system-level permissions    created_at  TIMESTAMPTZ NOT NULL DEFAULT now());
-// -- 1.5 role_permissions
-// -- Purpose: Grants permissions to roles with data scope and amount limits
-// -- ============================================================
-// CREATE TABLE core.role_permissions (    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),    role_id       UUID NOT NULL REFERENCES core.roles(id) ON DELETE CASCADE,    permission_id UUID NOT NULL REFERENCES core.permissions(id) ON DELETE CASCADE,    data_scope    VARCHAR(20) NOT NULL DEFAULT 'ALL'        
-// -- OWN | DEPARTMENT | PROJECT | ALL,    amount_limit  NUMERIC(18,2),  
-// -- max_amount for approval authority (NULL = unlimited)    effective_from TIMESTAMPTZ NOT NULL DEFAULT now(),    effective_to   TIMESTAMPTZ,  
-// -- NULL = no expiry    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),    UNIQUE(role_id, permission_id));
-// -- 1.6 user_roles
-// -- Purpose: Effective-dated user-role assignments
-// -- Supports delegation (delegated_from) and activation
-// -- ============================================================
-// CREATE TABLE core.user_roles (    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),    user_id         UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,    role_id         UUID NOT NULL REFERENCES core.roles(id) ON DELETE CASCADE,    effective_from  TIMESTAMPTZ NOT NULL DEFAULT now(),    effective_to    TIMESTAMPTZ,  
-// -- NULL = no expiry    delegated_from  UUID REFERENCES auth.users(id),  
-// -- temporary approval delegation    is_active       BOOLEAN NOT NULL DEFAULT true,    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),    UNIQUE(user_id, role_id, effective_from));
-// -- ============================================================
-// -- PART 2: FINANCE SCHEMA (Core Accounting Engine)
-// -- ============================================================
-// -- Tables: chart_of_accounts, fiscal_years, accounting_periods,
-// --          journal_entries, journal_lines, financial_accounts,
-// --          exchange_rates, platforms, fee_rules, fee_tiers,
-// --          fee_computation_log,
-// --          vendors, vendor_bills, vendor_bill_lines,
-// --          vendor_payments, vendor_payment_allocations,
-// --          payment_receipts, payment_allocations, credit_notes,
-// --          invoices (via public view),
-// --          budgets, budget_lines,
-// --          tax tables, ownership tables,
-// --          fixed assets, depreciation, bank statements,
-// --          attachments, numbering_sequences, opening_balance_imports
-// -- ============================================================
-// -- SCHEMA: finance
-// -- ============================================================
-// -- 2.1 chart_of_accounts
-// -- Purpose: Ledger account master (Chart of Accounts)
-// -- Hierarchical via parent_id; supports control accounts
-// -- ============================================================
-// CREATE TABLE finance.chart_of_accounts (    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),    code                VARCHAR(50) NOT NULL UNIQUE,    name                VARCHAR(200) NOT NULL,    parent_id           UUID REFERENCES finance.chart_of_accounts(id),    account_type        VARCHAR(50) NOT NULL        
-// -- ASSET | LIABILITY | EQUITY | REVENUE | COST_OF_SALES | OPERATING_EXPENSE | OTHER_INCOME | OTHER_EXPENSE,    normal_balance      VARCHAR(10) NOT NULL  
-// -- DEBIT | CREDIT,    currency            VARCHAR(3) NOT NULL DEFAULT 'PKR',    is_active           BOOLEAN NOT NULL DEFAULT true,    posting_allowed      BOOLEAN NOT NULL DEFAULT true,    is_control_account  BOOLEAN NOT NULL DEFAULT false,  
-// -- e.g., AR Control, AP Control    report_mapping      VARCHAR(50),  
-// -- maps to P&L/BS line items for auto-report generation    description         TEXT,    display_order       INTEGER NOT NULL DEFAULT 0,    level               INTEGER NOT NULL DEFAULT 0,  
-// -- 0=root, 1=group, 2+=detail    created_by          UUID REFERENCES auth.users(id),    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),    updated_at          TIMESTAMPTZ);
-// -- 2.2 fiscal_years
-// -- Purpose: Fiscal-year lifecycle management
-// -- Status: OPEN -> SOFT_CLOSED -> HARD_CLOSED
-// -- Transition-year flag for custom date ranges
-// -- ============================================================
-// CREATE TABLE finance.fiscal_years (    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),    name              VARCHAR(100) NOT NULL,  
-// -- e.g. 
+export const DATABASE_SCHEMA = `
+-- ============================================================
+-- SCHEMA: reporting (READ-ONLY VIEWS)
+-- ============================================================
+
+-- Cash & bank balances
+CREATE VIEW reporting.v_cash_position AS
+  SELECT
+    account_id, account_name, institution_name, account_type, currency,
+    opening_balance, current_balance, current_balance_base,
+    base_currency, is_active, is_default, organization_id, data_as_of
+  FROM reporting.v_cash_position;
+
+-- Project revenue, cost, margin
+CREATE VIEW reporting.v_project_profitability AS
+  SELECT
+    project_id, project_name, client_name, project_status, user_id,
+    revenue, direct_cost, gross_profit, margin_percent,
+    organization_id, base_currency, data_as_of
+  FROM reporting.v_project_profitability;
+
+-- Tax computation: PBT, taxable income, tax liability
+CREATE VIEW reporting.v_tax_computation_summary AS
+  SELECT
+    tax_reconciliation_id, tax_year, fiscal_year_id,
+    accounting_profit_before_tax, taxable_income, net_tax_adjustments,
+    gross_tax_liability, withholding_credits, advance_tax_credits,
+    other_tax_credits, net_tax_payable, profit_after_tax,
+    effective_tax_rate, status, filing_date, filing_reference,
+    payment_date, tax_rule_set_name, organization_id
+  FROM reporting.v_tax_computation_summary;
+
+-- Full general ledger with running balance
+CREATE VIEW reporting.general_ledger AS
+  SELECT
+    journal_entry_id, journal_reference, journal_description,
+    transaction_date, posting_date, period_id, fiscal_year_id,
+    project_id, source_type, source_id,
+    line_id, line_number, account_id,
+    account_code, account_name, account_type, normal_balance,
+    line_description, debit_amount, credit_amount,
+    base_debit, base_credit, currency, exchange_rate,
+    running_balance
+  FROM reporting.general_ledger;
+
+-- Budget vs actual spending
+CREATE VIEW reporting.budget_vs_actual AS
+  SELECT
+    budget_id, budget_name, budget_category, budgeted_amount,
+    start_date, end_date, actual_amount, remaining_amount,
+    utilization_pct, project_id, project_name
+  FROM reporting.budget_vs_actual;
+
+-- Budget category summary
+CREATE VIEW reporting.budget_category_summary AS
+  SELECT
+    budget_id, budget_name, category, total_budgeted,
+    total_actual, variance, utilization_pct
+  FROM reporting.budget_category_summary;
+
+-- Vendor bill aging (current, 1-30, 31-60, 61-90, 90+ days)
+CREATE VIEW reporting.payable_aging AS
+  SELECT
+    bill_id, bill_number, vendor_id, vendor_name, project_id,
+    total_amount, amount_paid, outstanding_amount, due_date, bill_date, status,
+    current_amount, overdue_1_30_days, overdue_31_60_days,
+    overdue_61_90_days, overdue_over_90_days
+  FROM reporting.payable_aging;
+
+-- Invoice receivable aging
+CREATE VIEW reporting.receivable_aging AS
+  SELECT
+    invoice_id, invoice_number, client_name, project_id, currency,
+    total_amount, total_base_amount, amount_paid, paid_base_amount,
+    outstanding_amount, outstanding_base_amount, due_date, issue_date, status,
+    current_amount, overdue_1_30_days, overdue_31_60_days,
+    overdue_61_90_days, overdue_over_90_days
+  FROM reporting.receivable_aging;
+
+-- Bank reconciliation status
+CREATE VIEW reporting.reconciliation_summary AS
+  SELECT
+    financial_account_id, account_name, institution_name, currency,
+    masked_identifier, ledger_balance, statement_balance,
+    difference, last_reconciled_at, reconciliation_status, statement_date
+  FROM reporting.reconciliation_summary;
+
+-- Unreconciled bank lines
+CREATE VIEW reporting.unreconciled_lines AS
+  SELECT
+    id, financial_account_id, statement_date, description,
+    amount, type, reference, is_reconciled, matched_journal_line_id
+  FROM reporting.unreconciled_lines;
+
+-- Asset register with NBV
+CREATE VIEW reporting.v_asset_register AS
+  SELECT
+    asset_id, asset_name, category, acquisition_date, acquisition_cost,
+    accumulated_depreciation, net_book_value, status, location,
+    supplier, project_id, organization_id
+  FROM reporting.v_asset_register;
+
+-- Depreciation summary by period
+CREATE VIEW reporting.v_depreciation_summary AS
+  SELECT
+    fiscal_year_id, fiscal_year_name, period_id, period_name,
+    start_date, end_date, assets_depreciated, total_depreciation,
+    total_opening_nbv, total_closing_nbv, posted_count, pending_count
+  FROM reporting.v_depreciation_summary;
+
+-- ============================================================
+-- SCHEMA: finance (CORE ACCOUNTING TABLES)
+-- ============================================================
+
+-- Chart of Accounts
+CREATE TABLE finance.chart_of_accounts (
+  id UUID, code VARCHAR(50), name VARCHAR(200), parent_id UUID,
+  account_type VARCHAR(50),  -- ASSET|LIABILITY|EQUITY|REVENUE|COST_OF_SALES|OPERATING_EXPENSE|OTHER_INCOME|OTHER_EXPENSE
+  normal_balance VARCHAR(10),  -- DEBIT|CREDIT
+  currency VARCHAR(3), is_active BOOLEAN, posting_allowed BOOLEAN,
+  is_control_account BOOLEAN, report_mapping VARCHAR(50), description TEXT
+);
+
+-- Journal Entries (header)
+CREATE TABLE finance.journal_entries (
+  id UUID, reference VARCHAR(50), description TEXT,
+  transaction_date DATE, posting_date DATE,
+  period_id UUID, fiscal_year_id UUID,
+  project_id UUID, department_id UUID,
+  source_type VARCHAR(50),  -- INCOME|EXPENSE|INVOICE|PAYMENT|JOURNAL|CREDIT_NOTE|OPENING_BALANCE
+  source_id UUID,
+  currency VARCHAR(3), exchange_rate NUMERIC,
+  status VARCHAR(20),  -- DRAFT|POSTED|CANCELLED
+  posted_by UUID, created_by UUID, created_at TIMESTAMPTZ
+);
+
+-- Journal Lines (debit/credit)
+CREATE TABLE finance.journal_lines (
+  id UUID, journal_entry_id UUID, line_number INTEGER,
+  account_id UUID, description TEXT,
+  debit_amount NUMERIC, credit_amount NUMERIC,
+  base_debit NUMERIC, base_credit NUMERIC,
+  currency VARCHAR(3), exchange_rate NUMERIC
+);
+
+-- Financial Accounts (bank/cash)
+CREATE TABLE finance.financial_accounts (
+  id UUID, account_name VARCHAR(200), institution_name VARCHAR(100),
+  account_type VARCHAR(50),  -- BANK|CASH|WALLET
+  currency VARCHAR(3), opening_balance NUMERIC,
+  masked_identifier VARCHAR(50), is_active BOOLEAN, is_default BOOLEAN,
+  linked_ledger_account_id UUID, organization_id UUID
+);
+
+-- Fiscal Years
+CREATE TABLE finance.fiscal_years (
+  id UUID, name VARCHAR(100), start_date DATE, end_date DATE,
+  status VARCHAR(20),  -- OPEN|SOFT_CLOSED|HARD_CLOSED
+  description TEXT
+);
+
+-- Accounting Periods (monthly)
+CREATE TABLE finance.accounting_periods (
+  id UUID, fiscal_year_id UUID, period_number INTEGER,
+  name VARCHAR(100), start_date DATE, end_date DATE,
+  status VARCHAR(20)  -- PENDING|OPEN|SOFT_CLOSED|HARD_CLOSED
+);
+
+-- Vendor Bills
+CREATE TABLE finance.vendor_bills (
+  id UUID, bill_number VARCHAR(50), vendor_id UUID,
+  project_id UUID, total_amount NUMERIC, amount_paid NUMERIC,
+  outstanding_amount NUMERIC, due_date DATE, bill_date DATE,
+  status VARCHAR(20), currency VARCHAR(3), organization_id UUID
+);
+
+-- Vendors
+CREATE TABLE finance.vendors (
+  id UUID, name VARCHAR(200), ntn VARCHAR(50),
+  phone VARCHAR(50), email VARCHAR(255), city VARCHAR(100),
+  is_active BOOLEAN, organization_id UUID
+);
+
+-- Invoices (via public schema)
+CREATE TABLE public.invoices (
+  id UUID, invoice_number VARCHAR(50), client_name VARCHAR(200),
+  project_id UUID, currency VARCHAR(3), total_amount NUMERIC,
+  base_total_amount NUMERIC, amount_paid NUMERIC, base_amount_paid NUMERIC,
+  outstanding_amount NUMERIC, base_outstanding_amount NUMERIC,
+  due_date DATE, issue_date DATE, status VARCHAR(50), organization_id UUID
+);
+
+-- Projects
+CREATE TABLE public.projects (
+  id UUID, name VARCHAR(200), client_name VARCHAR(200),
+  status VARCHAR(50), user_id UUID, budget_id UUID, organization_id UUID
+);
+
+-- Budgets
+CREATE TABLE public.budgets (
+  id UUID, name VARCHAR(200), category VARCHAR(50),
+  total_amount NUMERIC, start_date DATE, end_date DATE, organization_id UUID
+);
+`;

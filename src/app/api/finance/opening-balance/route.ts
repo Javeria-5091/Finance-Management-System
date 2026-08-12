@@ -13,6 +13,13 @@ function db() {
 
 // P0: Opening Balance Import API
 // Accepts CSV rows and creates balanced opening journal entries
+//
+// BUG-001 FIX:
+//   OLD: Called `post_journal_entry` (missing `finance.` schema prefix) with wrong params:
+//     { p_reference, p_description, p_fiscal_period_id, p_journal_date, p_lines, p_source_type, p_source_id, p_organization_id }
+//   NEW: Calls `finance.post_journal_entry` with CORRECT signature:
+//     { p_description, p_transaction_date, p_period_id, p_lines, p_currency, p_exchange_rate, p_source_type, p_source_id, p_project_id, p_department_id }
+//   Also: Lines now use debit_amount/credit_amount (matching DB columns), not debit/credit.
 
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('JOURNAL_CREATE');
@@ -46,38 +53,62 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: `Opening balances must balance. Total Debit: ${totalDebit.toFixed(2)}, Total Credit: ${totalCredit.toFixed(2)}, Difference: ${(totalDebit - totalCredit).toFixed(2)}` }, { status: 400 });
       }
 
+      // Get open period for the fiscal year
+      let periodId: string | null = null;
+      if (fiscalYearId) {
+        const period = (await supabase
+          .from('finance.accounting_periods')
+          .select('id')
+          .eq('fiscal_year_id', fiscalYearId)
+          .eq('organization_id', auth.orgId)
+          .order('start_date', { ascending: true })
+          .limit(1)
+          .single()).data;
+        periodId = period?.id || null;
+      }
+
       // Get next batch number
       const { data: numData } = await supabase.rpc('get_next_number', {
-        p_sequence_code: 'OBI',
-        p_fiscal_year_id: fiscalYearId || null,
+        p_type: 'OBI',
       });
-      const batchId = numData || 'OBI-00001';
+      const batchId = numData || `OBI-${Date.now().toString().slice(-6)}`;
 
-      // Build journal lines
-      const journalLines = [];
-      let lineNum = 1;
+      // BUG-001 FIX: Build journal lines with CORRECT column names (debit_amount/credit_amount)
+      const rpcLines = [];
       for (const row of rows) {
-        const debit = Number(row.debit_amount) || 0;
-        const credit = Number(row.credit_amount) || 0;
+        const debit = Math.abs(Number(row.debit_amount) || 0);
+        const credit = Math.abs(Number(row.credit_amount) || 0);
 
         if (debit > 0) {
-          journalLines.push({ line_number: lineNum++, account_code: row.account_code, debit: debit, credit: 0, description: `Opening Balance - ${row.account_name || row.account_code}` });
+          rpcLines.push({
+            account_id: row.account_id || null,
+            account_code: row.account_code,
+            debit_amount: debit,
+            credit_amount: 0,
+            description: `Opening Balance - ${row.account_name || row.account_code}`,
+          });
         }
         if (credit > 0) {
-          journalLines.push({ line_number: lineNum++, account_code: row.account_code, debit: 0, credit: credit, description: `Opening Balance - ${row.account_name || row.account_code}` });
+          rpcLines.push({
+            account_id: row.account_id || null,
+            account_code: row.account_code,
+            debit_amount: 0,
+            credit_amount: credit,
+            description: `Opening Balance - ${row.account_name || row.account_code}`,
+          });
         }
       }
 
-      // Post via the posting engine
-      const { data: journalData, error: postErr } = await supabase.rpc('post_journal_entry', {
-        p_reference: batchId,
+      // BUG-001 FIX: Use `finance.post_journal_entry` (with schema prefix) and CORRECT parameter names
+      const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
         p_description: 'Opening Balance Import',
-        p_fiscal_period_id: fiscalYearId || null,
-        p_journal_date: new Date().toISOString().split('T')[0],
-        p_lines: journalLines,
+        p_transaction_date: new Date().toISOString().split('T')[0],
+        p_period_id: periodId,
+        p_lines: JSON.stringify(rpcLines),
+        p_currency: 'PKR',
+        p_exchange_rate: 1,
         p_source_type: 'OPENING_BALANCE',
         p_source_id: batchId,
-        p_organization_id: auth.orgId,
       });
 
       if (postErr) {
@@ -99,7 +130,7 @@ export async function POST(req: NextRequest) {
           base_amount: (Number(row.debit_amount) || Number(row.credit_amount) || 0) * (Number(row.exchange_rate) || 1),
           fiscal_year_id: fiscalYearId || null,
           status: 'IMPORTED',
-          journal_entry_id: journalData?.journal_id || null,
+          journal_entry_id: journalId || null,
           imported_by: auth.userId,
         });
       }
@@ -108,11 +139,11 @@ export async function POST(req: NextRequest) {
       try {
         await supabase.from('audit.audit_log').insert({
           user_id: auth.userId, action: 'OPENING_BALANCE_IMPORTED', module: 'ACCOUNTING',
-          details: JSON.stringify({ batch_id: batchId, rows: rows.length, total_debit: totalDebit, total_credit: totalCredit, journal_id: journalData?.journal_id }),
+          details: JSON.stringify({ batch_id: batchId, rows: rows.length, total_debit: totalDebit, total_credit: totalCredit, journal_id: journalId }),
         });
       } catch {}
 
-      return NextResponse.json({ success: true, batch_id: batchId, journal_id: journalData?.journal_id, message: `Opening balance imported: ${rows.length} accounts, balanced at PKR ${totalDebit.toLocaleString()}` });
+      return NextResponse.json({ success: true, batch_id: batchId, journal_id: journalId, message: `Opening balance imported: ${rows.length} accounts, balanced at PKR ${totalDebit.toLocaleString()}` });
     }
 
     if (action === 'preview') {

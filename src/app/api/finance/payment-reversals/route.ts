@@ -8,6 +8,8 @@ function getData<T = any>(res: any): T | null {
 
 // ─── POST: Reverse a posted payment (creates reversal journal entry) ───
 // Spec: Payment Reversal → DR Receivable, CR Bank/Cash (exact opposite of receipt)
+// BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
+//   with single atomic RPC call using correct signature.
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('APPROVE_INVOICE');
   if (auth instanceof NextResponse) return auth;
@@ -26,7 +28,7 @@ export async function POST(req: NextRequest) {
     // Fetch the original payment receipt
     const receipt = getData(await supabase
       .from('payment_receipts')
-      .select('*, journal_entry:finance.journal_entries(id, reference, journal_lines(account_id, debit_amount, credit_amount))')
+      .select('*, journal_entry:finance.journal_entries(id, reference, journal_lines(account_id, debit_amount, credit_amount, description))')
       .eq('id', payment_receipt_id)
       .eq('organization_id', auth.orgId)
       .single());
@@ -54,38 +56,6 @@ export async function POST(req: NextRequest) {
 
     const totalAmount = Number(receipt.amount);
 
-    // Generate reversal reference
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'JE-PMTREV' });
-    const reversalReference = numData || `JE-PMTREV-${Date.now()}`;
-
-    // Create reversal journal: DR Receivable, CR Bank/Cash (opposite of receipt)
-    const journal = getData(await supabase
-      .from('finance.journal_entries')
-      .insert({
-        reference: reversalReference,
-        description: `REVERSAL: Payment Receipt ${receipt.receipt_number} - ${reason}`,
-        status: 'APPROVED',
-        entry_date: new Date().toISOString().split('T')[0],
-        period_id: period.id,
-        source_type: 'PAYMENT_REVERSAL',
-        source_id: payment_receipt_id,
-        reversal_of_journal_id: receipt.journal_entry_id,
-        total_debit: totalAmount,
-        total_credit: totalAmount,
-        currency: receipt.currency || 'PKR',
-        exchange_rate: receipt.exchange_rate || 1,
-        created_by: auth.userId,
-        approved_by: auth.userId,
-        approved_at: new Date().toISOString(),
-        organization_id: auth.orgId,
-      })
-      .select()
-      .single());
-
-    if (!journal) {
-      return NextResponse.json({ error: 'Failed to create reversal journal entry' }, { status: 500 });
-    }
-
     // Get original journal lines to reverse
     const originalLines = getData(await supabase
       .from('finance.journal_lines')
@@ -93,38 +63,40 @@ export async function POST(req: NextRequest) {
       .eq('journal_entry_id', receipt.journal_entry_id));
 
     if (!originalLines || originalLines.length === 0) {
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'Original journal lines not found' }, { status: 500 });
+      return NextResponse.json({ error: 'Original journal lines not found for reversal' }, { status: 500 });
     }
 
-    // Create reversal lines (swap debit/credit)
-    const reversalLines = originalLines.map((line: any, idx: number) => ({
-      journal_entry_id: journal.id,
+    // BUG-001 FIX: Build reversal lines for RPC (swap debit/credit, no journal_entry_id needed)
+    const rpcLines = originalLines.map((line: any) => ({
       account_id: line.account_id,
-      debit_amount: Number(line.credit_amount), // Swap
-      credit_amount: Number(line.debit_amount), // Swap
+      debit_amount: Number(line.credit_amount),  // Swap: original credit → reversal debit
+      credit_amount: Number(line.debit_amount),   // Swap: original debit → reversal credit
       description: `REVERSAL: ${line.description}`,
-      line_number: idx + 1,
     }));
 
-    const linesError = (await supabase.from('finance.journal_lines').insert(reversalLines)).error;
-
-    if (linesError) {
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'Failed to create reversal journal lines' }, { status: 500 });
-    }
-
-    // Post the reversal
-    const { error: postErr } = await supabase.rpc('finance.post_journal_entry', {
-      p_journal_id: journal.id,
-      p_posted_by: auth.userId,
+    // BUG-001 FIX: Single atomic RPC call with CORRECT signature
+    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+      p_description: `REVERSAL: Payment Receipt ${receipt.receipt_number} - ${reason}`,
+      p_transaction_date: new Date().toISOString().split('T')[0],
+      p_period_id: period.id,
+      p_lines: JSON.stringify(rpcLines),
+      p_currency: receipt.currency || 'PKR',
+      p_exchange_rate: receipt.exchange_rate || 1,
+      p_source_type: 'PAYMENT_REVERSAL',
+      p_source_id: payment_receipt_id,
     });
 
-    if (postErr) {
-      await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal.id);
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'GL posting failed: ' + postErr.message }, { status: 500 });
+    if (postErr || !journalId) {
+      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
+
+    // Fetch the created journal to get reference
+    const journal = getData(await supabase
+      .from('finance.journal_entries')
+      .select('id, reference')
+      .eq('id', journalId)
+      .single());
+    const reversalReference = journal?.reference || `JE-PMTREV-${journalId}`;
 
     // Update receipt status
     await supabase.from('payment_receipts').update({
@@ -132,7 +104,7 @@ export async function POST(req: NextRequest) {
       reversed_at: new Date().toISOString(),
       reversed_by: auth.userId,
       reversal_reason: reason,
-      reversal_journal_id: journal.id,
+      reversal_journal_id: journalId,
     }).eq('id', payment_receipt_id);
 
     // Reverse invoice payment statuses

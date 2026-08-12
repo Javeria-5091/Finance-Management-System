@@ -98,74 +98,51 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // 6. Reference number (FIXED: use DB sequence)
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'JE-IN' });
-    const reference = numData || `JE-IN-${Date.now()}`;
-
-    // 7. Create journal header (FIXED: APPROVED first, then posting engine)
-    const journal = getData(await supabase
-      .from('finance.journal_entries')
-      .insert({
-        reference,
-        description: `Income: ${income.title}${income.project_id ? ' (Project)' : ''}`,
-        status: 'APPROVED',
-        entry_date: income.income_date,
-        period_id: period.id,
-        project_id: income.project_id,
-        source_type: 'INCOME',
-        source_id: incomeId,
-        total_debit: income.amount,
-        total_credit: income.amount,
-        created_by: auth.userId,
-        approved_by: auth.userId,
-        approved_at: new Date().toISOString(),
-      })
-      .select()
-      .single());
-    if (!journal) {
-      return NextResponse.json({ error: 'Failed to create journal entry' }, { status: 500 });
-    }
-
-    // 8. Create journal lines (double entry)
-    const linesError = (await supabase.from('finance.journal_lines').insert([
+    // 6-9. Post via GL engine (BUG-001 FIX: use RPC with CORRECT signature)
+    const journalLines = [
       {
-        journal_entry_id: journal.id,
         account_id: debitAccountId,
         debit_amount: income.amount,
         credit_amount: 0,
         description: `Receivable for: ${income.title}`,
       },
       {
-        journal_entry_id: journal.id,
         account_id: creditAccountId,
         debit_amount: 0,
         credit_amount: income.amount,
         description: `Revenue from: ${income.title}`,
       },
-    ])).error;
+    ];
 
-    if (linesError) {
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'Failed to create journal lines' }, { status: 500 });
-    }
-
-    // 9. Post via GL engine (FIXED: use posting engine)
-    const { error: postErr } = await supabase.rpc('finance.post_journal_entry', {
-      p_journal_id: journal.id,
-      p_posted_by: auth.userId,
+    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+      p_description: `Income: ${income.title}${income.project_id ? ' (Project)' : ''}`,
+      p_transaction_date: income.income_date,
+      p_period_id: period.id,
+      p_lines: JSON.stringify(journalLines),
+      p_currency: income.currency || 'PKR',
+      p_exchange_rate: income.exchange_rate || 1,
+      p_source_type: 'INCOME',
+      p_source_id: incomeId,
+      p_project_id: income.project_id || null,
     });
 
-    if (postErr) {
-      await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal.id);
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'GL posting failed: ' + postErr.message }, { status: 500 });
+    if (postErr || !journalId) {
+      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
+
+    // Fetch the created journal to get reference number
+    const journal = getData(await supabase
+      .from('finance.journal_entries')
+      .select('id, reference')
+      .eq('id', journalId)
+      .single());
+    const reference = journal?.reference || `JE-IN-${journalId}`;
 
     // 10. Update income status
     const { error: statusErr } = await supabase.from("incomes").update({
       status: 'POSTED',
       posted_at: new Date().toISOString(),
-      journal_entry_id: journal.id,
+      journal_entry_id: journalId,
       posted_by: auth.userId,
     }).eq("id", incomeId);
 

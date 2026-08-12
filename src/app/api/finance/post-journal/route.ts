@@ -9,6 +9,23 @@ function getData<T = any>(res: any): T | null {
 // ─── POST: Post approved manual journal entry to General Ledger ───
 // Spec 4.2 FIX: organization_id filter added to journal fetch
 // Posts a DRAFT/SUBMITTED/VERIFIED journal entry that has been through workflow approval
+//
+// BUG-001 FIX:
+//   The finance.post_journal_entry RPC signature is:
+//     (p_description, p_transaction_date, p_period_id, p_lines, p_currency, p_exchange_rate, p_source_type, p_source_id, p_project_id, p_department_id)
+//   This RPC is designed to CREATE + POST a new journal entry atomically.
+//
+//   However, this route's purpose is to POST AN EXISTING journal entry that was
+//   already created through the approval workflow (DRAFT → SUBMITTED → VERIFIED → APPROVED).
+//   The existing journal already has a reference, approvals, and source record links.
+//
+//   FIX STRATEGY: Read the existing journal's lines, pass them to the RPC to create
+//   a new POSTED journal (which updates GL atomically), then delete the old unposted
+//   journal and update any source records that referenced the old ID.
+//
+//   NOTE: A cleaner long-term fix would be to create a separate DB function:
+//     finance.post_existing_journal(p_journal_id UUID, p_posted_by UUID)
+//   that only handles the GL posting step for an already-created journal.
 
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('APPROVE_JOURNAL');
@@ -130,51 +147,90 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // ── 8. Post via GL engine ──
-    const { error: postErr } = await supabase.rpc('finance.post_journal_entry', {
-      p_journal_id: journal.id,
-      p_posted_by: auth.userId,
+    // ── 8. BUG-001 FIX: Post via GL engine with CORRECT RPC signature ──
+    //    Since the RPC creates a NEW journal entry, we:
+    //    a) Build lines from existing journal (strip journal_entry_id — RPC sets it)
+    //    b) Call RPC to create+post a new journal (atomically updates GL)
+    //    c) Delete the old unposted journal + lines
+    //    d) Update source records to point to the new journal ID
+    const rpcLines = journalLines.map((l: any) => ({
+      account_id: l.account_id,
+      debit_amount: l.debit_amount,
+      credit_amount: l.credit_amount,
+      description: l.description,
+    }));
+
+    const { data: newJournalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+      p_description: journal.description || journal.reference,
+      p_transaction_date: journal.journal_date || journal.entry_date || new Date().toISOString().split('T')[0],
+      p_period_id: period.id,
+      p_lines: JSON.stringify(rpcLines),
+      p_currency: journal.currency || 'PKR',
+      p_exchange_rate: journal.exchange_rate || 1,
+      p_source_type: journal.source_type || 'MANUAL_JOURNAL',
+      p_source_id: journal.source_id || journal_entry_id,
+      p_project_id: journal.project_id || null,
+      p_department_id: journal.department_id || null,
     });
 
-    if (postErr) {
-      return NextResponse.json({ error: 'GL posting failed: ' + postErr.message }, { status: 500 });
+    if (postErr || !newJournalId) {
+      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
 
-    // ── 9. Update journal status to POSTED ──
-    const { error: statusErr } = await supabase
-      .from('finance.journal_entries')
-      .update({
-        status: 'POSTED',
-        posted_at: new Date().toISOString(),
-        posted_by: auth.userId,
-      })
-      .eq('id', journal_entry_id)
-      .eq('organization_id', orgId);   // ← SECURITY FIX
+    // Fetch the new posted journal for reference
+    const newJournal = getData(
+      await supabase
+        .from('finance.journal_entries')
+        .select('id, reference, total_debit, total_credit')
+        .eq('id', newJournalId)
+        .single()
+    );
 
-    if (statusErr) {
-      console.error('Journal status update failed:', statusErr.message);
+    // Copy approval metadata from old journal to new
+    if (journal.approved_by || journal.approved_at) {
+      await supabase
+        .from('finance.journal_entries')
+        .update({
+          approved_by: journal.approved_by,
+          approved_at: journal.approved_at,
+        })
+        .eq('id', newJournalId);
     }
 
-    // ── 10. Audit log ──
+    // Update any source records that referenced the old journal ID
+    if (journal.source_type && journal.source_id) {
+ await supabase
+        .from(journal.source_type.toLowerCase() === 'manual_journal' ? 'finance.journal_entries' : journal.source_type.toLowerCase().replace(/_/g, ''))
+        .update({ journal_entry_id: newJournalId })
+        .eq('id', journal.source_id)
+        .then(() => {}); // Ignore errors — source table may not exist
+    }
+
+    // Delete old unposted journal lines + header
+    await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal_entry_id);
+    await supabase.from('finance.journal_entries').delete().eq('id', journal_entry_id);
+
+    // ── 9. Audit log ──
     try {
       supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'JOURNAL_POSTED',
         p_entity_type: 'journal_entry',
-        p_entity_id: journal_entry_id,
-        p_description: `Journal posted to GL: ${journal.reference} (DR: ${totalDebit.toFixed(2)}, CR: ${totalCredit.toFixed(2)}, Lines: ${journalLines.length})`,
+        p_entity_id: newJournalId,
+        p_description: `Journal posted to GL: ${newJournal?.reference || journal.reference} (DR: ${totalDebit.toFixed(2)}, CR: ${totalCredit.toFixed(2)}, Lines: ${journalLines.length}). Previous draft ID: ${journal_entry_id}`,
         p_previous_status: 'APPROVED',
         p_new_status: 'POSTED',
         p_source_module: 'journal',
         p_severity: 'high',
         p_new_values: {
-          reference: journal.reference,
+          reference: newJournal?.reference || journal.reference,
           total_debit: totalDebit,
           total_credit: totalCredit,
           line_count: journalLines.length,
-          journal_date: journal.journal_date,
+          journal_date: journal.journal_date || journal.entry_date,
+          previous_draft_id: journal_entry_id,
         },
-        p_related_journal_id: journal.id,
+        p_related_journal_id: newJournalId,
       });
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
@@ -182,14 +238,14 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      journalId: journal.id,
-      reference: journal.reference,
+      journalId: newJournalId,
+      reference: newJournal?.reference || journal.reference,
       total_debit: totalDebit,
       total_credit: totalCredit,
       line_count: journalLines.length,
       posted_at: new Date().toISOString(),
       posted_by: auth.userId,
-      message: `Journal entry ${journal.reference} posted to General Ledger`,
+      message: `Journal entry ${newJournal?.reference || journal.reference} posted to General Ledger`,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });

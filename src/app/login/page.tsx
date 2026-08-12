@@ -1,6 +1,6 @@
 "use client";
 import { useState, FormEvent } from "react";
-import { useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { logAudit } from "@/lib/logAction";
 import Button from "@/components/ui/Button";
@@ -8,7 +8,8 @@ import Input from "@/components/ui/Input";
 import Link from "next/link";
 
 export default function LoginPage() {
-  const router = useRouter();
+  const searchParams = useSearchParams();
+  const redirectTo = searchParams.get('redirect') || '/dashboard';
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -63,7 +64,10 @@ export default function LoginPage() {
 
       // ✅ AUDIT: Log successful login (Spec 8.2)
       logAudit.login();
-      router.push("/dashboard");
+      // FIX: window.location.href forces FULL page reload — middleware ko fresh
+      // cookies milte hain jo createBrowserClient ne set ki hain.
+      // router.push() soft navigation tha — cookies middleware tak nahi pahunchte the.
+      window.location.href = redirectTo;
     } catch (err: any) {
       // ✅ AUDIT: Log unexpected login error
       logAudit.loginFailed(email);
@@ -97,7 +101,7 @@ export default function LoginPage() {
       // ✅ AUDIT: Log MFA verification success + full login (Spec 8.2)
       logSecurityEventFromClient("MFA_VERIFICATION_SUCCESS", true, { factor_id: mfaFactorId });
       logAudit.login();
-      router.push("/dashboard");
+      window.location.href = redirectTo;
     } catch (err: any) {
       setError(err.message || "MFA verification failed");
     } finally {

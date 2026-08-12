@@ -209,7 +209,7 @@ Return ONLY the exact tool name or 'ad_hoc_sql' or 'refused'. No punctuation, no
         system: `You are OSYSTIC Finance AI. Generate a SINGLE read-only SELECT query.
 Schema: ${DATABASE_SCHEMA}
 CRITICAL RULES:
-1. ONLY query tables/views starting with 'reporting.' or 'finance.'. NEVER query 'core.', 'auth.', or 'audit.'.
+1. ONLY query tables/views starting with 'reporting.'. NEVER query 'core.', 'auth.', 'audit.', or 'finance.'.
 2. NEVER use = for text. Use ILIKE '%value%'.
 3. No semicolons, no comments, no explanations. Return ONLY the SQL string.
 4. Always include organization_id = '${orgId}' in your WHERE clause if the table has it.`,

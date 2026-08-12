@@ -138,116 +138,68 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // 5. Generate reference number
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'JE-INV' });
-    const reference = numData || `JE-INV-${Date.now()}`;
-
-    // 6. Build journal lines
+    // 5-9. Post via GL engine (BUG-001 FIX: use RPC with CORRECT signature)
     const totalAmount = Number(invoice.total_amount) || 0;
     const totalTax = Number(invoice.tax_amount) || 0;
     const subtotal = totalAmount - totalTax;
 
-    const journalLines: any[] = [];
-
-    // DR: Accounts Receivable (full amount including tax)
-    journalLines.push({
-      journal_entry_id: null, // Will be set after header creation
-      account_id: receivableAccount.id,
-      debit_amount: totalAmount,
-      credit_amount: 0,
-      description: `Receivable: Invoice ${invoice.invoice_number || invoiceId} - ${invoice.client_id ? `Client` : 'General'}`,
-      line_number: 1,
-    });
-
-    // CR: Revenue (subtotal excluding tax)
-    journalLines.push({
-      journal_entry_id: null,
-      account_id: revenueAccount.id,
-      debit_amount: 0,
-      credit_amount: subtotal,
-      description: `Revenue: Invoice ${invoice.invoice_number || invoiceId}`,
-      line_number: 2,
-    });
+    // Build journal lines for RPC (no journal_entry_id or line_number needed — RPC handles these)
+    const rpcLines: any[] = [
+      {
+        account_id: receivableAccount.id,
+        debit_amount: totalAmount,
+        credit_amount: 0,
+        description: `Receivable: Invoice ${invoice.invoice_number || invoiceId} - ${invoice.client_id ? 'Client' : 'General'}`,
+      },
+      {
+        account_id: revenueAccount.id,
+        debit_amount: 0,
+        credit_amount: subtotal,
+        description: `Revenue: Invoice ${invoice.invoice_number || invoiceId}`,
+      },
+    ];
 
     // CR: Tax Payable (if tax exists)
     if (totalTax > 0 && taxAccount) {
-      journalLines.push({
-        journal_entry_id: null,
+      rpcLines.push({
         account_id: taxAccount.id,
         debit_amount: 0,
         credit_amount: totalTax,
         description: `Tax: Invoice ${invoice.invoice_number || invoiceId}`,
-        line_number: 3,
       });
     }
 
-    // Validate balanced entry
-    const totalDebit = journalLines.reduce((sum, l) => sum + Number(l.debit_amount), 0);
-    const totalCredit = journalLines.reduce((sum, l) => sum + Number(l.credit_amount), 0);
-    if (Math.abs(totalDebit - totalCredit) > 0.02) {
-      return NextResponse.json({
-        error: `Journal entry does not balance. Debit: ${totalDebit}, Credit: ${totalCredit}`,
-      }, { status: 400 });
-    }
-
-    // 7. Create journal header
-    const journal = getData(await supabase
-      .from('finance.journal_entries')
-      .insert({
-        reference,
-        description: `Invoice: ${invoice.invoice_number || 'N/A'} - ${invoice.description || 'Sales Invoice'}`,
-        status: 'APPROVED',
-        entry_date: invoice.invoice_date || new Date().toISOString().split('T')[0],
-        period_id: period.id,
-        project_id: invoice.project_id || null,
-        source_type: 'INVOICE',
-        source_id: invoiceId,
-        total_debit: totalDebit,
-        total_credit: totalCredit,
-        currency: invoice.currency || 'PKR',
-        exchange_rate: invoice.exchange_rate || 1,
-        created_by: auth.userId,
-        approved_by: auth.userId,
-        approved_at: new Date().toISOString(),
-        organization_id: orgId,
-      })
-      .select()
-      .single());
-
-    if (!journal) {
-      return NextResponse.json({ error: 'Failed to create journal entry' }, { status: 500 });
-    }
-
-    // 8. Insert lines with journal_entry_id
-    const linesWithId = journalLines.map(line => ({
-      ...line,
-      journal_entry_id: journal.id,
-    }));
-
-    const linesError = (await supabase.from('finance.journal_lines').insert(linesWithId)).error;
-
-    if (linesError) {
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'Failed to create journal lines: ' + linesError.message }, { status: 500 });
-    }
-
-    // 9. Post via GL engine
-    const { error: postErr } = await supabase.rpc('finance.post_journal_entry', {
-      p_journal_id: journal.id,
-      p_posted_by: auth.userId,
+    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+      p_description: `Invoice: ${invoice.invoice_number || 'N/A'} - ${invoice.description || 'Sales Invoice'}`,
+      p_transaction_date: invoice.invoice_date || new Date().toISOString().split('T')[0],
+      p_period_id: period.id,
+      p_lines: JSON.stringify(rpcLines),
+      p_currency: invoice.currency || 'PKR',
+      p_exchange_rate: invoice.exchange_rate || 1,
+      p_source_type: 'INVOICE',
+      p_source_id: invoiceId,
+      p_project_id: invoice.project_id || null,
     });
 
-    if (postErr) {
-      await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal.id);
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'GL posting failed: ' + postErr.message }, { status: 500 });
+    if (postErr || !journalId) {
+      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
+
+    // Fetch the created journal to get reference and totals
+    const journal = getData(await supabase
+      .from('finance.journal_entries')
+      .select('id, reference, total_debit, total_credit')
+      .eq('id', journalId)
+      .single());
+    const reference = journal?.reference || `JE-INV-${journalId}`;
+    const totalDebit = journal?.total_debit || totalAmount;
+    const totalCredit = journal?.total_credit || totalAmount;
 
     // 10. Update invoice status
     const { error: statusErr } = await supabase.from('invoices').update({
       status: 'POSTED',
       posted_at: new Date().toISOString(),
-      journal_entry_id: journal.id,
+      journal_entry_id: journalId,
       posted_by: auth.userId,
     }).eq('id', invoiceId);
 

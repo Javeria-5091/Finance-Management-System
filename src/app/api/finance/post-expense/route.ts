@@ -191,76 +191,54 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // 6. Reference number (FIXED: use DB sequence instead of client-side increment)
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'JE-EX' });
-    const reference = numData || `JE-EX-${Date.now()}`;
-
-    // 7. Create journal header (FIXED: create as APPROVED, then post via engine)
-    const journal = getData(await supabase
-      .from('finance.journal_entries')
-      .insert({
-        reference,
-        description: `Expense: ${expense.title}${expense.category ? ` [${expense.category}]` : ''}`,
-        status: 'APPROVED', // Not POSTED yet — use posting engine
-        entry_date: expense.expense_date,
-        period_id: period.id,
-        project_id: expense.project_id,
-        source_type: 'EXPENSE',
-        source_id: expenseId,
-        total_debit: expense.amount,
-        total_credit: expense.amount,
-        created_by: auth.userId,
-        approved_by: auth.userId,
-        approved_at: new Date().toISOString(),
-      })
-      .select()
-      .single());
-    if (!journal) {
-      return NextResponse.json({ error: 'Failed to create journal entry' }, { status: 500 });
-    }
-
-    // 8. Create journal lines
-    const linesError = (await supabase.from('finance.journal_lines').insert([
+    // 6-9. Post via GL engine (BUG-001 FIX: use RPC with CORRECT signature)
+    // The RPC creates header + lines + sets POSTED status atomically.
+    // Previous code manually inserted header+lines then called RPC with wrong params.
+    const journalLines = [
       {
-        journal_entry_id: journal.id,
         account_id: expenseAccountId,
         debit_amount: expense.amount,
         credit_amount: 0,
         description: `Expense: ${expense.title}`,
       },
       {
-        journal_entry_id: journal.id,
         account_id: creditAccountId,
         debit_amount: 0,
         credit_amount: expense.amount,
         description: `Payable for: ${expense.title}`,
       },
-    ])).error;
+    ];
 
-    if (linesError) {
-      // Cleanup on failure
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'Failed to create journal lines' }, { status: 500 });
-    }
-
-    // 9. Post via GL engine (FIXED: use posting engine, not direct status update)
-    const { error: postErr } = await supabase.rpc('finance.post_journal_entry', {
-      p_journal_id: journal.id,
-      p_posted_by: auth.userId,
+    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+      p_description: `Expense: ${expense.title}${expense.category ? ` [${expense.category}]` : ''}`,
+      p_transaction_date: expense.expense_date,
+      p_period_id: period.id,
+      p_lines: JSON.stringify(journalLines),
+      p_currency: expense.currency || 'PKR',
+      p_exchange_rate: expense.exchange_rate || 1,
+      p_source_type: 'EXPENSE',
+      p_source_id: expenseId,
+      p_project_id: expense.project_id || null,
+      p_department_id: expense.department || null,
     });
 
-    if (postErr) {
-      // Rollback: delete lines and header
-      await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal.id);
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'GL posting failed: ' + postErr.message }, { status: 500 });
+    if (postErr || !journalId) {
+      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
+
+    // Fetch the created journal to get reference number
+    const journal = getData(await supabase
+      .from('finance.journal_entries')
+      .select('id, reference')
+      .eq('id', journalId)
+      .single());
+    const reference = journal?.reference || `JE-EX-${journalId}`;
 
     // 10. Update expense status
     const { error: statusErr } = await supabase.from("expenses").update({
       status: 'POSTED',
       posted_at: new Date().toISOString(),
-      journal_entry_id: journal.id,
+      journal_entry_id: journalId,
       posted_by: auth.userId,
     }).eq("id", expenseId);
 

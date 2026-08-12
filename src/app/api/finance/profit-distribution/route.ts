@@ -21,7 +21,8 @@ function getData<T = any>(res: any): T | null {
 //   CR Dividend Payable (total net after WHT)
 //   CR Withholding Tax Payable (total WHT)
 //
-// Each WHT amount is recorded in tax_credits_and_withholding for tax compliance
+// BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
+//   with single atomic RPC call using correct signature.
 
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('PROFIT_DISTRIBUTION_UPDATE');
@@ -113,60 +114,56 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (!result.journalData || !result.whtCalculation || !result.withholding_config || !result.journalLines) {
+    if (!result.journalLines || !result.whtCalculation || !result.withholding_config) {
       return NextResponse.json({ error: 'Incomplete WHT calculation result' }, { status: 500 });
     }
 
-    const journalData = result.journalData;
     const journalLines = result.journalLines;
     const whtCalculation = result.whtCalculation;
     const withholding_config = result.withholding_config;
 
-    // 5. Create journal header
+    // 5. Build RPC lines from service output (strip journal_entry_id — RPC handles it)
+    const rpcLines = journalLines.map((line: any) => ({
+      account_id: line.account_id,
+      debit_amount: line.debit_amount,
+      credit_amount: line.credit_amount,
+      description: line.description,
+    }));
+
+    // 6. BUG-001 FIX: Single atomic RPC call with CORRECT signature
+    //    (replaces: manual header insert + manual lines insert + wrong RPC)
+    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+      p_description: description || `Profit Distribution: ${distribution_id.slice(0, 8)}`,
+      p_transaction_date: distribution_date || new Date().toISOString().split('T')[0],
+      p_period_id: period.id,
+      p_lines: JSON.stringify(rpcLines),
+      p_currency: distribution.currency || 'PKR',
+      p_exchange_rate: distribution.exchange_rate || 1,
+      p_source_type: 'PROFIT_DISTRIBUTION',
+      p_source_id: distribution_id,
+    });
+
+    if (postErr || !journalId) {
+      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
+    }
+
+    // Fetch the created journal
     const journal = getData(
       await supabase
         .from('finance.journal_entries')
-        .insert(journalData)
-        .select()
+        .select('id, reference, total_debit, total_credit')
+        .eq('id', journalId)
         .single()
     );
+    const reference = journal?.reference || `JE-PD-${journalId}`;
 
-    if (!journal) {
-      return NextResponse.json({ error: 'Failed to create journal entry' }, { status: 500 });
-    }
-
-    // 6. Create journal lines
-    const linesWithId = journalLines.map(line => ({
-      ...line,
-      journal_entry_id: journal.id,
-    }));
-
-    const linesError = (await supabase.from('finance.journal_lines').insert(linesWithId)).error;
-
-    if (linesError) {
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'Failed to create journal lines: ' + linesError.message }, { status: 500 });
-    }
-
-    // 7. Post via GL engine
-    const { error: postErr } = await supabase.rpc('finance.post_journal_entry', {
-      p_journal_id: journal.id,
-      p_posted_by: auth.userId,
-    });
-
-    if (postErr) {
-      await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal.id);
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'GL posting failed: ' + postErr.message }, { status: 500 });
-    }
-
-    // 8. Update distribution status to POSTED
+    // 7. Update distribution status to POSTED
     const { error: statusErr } = await supabase
       .from('finance.distributions')
       .update({
         status: 'POSTED',
         posted_at: new Date().toISOString(),
-        journal_entry_id: journal.id,
+        journal_entry_id: journalId,
         posted_by: auth.userId,
         total_withholding_tax: whtCalculation.total_withholding_tax,
         total_net_payment: whtCalculation.total_net_payment,
@@ -177,7 +174,7 @@ export async function POST(req: NextRequest) {
       console.error('Distribution status update failed:', statusErr.message);
     }
 
-    // 9. Update distribution lines with WHT amounts
+    // 8. Update distribution lines with WHT amounts
     for (const line of whtCalculation.lines) {
       await supabase
         .from('finance.distribution_lines')
@@ -191,39 +188,39 @@ export async function POST(req: NextRequest) {
         .eq('owner_id', line.owner_id);
     }
 
-    // 10. Record WHT for tax compliance (Spec 2.10 — tax_credits_and_withholding)
+    // 9. Record WHT for tax compliance (Spec 2.10 — tax_credits_and_withholding)
     const whtRecord = await recordWithholdingForTaxCompliance(
       distribution_id,
       whtCalculation,
       orgId,
       auth.userId,
-      journal.id
+      journalId
     );
 
-    // 11. Audit log
+    // 10. Audit log
     try {
       supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'PROFIT_DISTRIBUTION_POSTED',
         p_entity_type: 'profit_distribution',
         p_entity_id: distribution_id,
-        p_description: `Posted profit distribution to GL: ${journalData.reference} (Gross: PKR ${whtCalculation.total_gross_amount.toLocaleString()}, WHT: PKR ${whtCalculation.total_withholding_tax.toLocaleString()}, Net: PKR ${whtCalculation.total_net_payment.toLocaleString()})`,
+        p_description: `Posted profit distribution to GL: ${reference} (Gross: PKR ${whtCalculation.total_gross_amount.toLocaleString()}, WHT: PKR ${whtCalculation.total_withholding_tax.toLocaleString()}, Net: PKR ${whtCalculation.total_net_payment.toLocaleString()})`,
         p_previous_status: 'APPROVED',
         p_new_status: 'POSTED',
         p_source_module: 'profit_distribution',
         p_severity: 'high',
         p_new_values: {
-          reference: journalData.reference,
+          reference,
           total_gross: whtCalculation.total_gross_amount,
           total_withholding_tax: whtCalculation.total_withholding_tax,
           total_net_payment: whtCalculation.total_net_payment,
-          journal_id: journal.id,
+          journal_id: journalId,
           withholding_rate: withholding_config.rate,
           owner_count: whtCalculation.lines.length,
           wht_exempt_count: whtCalculation.lines.filter(l => l.withholding_exempt).length,
           wht_compliance_recorded: whtRecord.success,
         },
-        p_related_journal_id: journal.id,
+        p_related_journal_id: journalId,
       });
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
@@ -231,10 +228,10 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      journalId: journal.id,
-      reference: journalData.reference,
-      totalDebit: journalData.total_debit,
-      totalCredit: journalData.total_credit,
+      journalId,
+      reference,
+      totalDebit: journal?.total_debit,
+      totalCredit: journal?.total_credit,
       withholding_tax: {
         enabled: withholding_config.enabled,
         rate: withholding_config.rate,
@@ -251,7 +248,7 @@ export async function POST(req: NextRequest) {
           withholding_exempt: l.withholding_exempt,
         })),
       },
-      message: `Profit distribution posted to GL: ${journalData.reference}`,
+      message: `Profit distribution posted to GL: ${reference}`,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });

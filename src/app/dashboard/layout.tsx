@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, ReactNode } from "react";
+import { useState, ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { useTheme } from "@/context/ThemeContext"; // IMPORT KIYA
@@ -20,11 +20,12 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
 
-  useEffect(() => {
-    if (!user && !authLoading) {
-      router.push("/login");
-    }
-  }, [user, authLoading, router]);
+  // FIX: Middleware already handles auth redirect to /login.
+  // Removing this useEffect because it caused a race condition:
+  // AuthContext takes time to sync session from cookies → user is temporarily null
+   // → this useEffect fired router.push("/login") before AuthContext finished loading
+   // → infinite redirect loop between login and dashboard.
+  // The middleware (src/middleware.ts) is the single source of truth for auth.
 
   // Wait for auth + profile to fully load before checking access
   if (authLoading || !user) return (

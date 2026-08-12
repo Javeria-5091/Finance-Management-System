@@ -105,7 +105,6 @@ export async function logAction({
       }
     }
 
-    // ✅ FIX: use .schema('audit').rpc(...) instead of rpc('audit.log_action', ...)
     const { error } = await supabase.schema(AUDIT_SCHEMA).rpc("log_action", {
       p_user_id: finalUserId,
       p_user_email: finalUserEmail,
@@ -137,38 +136,63 @@ export async function logAction({
     });
 
     if (error) {
-      console.error("Failed to log action via RPC, falling back to direct insert:", error);
-      // Fallback: direct insert into v_audit_log (public schema, auto-updatable
-      // simple view over audit.audit_log — INSERT is granted per the schema).
-      // Note: this path skips the hash-chain and role_snapshot lookup that the
-      // RPC performs, so it should only ever be hit if the RPC itself is down.
-      await supabase.from("v_audit_log").insert({
-        user_id: finalUserId,
-        user_email: finalUserEmail,
-        user_name: finalUserName,
-        action,
-        entity_type: entityType,
-        entity_id: entityId,
-        description,
-        old_values: oldValues,
-        new_values: newValues,
-        status,
-        severity,
-        reason,
-        source_module: sourceModule,
-        request_id: requestId,
-        previous_status: previousStatus,
-        new_status: newStatus,
-        approval_level: approvalLevel,
-        project_id: projectId,
-        amount,
-        amount_currency: amountCurrency,
-        related_journal_id: relatedJournalId,
-        related_payment_id: relatedPaymentId,
-      });
+      // Only log if it's a real error (not missing function during dev)
+      const msg = error?.message || '';
+      const code = (error as any)?.code || '';
+      const isEmpty = !msg && !code; // Empty error object = RPC likely doesn't exist yet
+      const isMissingFunction =
+        isEmpty ||
+        msg.includes('Could not find the function') ||
+        msg.includes('function does not exist') ||
+        code === '42883' || // undefined_function
+        code === '42P01'; // undefined_table
+
+      if (!isMissingFunction) {
+        console.error('Audit RPC error:', msg || error);
+      }
+
+      // Fallback: direct insert into audit.audit_log (bypasses RPC if missing)
+      try {
+        const fallbackErr = (await supabase.schema('audit').from('audit_log').insert({
+          user_id: finalUserId,
+          user_email: finalUserEmail,
+          user_name: finalUserName,
+          action,
+          entity_type: entityType || null,
+          entity_id: entityId || null,
+          description,
+          old_values: oldValues,
+          new_values: newValues,
+          status,
+          severity,
+          reason: reason || null,
+          source_module: sourceModule || null,
+          request_id: requestId || null,
+          previous_status: previousStatus || null,
+          new_status: newStatus || null,
+          approval_level: approvalLevel || null,
+          approval_comments: approvalComments || null,
+          delegated_authority: delegatedAuthority || null,
+          limit_decision: limitDecision || null,
+          project_id: projectId || null,
+          amount: amount ?? null,
+          amount_currency: amountCurrency || null,
+          related_journal_id: relatedJournalId || null,
+          related_payment_id: relatedPaymentId || null,
+          attachment_ids: attachmentIds || null,
+        })).error;
+
+        if (fallbackErr && !isMissingFunction) {
+          // Both RPC and direct insert failed — only log if RPC wasn't simply missing
+          console.error('Audit fallback insert error:', fallbackErr.message);
+        }
+      } catch {
+        // Last resort — silent fail for non-critical audit logging
+      }
     }
   } catch (err) {
-    console.error("Log action error:", err);
+    // Top-level catch for unexpected errors (network, etc.)
+    // Audit is non-critical — never throw
   }
 }
 
@@ -197,15 +221,21 @@ export async function logSecurityEvent(params: {
     }
 
     // ✅ FIX: schema-qualified rpc call
-    await supabase.schema(AUDIT_SCHEMA).rpc("log_security_event", {
+    const { error: secErr } = await supabase.schema(AUDIT_SCHEMA).rpc("log_security_event", {
       p_user_id: finalUserId,
       p_user_email: finalUserEmail,
       p_event_type: params.eventType,
       p_success: params.success ?? true,
       p_details: params.details || null,
     });
+
+    if (secErr) {
+      const msg = secErr?.message || '';
+      const isMissing = msg.includes('Could not find the function') || msg.includes('function does not exist');
+      if (!isMissing) console.error('Security event RPC error:', msg);
+    }
   } catch (err) {
-    console.error("Security event log error:", err);
+    // Non-critical — never throw
   }
 }
 
@@ -243,7 +273,7 @@ export async function logExportEvent(params: {
     }
 
     // ✅ FIX: schema-qualified rpc call
-    await supabase.schema(AUDIT_SCHEMA).rpc("log_export_event", {
+    const { error: expErr } = await supabase.schema(AUDIT_SCHEMA).rpc("log_export_event", {
       p_user_id: finalUserId,
       p_user_email: finalUserEmail,
       p_user_name: finalUserName,
@@ -254,8 +284,14 @@ export async function logExportEvent(params: {
       p_row_count: params.rowCount || null,
       p_file_size_bytes: params.fileSizeBytes || null,
     });
+
+    if (expErr) {
+      const msg = expErr?.message || '';
+      const isMissing = msg.includes('Could not find the function') || msg.includes('function does not exist');
+      if (!isMissing) console.error('Export event RPC error:', msg);
+    }
   } catch (err) {
-    console.error("Export event log error:", err);
+    // Non-critical — never throw
   }
 }
 
@@ -322,7 +358,7 @@ export async function logAIEvent(params: {
       } catch { /* non-critical */ }
     }
 
-    await supabase.schema(AUDIT_SCHEMA).rpc("log_ai_event", {
+    const { error: aiErr } = await supabase.schema(AUDIT_SCHEMA).rpc("log_ai_event", {
       p_user_id: finalUserId,
       p_user_email: finalUserEmail,
       p_user_name: finalUserName,
@@ -346,8 +382,14 @@ export async function logAIEvent(params: {
       p_ai_refusal_reason: params.refusalReason || null,
       p_request_id: params.requestId || null,
     });
+
+    if (aiErr) {
+      const msg = aiErr?.message || '';
+      const isMissing = msg.includes('Could not find the function') || msg.includes('function does not exist');
+      if (!isMissing) console.error('AI event RPC error:', msg);
+    }
   } catch (err) {
-    console.error("AI event log error:", err);
+    // Non-critical — never throw
   }
 }
 

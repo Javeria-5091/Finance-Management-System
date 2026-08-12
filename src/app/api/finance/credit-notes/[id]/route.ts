@@ -99,6 +99,9 @@ export async function PATCH(
 
 // ─── POST (sub-action): Post credit note to GL ───
 // Spec: Credit Note → DR Revenue, CR Receivable (reverse of invoice)
+// BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
+//   with single atomic RPC call using correct signature:
+//   finance.post_journal_entry(p_description, p_transaction_date, p_period_id, p_lines, p_currency, p_exchange_rate, p_source_type, p_source_id, p_project_id, p_department_id)
 export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -167,7 +170,7 @@ export async function POST(
       .single());
 
     if (!receivableAccount || !revenueAccount) {
-      return NextResponse.json({ error: 'Required accounts not found' }, { status: 400 });
+      return NextResponse.json({ error: 'Required accounts not found. Set up ASSET (Receivable) and REVENUE accounts.' }, { status: 400 });
     }
 
     // Get open period
@@ -185,75 +188,52 @@ export async function POST(
 
     const totalAmount = Number(creditNote.total_amount) || 0;
 
-    // Generate reference
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'JE-CN' });
-    const reference = numData || `JE-CN-${Date.now()}`;
-
-    // Create journal: DR Revenue, CR Receivable (reverse of invoice posting)
-    const journal = getData(await supabase
-      .from('finance.journal_entries')
-      .insert({
-        reference,
-        description: `Credit Note: ${creditNote.credit_note_number} - ${creditNote.reason}`,
-        status: 'APPROVED',
-        entry_date: new Date().toISOString().split('T')[0],
-        period_id: period.id,
-        source_type: 'CREDIT_NOTE',
-        source_id: id,
-        total_debit: totalAmount,
-        total_credit: totalAmount,
-        currency: creditNote.currency || 'PKR',
-        exchange_rate: creditNote.exchange_rate || 1,
-        created_by: auth.userId,
-        approved_by: auth.userId,
-        approved_at: new Date().toISOString(),
-        organization_id: auth.orgId,
-      })
-      .select()
-      .single());
-
-    if (!journal) {
-      return NextResponse.json({ error: 'Failed to create journal entry' }, { status: 500 });
-    }
-
-    const linesError = (await supabase.from('finance.journal_lines').insert([
+    // BUG-001 FIX: Build journal lines for RPC (no journal_entry_id needed — RPC handles it)
+    // Credit Note: DR Revenue (reverse), CR Receivable (reverse)
+    const rpcLines = [
       {
-        journal_entry_id: journal.id,
         account_id: revenueAccount.id,
         debit_amount: totalAmount,
         credit_amount: 0,
         description: `Revenue reversal: Credit Note ${creditNote.credit_note_number}`,
       },
       {
-        journal_entry_id: journal.id,
         account_id: receivableAccount.id,
         debit_amount: 0,
         credit_amount: totalAmount,
         description: `Receivable reduction: Credit Note ${creditNote.credit_note_number}`,
       },
-    ])).error;
+    ];
 
-    if (linesError) {
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'Failed to create journal lines' }, { status: 500 });
-    }
-
-    const { error: postErr } = await supabase.rpc('finance.post_journal_entry', {
-      p_journal_id: journal.id,
-      p_posted_by: auth.userId,
+    // BUG-001 FIX: Use RPC with CORRECT signature — creates header + lines + posts atomically
+    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+      p_description: `Credit Note: ${creditNote.credit_note_number} - ${creditNote.reason}`,
+      p_transaction_date: creditNote.credit_note_date || new Date().toISOString().split('T')[0],
+      p_period_id: period.id,
+      p_lines: JSON.stringify(rpcLines),
+      p_currency: creditNote.currency || 'PKR',
+      p_exchange_rate: creditNote.exchange_rate || 1,
+      p_source_type: 'CREDIT_NOTE',
+      p_source_id: id,
     });
 
-    if (postErr) {
-      await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal.id);
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'GL posting failed: ' + postErr.message }, { status: 500 });
+    if (postErr || !journalId) {
+      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
+
+    // Fetch the created journal to get reference number
+    const journal = getData(await supabase
+      .from('finance.journal_entries')
+      .select('id, reference')
+      .eq('id', journalId)
+      .single());
+    const reference = journal?.reference || `JE-CN-${journalId}`;
 
     // Update credit note status
     await supabase.from('credit_notes').update({
       status: 'POSTED',
       posted_at: new Date().toISOString(),
-      journal_entry_id: journal.id,
+      journal_entry_id: journalId,
       posted_by: auth.userId,
     }).eq('id', id);
 

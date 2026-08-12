@@ -53,6 +53,8 @@ export async function GET(req: NextRequest) {
 
 // ─── POST: Record a payment receipt and auto-post to GL ───
 // Spec: Payment received → DR Bank/Cash/Wallet, CR Accounts Receivable
+// BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
+//   with single atomic RPC call using correct signature.
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('APPROVE_INVOICE');
   if (auth instanceof NextResponse) return auth;
@@ -188,69 +190,46 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // Generate GL reference
-    const { data: glNumData } = await supabase.rpc('get_next_number', { p_type: 'JE-PMTR' });
-    const glReference = glNumData || `JE-PMTR-${Date.now()}`;
-
-    // Create journal entry: DR Bank/Cash, CR Receivable
-    const journal = getData(await supabase
-      .from('finance.journal_entries')
-      .insert({
-        reference: glReference,
-        description: `Payment Receipt: ${receiptNumber} from ${client.name}`,
-        status: 'APPROVED',
-        entry_date: received_date || new Date().toISOString().split('T')[0],
-        period_id: period.id,
-        source_type: 'PAYMENT_RECEIPT',
-        source_id: receiptNumber,
-        total_debit: paymentAmount,
-        total_credit: paymentAmount,
-        currency: currency || 'PKR',
-        exchange_rate: exchange_rate || 1,
-        created_by: auth.userId,
-        approved_by: auth.userId,
-        approved_at: new Date().toISOString(),
-        organization_id: auth.orgId,
-      })
-      .select()
-      .single());
-
-    if (!journal) {
-      return NextResponse.json({ error: 'Failed to create journal entry' }, { status: 500 });
-    }
-
-    const linesError = (await supabase.from('finance.journal_lines').insert([
+    // BUG-001 FIX: Build journal lines for RPC (no manual header/line inserts)
+    // Payment Receipt: DR Bank/Cash, CR Receivable
+    const rpcLines = [
       {
-        journal_entry_id: journal.id,
         account_id: debitAccountId,
         debit_amount: paymentAmount,
         credit_amount: 0,
         description: `Cash/Bank: Payment from ${client.name} - ${receiptNumber}`,
       },
       {
-        journal_entry_id: journal.id,
         account_id: receivableAccount.id,
         debit_amount: 0,
         credit_amount: paymentAmount,
         description: `Receivable reduced: Payment from ${client.name} - ${receiptNumber}`,
       },
-    ])).error;
+    ];
 
-    if (linesError) {
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'Failed to create journal lines' }, { status: 500 });
-    }
-
-    const { error: postErr } = await supabase.rpc('finance.post_journal_entry', {
-      p_journal_id: journal.id,
-      p_posted_by: auth.userId,
+    // BUG-001 FIX: Single atomic RPC call with CORRECT signature
+    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+      p_description: `Payment Receipt: ${receiptNumber} from ${client.name}`,
+      p_transaction_date: received_date || new Date().toISOString().split('T')[0],
+      p_period_id: period.id,
+      p_lines: JSON.stringify(rpcLines),
+      p_currency: currency || 'PKR',
+      p_exchange_rate: exchange_rate || 1,
+      p_source_type: 'PAYMENT_RECEIPT',
+      p_source_id: receiptNumber,
     });
 
-    if (postErr) {
-      await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal.id);
-      await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
-      return NextResponse.json({ error: 'GL posting failed: ' + postErr.message }, { status: 500 });
+    if (postErr || !journalId) {
+      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
+
+    // Fetch the created journal to get reference
+    const journal = getData(await supabase
+      .from('finance.journal_entries')
+      .select('id, reference')
+      .eq('id', journalId)
+      .single());
+    const glReference = journal?.reference || `JE-PMTR-${journalId}`;
 
     // Create payment receipt record
     const { data: receipt, error: receiptErr } = await supabase
@@ -269,7 +248,7 @@ export async function POST(req: NextRequest) {
         amount_allocated: totalAllocated,
         unallocated_amount: paymentAmount - totalAllocated,
         status: totalAllocated >= paymentAmount ? 'FULLY_ALLOCATED' : 'PARTIALLY_ALLOCATED',
-        journal_entry_id: journal.id,
+        journal_entry_id: journalId,
         organization_id: auth.orgId,
         created_by: auth.userId,
       })
@@ -340,7 +319,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      receipt: receipt,
+      receipt,
       journalId: journal.id,
       glReference,
       allocations: allocationRecords.length,
