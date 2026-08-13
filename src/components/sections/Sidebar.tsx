@@ -1,5 +1,5 @@
 "use client";
-
+ 
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -27,6 +27,7 @@ import {
   ArrowLeftRight,
   Scale,
   TrendingUp,
+  TrendingDown,
   Calculator,
   Shield,
   Landmark,
@@ -52,13 +53,13 @@ import {
   HardHat,
   Percent,
 } from "lucide-react";
-
+ 
 interface SidebarProps {
   open: boolean;
   onClose: () => void;
 }
-
-// ✅ ICON MAP - All icons used in navigation
+ 
+// ICON MAP - All icons used in navigation
 const ICONS: Record<string, any> = {
   LayoutDashboard,
   FolderKanban,
@@ -79,6 +80,7 @@ const ICONS: Record<string, any> = {
   ArrowLeftRight,
   Scale,
   TrendingUp,
+  TrendingDown,
   Calculator,
   Shield,
   Landmark,
@@ -99,8 +101,12 @@ const ICONS: Record<string, any> = {
   UsersRound,
   FileCheck,
   CircleDollarSign,
+  Banknote,
+  Repeat,
+  HardHat,
+  Percent,
 };
-
+ 
 interface NavItem {
   id: string;
   label: string;
@@ -109,14 +115,14 @@ interface NavItem {
   perm?: string;
   children?: NavItem[];
 }
-
+ 
 interface NavGroup {
   id: string;
   label: string;
   items: NavItem[];
 }
-
-// ✅ CORRECT PATHS - Only pages that actually exist in your file structure
+ 
+// CORRECT PATHS - Only pages that actually exist in your file structure
 // Based on: src/app/dashboard/
 const navGroups: NavGroup[] = [
   {
@@ -267,22 +273,22 @@ const navGroups: NavGroup[] = [
     ],
   },
 ];
-
+ 
 export default function Sidebar({ open, onClose }: SidebarProps) {
   const pathname = usePathname();
   const { role, profile, signOut } = useAuth();
   const { hasPermission, isLoading: permLoading } = usePermissions();
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
-
+ 
   const toggleGroup = (groupId: string) => {
     setCollapsedGroups((prev) => ({ ...prev, [groupId]: !prev[groupId] }));
   };
-
+ 
   const handleSignOut = async () => {
     await signOut();
     onClose();
   };
-
+ 
   // Filter items based on permission
   const filterItems = (items: NavItem[]): NavItem[] => {
     if (permLoading) return items;
@@ -291,7 +297,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
       return hasPermission(item.perm);
     });
   };
-
+ 
   // Filter groups - remove empty groups
   const visibleGroups = useMemo(() => {
     return navGroups
@@ -301,7 +307,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
       }))
       .filter((group) => group.items.length > 0);
   }, [permLoading, hasPermission]);
-
+ 
   return (
     <>
       {/* Mobile overlay */}
@@ -311,40 +317,29 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
           onClick={onClose}
         />
       )}
-
+ 
       <aside
         className={`fixed top-0 left-0 z-50 h-screen w-64 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transform transition-transform duration-300 lg:translate-x-0 lg:static lg:z-auto flex flex-col overflow-hidden ${
           open ? "translate-x-0" : "-translate-x-full"
         }`}
       >
-        {/* ===== HEADER ===== */}
+        {/* HEADER */}
         <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
-          <Link
-            href="/dashboard"
-            onClick={onClose}
-            className="flex items-center gap-2.5"
-          >
+          <Link href="/dashboard" onClick={onClose} className="flex items-center gap-2.5">
             <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
               <span className="text-white font-bold text-xs">O</span>
             </div>
             <div>
-              <h1 className="text-base font-bold text-gray-900 dark:text-white leading-tight">
-                OSYSTIC
-              </h1>
-              <p className="text-[10px] text-gray-500 dark:text-gray-400 leading-tight -mt-0.5">
-                Finance System
-              </p>
+              <h1 className="text-base font-bold text-gray-900 dark:text-white leading-tight">OSYSTIC</h1>
+              <p className="text-[10px] text-gray-500 dark:text-gray-400 leading-tight -mt-0.5">Finance System</p>
             </div>
           </Link>
-          <button
-            onClick={onClose}
-            className="lg:hidden p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500 transition-colors"
-          >
+          <button onClick={onClose} className="lg:hidden p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500 transition-colors">
             <X size={20} />
           </button>
         </div>
-
-        {/* ===== USER INFO ===== */}
+ 
+        {/* USER INFO */}
         {profile && (
           <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
             <div className="flex items-center gap-3">
@@ -364,53 +359,34 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
             </div>
           </div>
         )}
-
-        {/* ===== NAVIGATION ===== */}
+ 
+        {/* NAVIGATION */}
         <nav className="p-3 space-y-4 overflow-y-auto flex-1 min-h-0">
           {visibleGroups.map((group) => {
             const isCollapsed = collapsedGroups[group.id] || false;
-
             return (
               <div key={group.id}>
-                {/* Group header */}
                 <button
                   onClick={() => toggleGroup(group.id)}
                   className="flex items-center justify-between w-full px-2 py-1 text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
                 >
                   <span>{group.label}</span>
-                  {isCollapsed ? (
-                    <ChevronRight size={12} />
-                  ) : (
-                    <ChevronDown size={12} />
-                  )}
+                  {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                 </button>
-
-                {/* Group items */}
                 {!isCollapsed && (
                   <div className="mt-1 space-y-0.5">
                     {group.items.map((item) => {
                       const Icon = ICONS[item.icon] || FileText;
                       const isActive = pathname === item.path;
-
                       return (
-                        <Link
-                          key={item.id}
-                          href={item.path}
-                          onClick={onClose}
+                        <Link key={item.id} href={item.path} onClick={onClose}
                           className={`flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium transition-all duration-150 ${
                             isActive
                               ? "bg-blue-600 text-white shadow-md shadow-blue-600/20"
                               : "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10 hover:text-gray-900 dark:hover:text-white"
                           }`}
                         >
-                          <Icon
-                            size={18}
-                            className={`flex-shrink-0 ${
-                              isActive
-                                ? "text-white"
-                                : "text-gray-400 dark:text-gray-500"
-                            }`}
-                          />
+                          <Icon size={18} className={`flex-shrink-0 ${isActive ? "text-white" : "text-gray-400 dark:text-gray-500"}`} />
                           <span>{item.label}</span>
                         </Link>
                       );
@@ -421,13 +397,10 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
             );
           })}
         </nav>
-
-        {/* ===== FOOTER ===== */}
+ 
+        {/* FOOTER */}
         <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex-shrink-0 mt-auto">
-          <button
-            onClick={handleSignOut}
-            className="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-sm font-medium text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors"
-          >
+          <button onClick={handleSignOut} className="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-sm font-medium text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors">
             <LogOut size={18} /> Sign Out
           </button>
         </div>

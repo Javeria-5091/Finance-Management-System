@@ -1,24 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
 import { checkBudgetForTransaction, createBudgetAlertNotifications } from '@/services/budget-check.service';
 import { postExpenseSchema, validateBody } from '@/lib/validations';
-
+ 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
-
+ 
 export async function POST(req: NextRequest) {
   // ─── AUTH CHECK ───
   // FIXED: Use APPROVE permission, not CREATE — posting to GL requires approval-level access
   const auth = await requirePermission('APPROVE_EXPENSE');
   if (auth instanceof NextResponse) return auth;
-
+  // H3 FIX: Enforce MFA for financial posting
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
+  const { supabase } = await getAuthSupabase(req);
+ 
   const orgId = auth.orgId;
   if (!orgId) {
     return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
   }
-
+ 
   try {
     // P0 FIX: Zod input validation
     const rawBody = await req.json();
@@ -27,7 +32,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: validation.error }, { status: 400 });
     }
     const { expenseId, force_budget_override } = validation.data;
-
+ 
     // 1. Fetch expense (with org isolation)
     const expense = getData(await supabase
       .from("expenses")
@@ -41,7 +46,7 @@ export async function POST(req: NextRequest) {
     if (expense.status !== 'APPROVED') {
       return NextResponse.json({ error: 'Only APPROVED expenses can be posted. Current: ' + expense.status }, { status: 400 });
     }
-
+ 
     // 2. Already posted? (Idempotency check)
     const existingJournal = getData(await supabase
       .from('finance.journal_entries')
@@ -56,7 +61,7 @@ export async function POST(req: NextRequest) {
         reference: existingJournal.reference,
       }, { status: 400 });
     }
-
+ 
     // ─── BUDGET CHECK (Spec 5.4: Warn or block transactions exceeding budget) ───
     // Check budget before posting to GL. If HARD_BLOCK policy is active and budget
     // is exceeded, the transaction is rejected unless force_budget_override is provided
@@ -69,7 +74,7 @@ export async function POST(req: NextRequest) {
       currency: expense.currency || 'PKR',
       organization_id: orgId,
     });
-
+ 
     // Create budget threshold alert notifications (Spec 13.4)
     if (budgetCheck.notifications && budgetCheck.notifications.length > 0) {
       await createBudgetAlertNotifications(
@@ -79,13 +84,13 @@ export async function POST(req: NextRequest) {
         expenseId
       );
     }
-
+ 
     // Enforce budget block (unless overridden by authorized role)
     if (budgetCheck.blocked) {
       if (force_budget_override && ['CEO', 'FINANCE_HEAD', 'Admin'].includes(auth.role)) {
         // Allow with override — log the override in audit
         try {
-          supabase.schema('audit').rpc('log_action', {
+          await supabase.schema('audit').rpc('log_action', {
             p_user_id: auth.userId,
             p_action: 'BUDGET_OVERRIDE',
             p_entity_type: 'expense',
@@ -123,7 +128,7 @@ export async function POST(req: NextRequest) {
         }, { status: 422 });
       }
     }
-
+ 
     // 3. Open period
     const period = getData(await supabase
       .from('finance.accounting_periods')
@@ -135,7 +140,7 @@ export async function POST(req: NextRequest) {
     if (!period) {
       return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
     }
-
+ 
     // 4. Find expense account (FIXED: escape LIKE wildcards)
     let expenseAccountId: string | null = null;
     if (expense.category) {
@@ -150,7 +155,7 @@ export async function POST(req: NextRequest) {
         .single());
       expenseAccountId = matched?.id || null;
     }
-
+ 
     if (!expenseAccountId) {
       const opex = getData(await supabase
         .from('finance.chart_of_accounts')
@@ -161,7 +166,7 @@ export async function POST(req: NextRequest) {
         .single());
       expenseAccountId = opex?.id || null;
     }
-
+ 
     // 5. Payable / Liability account
     const payableAccount = getData(await supabase
       .from('finance.chart_of_accounts')
@@ -171,7 +176,7 @@ export async function POST(req: NextRequest) {
       .like('code', '21%')
       .limit(1)
       .single());
-
+ 
     let fallbackLiability = null;
     if (!payableAccount) {
       fallbackLiability = getData(await supabase
@@ -182,15 +187,15 @@ export async function POST(req: NextRequest) {
         .limit(1)
         .single());
     }
-
+ 
     const creditAccountId = payableAccount?.id || fallbackLiability?.id;
-
+ 
     if (!expenseAccountId || !creditAccountId) {
       return NextResponse.json({
         error: 'Required accounts not found. Set up OPERATING_EXPENSE and LIABILITY accounts.'
       }, { status: 400 });
     }
-
+ 
     // 6-9. Post via GL engine (BUG-001 FIX: use RPC with CORRECT signature)
     // The RPC creates header + lines + sets POSTED status atomically.
     // Previous code manually inserted header+lines then called RPC with wrong params.
@@ -208,7 +213,7 @@ export async function POST(req: NextRequest) {
         description: `Payable for: ${expense.title}`,
       },
     ];
-
+ 
     const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
       p_description: `Expense: ${expense.title}${expense.category ? ` [${expense.category}]` : ''}`,
       p_transaction_date: expense.expense_date,
@@ -221,19 +226,23 @@ export async function POST(req: NextRequest) {
       p_project_id: expense.project_id || null,
       p_department_id: expense.department || null,
     });
-
+ 
     if (postErr || !journalId) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
-
+ 
     // Fetch the created journal to get reference number
     const journal = getData(await supabase
       .from('finance.journal_entries')
       .select('id, reference')
       .eq('id', journalId)
       .single());
-    const reference = journal?.reference || `JE-EX-${journalId}`;
-
+    // C6 FIX: Null guard — journal may not exist if RPC returned bad ID
+    if (!journal) {
+      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
+    }
+    const reference = journal.reference || `JE-EX-${journalId}`;
+ 
     // 10. Update expense status
     const { error: statusErr } = await supabase.from("expenses").update({
       status: 'POSTED',
@@ -241,15 +250,15 @@ export async function POST(req: NextRequest) {
       journal_entry_id: journalId,
       posted_by: auth.userId,
     }).eq("id", expenseId);
-
+ 
     if (statusErr) {
       console.error('Expense status update failed after GL post:', statusErr.message);
       // GL entry exists but expense status not updated — manual reconciliation needed
     }
-
+ 
         //  FIX: Use RPC for correct audit columns
     try {
-      supabase.schema('audit').rpc('log_action', {
+await       supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'EXPENSE_POSTED',
         p_entity_type: 'expense',
@@ -271,7 +280,7 @@ export async function POST(req: NextRequest) {
     } catch (auditErr: any) {
       console.error('Audit log failed for expense post:', auditErr);
     }
-
+ 
     return NextResponse.json({
       success: true,
       journalId: journal.id,
@@ -279,7 +288,7 @@ export async function POST(req: NextRequest) {
       message: `Posted ${reference}`,
       budget_check: budgetCheck.blocked ? { overridden: true } : { warning: budgetCheck.warning, checks: budgetCheck.checks.length },
     });
-
+ 
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }

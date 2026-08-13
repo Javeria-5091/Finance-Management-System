@@ -3,15 +3,29 @@ import { getAuthUser, checkApprovalLimit } from '@/lib/api-auth';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { workflowActionSchema, validateBody } from '@/lib/validations';
-
+ 
 function db() {
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    { cookies: { getAll: async () => (await cookies()).getAll(), setAll: () => {} } }
+    {
+      cookies: {
+        getAll: async () => (await cookies()).getAll(),
+        setAll: async (cookiesToSet: any[]) => {  
+          try {
+            const cookieStore = await cookies();
+            cookiesToSet.forEach(({ name, value, options }: any) =>
+              cookieStore.set(name, value, options)
+            );
+          } catch {
+            // Server Component — read-only cookies
+          }
+        }
+      }
+    }
   );
 }
-
+ 
 // P0 ADDED: budget module with approval workflow
 const MODULES: Record<string, {
   table: string; permPrefix: string; amountField: string; creatorField: string;
@@ -82,12 +96,12 @@ const MODULES: Record<string, {
     },
   },
 };
-
+ 
 export async function POST(req: NextRequest) {
   const supabase = db();
   const auth = await getAuthUser();
   if (auth instanceof NextResponse) return auth;
-
+ 
   try {
     // P0 FIX: Zod input validation
     const rawBody = await req.json();
@@ -96,12 +110,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: validation.error }, { status: 400 });
     }
     const { module, recordId, action, reason } = validation.data;
-
+ 
     const config = MODULES[module];
     if (!config) return NextResponse.json({ error: `Unknown module: ${module}` }, { status: 400 });
     const transition = config.transitions[action];
     if (!transition) return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
-
+ 
     // CEO bypasses all
     if (auth.role !== 'CEO' && auth.role !== 'Admin') {
       const { data: perms } = await supabase.rpc('get_my_permissions');
@@ -112,28 +126,29 @@ export async function POST(req: NextRequest) {
       }
       if (!hasPerm) return NextResponse.json({ error: `Permission denied: ${transition.perm} required` }, { status: 403 });
     }
-
-    const { data: record, error: fetchErr } = await supabase.from(config.table).select('*').eq('id', recordId).single();
+ 
+    // H1 FIX: Add organization_id filter to record fetch
+    const { data: record, error: fetchErr } = await supabase.from(config.table).select('*').eq('id', recordId).eq('organization_id', auth.orgId).single();
     if (fetchErr || !record) return NextResponse.json({ error: 'Record not found' }, { status: 404 });
-
+ 
     const currentStatus = (record.status || '').toUpperCase();
     if (!transition.from.includes(currentStatus))
       return NextResponse.json({ error: `Invalid: ${module} is ${currentStatus}, cannot ${action}` }, { status: 400 });
-
+ 
     // Maker-checker
     if (action === 'approve' || action === 'verify') {
       const creatorId = record[config.creatorField] || record.user_id;
       if (creatorId === auth.userId)
         return NextResponse.json({ error: `Maker-checker violation: You cannot ${action} your own ${module.replace('_', ' ')}.` }, { status: 403 });
     }
-
+ 
     // Amount limit
     if (action === 'approve') {
       const amount = Number(record[config.amountField]) || 0;
       const limitCheck = checkApprovalLimit(auth.role, amount);
       if (!limitCheck.allowed) return NextResponse.json({ error: limitCheck.reason }, { status: 403 });
     }
-
+ 
     const updateData: Record<string, any> = {};
     const now = new Date().toISOString();
     if (action === 'reopen') { updateData.status = 'DRAFT'; updateData.rejection_reason = null; }
@@ -148,22 +163,22 @@ export async function POST(req: NextRequest) {
       if (action === 'approve') { updateData.approved_by = auth.userId; updateData.approved_at = now; }
       if (action === 'issue')   { updateData.issued_by = auth.userId; updateData.issued_at = now; }
     }
-
+ 
     // FIXED: Add WHERE clause on current status to prevent TOCTOU race condition
     const { count, error: updateErr } = await supabase
       .from(config.table)
       .update(updateData)
       .eq('id', recordId)
       .eq('status', currentStatus); // Only update if status hasn't changed
-
+ 
     if (updateErr) return NextResponse.json({ error: 'Update failed: ' + updateErr.message }, { status: 500 });
     if (count === 0) {
       return NextResponse.json({ error: 'Concurrent modification detected. Record was modified by another user. Please refresh and try again.' }, { status: 409 });
     }
-
+ 
         //  FIX: Use RPC for audit log (correct columns, server-side IP, role snapshot, hash)
     try {
-      supabase.schema('audit').rpc('log_action', {
+      await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: `WORKFLOW_${action.toUpperCase()}`,
         p_entity_type: module.toUpperCase(),
@@ -179,9 +194,10 @@ export async function POST(req: NextRequest) {
     } catch (auditErr: any) {
       console.error('Audit log failed for workflow action:', auditErr);
     }
-
+ 
     return NextResponse.json({ success: true, status: updateData.status, message: `${module.replace('_', ' ')} ${action.toUpperCase()} successfully` });
   } catch (err: any) {
     return NextResponse.json({ error: err.message || 'Internal server error' }, { status: 500 });
   }
 }
+

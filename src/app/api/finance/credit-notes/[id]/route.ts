@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
-
+import { enforceMFA } from '@/lib/mfa-middleware';
+import { creditNotePostSchema, validateBody } from '@/lib/validations';
+ 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
-
+ 
 // ─── GET: Fetch single credit note by ID ───
 export async function GET(
   req: NextRequest,
@@ -13,27 +15,28 @@ export async function GET(
 ) {
   const auth = await requirePermission('INVOICE_READ');
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   try {
     const { id } = params;
-
+ 
     const { data: creditNote, error } = await supabase
       .from('credit_notes')
       .select('*, invoice:invoices(id, invoice_number, client_id, total_amount)')
       .eq('id', id)
       .eq('organization_id', auth.orgId)
       .single();
-
+ 
     if (error || !creditNote) {
       return NextResponse.json({ error: 'Credit note not found' }, { status: 404 });
     }
-
+ 
     return NextResponse.json({ creditNote });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
+ 
 // ─── PATCH: Update credit note details ───
 export async function PATCH(
   req: NextRequest,
@@ -41,41 +44,42 @@ export async function PATCH(
 ) {
   const auth = await requirePermission('INVOICE_UPDATE');
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   try {
     const { id } = params;
     const body = await req.json();
-
+ 
     const existing = getData(await supabase
       .from('credit_notes')
       .select('id, status, credit_note_number')
       .eq('id', id)
       .eq('organization_id', auth.orgId)
       .single());
-
+ 
     if (!existing) {
       return NextResponse.json({ error: 'Credit note not found' }, { status: 404 });
     }
-
+ 
     if (existing.status !== 'DRAFT') {
       return NextResponse.json({ error: `Only DRAFT credit notes can be edited. Current: ${existing.status}` }, { status: 400 });
     }
-
+ 
     const { credit_note_number, organization_id, created_by, created_at, id: _id, ...updates } = body;
-
+ 
     const { data: updated, error } = await supabase
       .from('credit_notes')
       .update(updates)
       .eq('id', id)
       .select()
       .single();
-
+ 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-
+ 
     try {
-      supabase.schema('audit').rpc('log_action', {
+      await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'CREDIT_NOTE_UPDATED',
         p_entity_type: 'credit_note',
@@ -90,13 +94,13 @@ export async function PATCH(
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
     }
-
+ 
     return NextResponse.json({ success: true, creditNote: updated });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
+ 
 // ─── POST (sub-action): Post credit note to GL ───
 // Spec: Credit Note → DR Revenue, CR Receivable (reverse of invoice)
 // BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
@@ -108,33 +112,34 @@ export async function POST(
 ) {
   const auth = await requirePermission('APPROVE_INVOICE');
   if (auth instanceof NextResponse) return auth;
-
+  // H3 FIX: Enforce MFA for financial posting
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
+  const { supabase } = await getAuthSupabase(req);
+ 
   try {
     const { id } = params;
-    const body = await req.json();
-    const { action } = body;
-
-    if (action !== 'post_to_gl') {
-      return NextResponse.json({ error: 'Use action: post_to_gl' }, { status: 400 });
-    }
-
+    const rawBody = await req.json();
+    const validation = validateBody(creditNotePostSchema, rawBody);
+    if (!validation.success) return NextResponse.json({ error: validation.error }, { status: 400 });
+ 
     const creditNote = getData(await supabase
       .from('credit_notes')
       .select('*')
       .eq('id', id)
       .eq('organization_id', auth.orgId)
       .single());
-
+ 
     if (!creditNote) {
       return NextResponse.json({ error: 'Credit note not found' }, { status: 404 });
     }
-
+ 
     if (creditNote.status !== 'APPROVED') {
       return NextResponse.json({
         error: `Only APPROVED credit notes can be posted. Current: ${creditNote.status}`,
       }, { status: 400 });
     }
-
+ 
     // Idempotency check
     const existingJournal = getData(await supabase
       .from('finance.journal_entries')
@@ -142,7 +147,7 @@ export async function POST(
       .eq('source_type', 'CREDIT_NOTE')
       .eq('source_id', id)
       .maybeSingle());
-
+ 
     if (existingJournal) {
       return NextResponse.json({
         error: 'Already posted to GL',
@@ -150,7 +155,7 @@ export async function POST(
         reference: existingJournal.reference,
       }, { status: 400 });
     }
-
+ 
     // Get accounts
     const receivableAccount = getData(await supabase
       .from('finance.chart_of_accounts')
@@ -160,7 +165,7 @@ export async function POST(
       .like('code', '12%')
       .limit(1)
       .single());
-
+ 
     const revenueAccount = getData(await supabase
       .from('finance.chart_of_accounts')
       .select('id, code, name')
@@ -168,11 +173,11 @@ export async function POST(
       .eq('is_active', true)
       .limit(1)
       .single());
-
+ 
     if (!receivableAccount || !revenueAccount) {
       return NextResponse.json({ error: 'Required accounts not found. Set up ASSET (Receivable) and REVENUE accounts.' }, { status: 400 });
     }
-
+ 
     // Get open period
     const period = getData(await supabase
       .from('finance.accounting_periods')
@@ -181,13 +186,13 @@ export async function POST(
       .order('start_date', { ascending: false })
       .limit(1)
       .single());
-
+ 
     if (!period) {
       return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
     }
-
+ 
     const totalAmount = Number(creditNote.total_amount) || 0;
-
+ 
     // BUG-001 FIX: Build journal lines for RPC (no journal_entry_id needed — RPC handles it)
     // Credit Note: DR Revenue (reverse), CR Receivable (reverse)
     const rpcLines = [
@@ -204,7 +209,7 @@ export async function POST(
         description: `Receivable reduction: Credit Note ${creditNote.credit_note_number}`,
       },
     ];
-
+ 
     // BUG-001 FIX: Use RPC with CORRECT signature — creates header + lines + posts atomically
     const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
       p_description: `Credit Note: ${creditNote.credit_note_number} - ${creditNote.reason}`,
@@ -216,19 +221,23 @@ export async function POST(
       p_source_type: 'CREDIT_NOTE',
       p_source_id: id,
     });
-
+ 
     if (postErr || !journalId) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
-
+ 
     // Fetch the created journal to get reference number
     const journal = getData(await supabase
       .from('finance.journal_entries')
       .select('id, reference')
       .eq('id', journalId)
       .single());
-    const reference = journal?.reference || `JE-CN-${journalId}`;
-
+    // C6 FIX: Null guard
+    if (!journal) {
+      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
+    }
+    const reference = journal.reference || `JE-CN-${journalId}`;
+ 
     // Update credit note status
     await supabase.from('credit_notes').update({
       status: 'POSTED',
@@ -236,9 +245,9 @@ export async function POST(
       journal_entry_id: journalId,
       posted_by: auth.userId,
     }).eq('id', id);
-
+ 
     try {
-      supabase.schema('audit').rpc('log_action', {
+await       supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'CREDIT_NOTE_POSTED',
         p_entity_type: 'credit_note',
@@ -254,7 +263,7 @@ export async function POST(
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
     }
-
+ 
     return NextResponse.json({
       success: true,
       journalId: journal.id,
@@ -265,3 +274,4 @@ export async function POST(
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
+

@@ -1,53 +1,55 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getAuthSupabase } from '@/lib/api-auth';
 import { getAuthUser } from '@/lib/api-auth';
-
+import { notificationCreateSchema, validateBody } from '@/lib/validations';
+ 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
-
+ 
 // ─── GET: List notifications for authenticated user ───
 export async function GET(req: NextRequest) {
   const auth = await getAuthUser();
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   try {
     const { searchParams } = new URL(req.url);
     const page = parseInt(searchParams.get('page') || '1');
     const pageSize = parseInt(searchParams.get('pageSize') || '20');
     const type = searchParams.get('type') || '';
     const unreadOnly = searchParams.get('unread') === 'true';
-
+ 
     let query = supabase
       .from('core.notifications')
       .select('*', { count: 'exact' })
       .eq('user_id', auth.userId);
-
+ 
     if (type) {
       query = query.eq('notification_type', type);
     }
     if (unreadOnly) {
       query = query.eq('is_read', false);
     }
-
+ 
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
-
+ 
     const { data, error, count } = await query
       .order('created_at', { ascending: false })
       .range(from, to);
-
+ 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-
+ 
     // Get unread count
     const { count: unreadCount } = await supabase
       .from('core.notifications')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', auth.userId)
       .eq('is_read', false);
-
+ 
     return NextResponse.json({
       data: data || [],
       total: count || 0,
@@ -59,37 +61,35 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
+ 
 // ─── POST: Create a new notification (system-generated) ───
 export async function POST(req: NextRequest) {
   const auth = await getAuthUser();
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   try {
-    const body = await req.json();
+    const rawBody = await req.json();
+    const validation = validateBody(notificationCreateSchema, rawBody);
+    if (!validation.success) return NextResponse.json({ error: validation.error }, { status: 400 });
     const {
-      user_id, // Target user (null = broadcast to all in org)
+      user_id,
       title,
       message,
-      notification_type, // APPROVAL_PENDING, PAYMENT_DUE, BUDGET_ALERT, SYSTEM, WORKFLOW, REMINDER
-      priority, // low, medium, high, urgent
+      notification_type,
+      priority,
       action_url,
       entity_type,
       entity_id,
       expires_at,
-    } = body;
-
-    if (!title || !message) {
-      return NextResponse.json({ error: 'title and message are required' }, { status: 400 });
-    }
-
-    const validTypes = ['APPROVAL_PENDING', 'PAYMENT_DUE', 'BUDGET_ALERT', 'SYSTEM', 'WORKFLOW', 'REMINDER', 'OVERDUE', 'INFO'];
-    if (notification_type && !validTypes.includes(notification_type)) {
-      return NextResponse.json({ error: `Invalid type. Use: ${validTypes.join(', ')}` }, { status: 400 });
-    }
-
+    } = validation.data;
+ 
+    // C4 FIX: Authorization check — only allow sending to self or admin can send to anyone
     const targetUserId = user_id || auth.userId;
-
+    if (targetUserId !== auth.userId && auth.role !== 'CEO' && auth.role !== 'Admin') {
+      return NextResponse.json({ error: 'You can only create notifications for yourself' }, { status: 403 });
+    }
+ 
     const { data, error } = await supabase
       .from('core.notifications')
       .insert({
@@ -108,11 +108,11 @@ export async function POST(req: NextRequest) {
       })
       .select()
       .single();
-
+ 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-
+ 
     return NextResponse.json({
       success: true,
       notification: data,
@@ -121,46 +121,48 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
+ 
 // ─── PATCH: Mark notifications as read ───
 export async function PATCH(req: NextRequest) {
   const auth = await getAuthUser();
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   try {
     const body = await req.json();
     const { notification_ids, mark_all_read } = body;
-
+ 
     if (mark_all_read) {
       const { error } = await supabase
         .from('core.notifications')
         .update({ is_read: true, read_at: new Date().toISOString() })
         .eq('user_id', auth.userId)
         .eq('is_read', false);
-
+ 
       if (error) {
         return NextResponse.json({ error: error.message }, { status: 500 });
       }
-
+ 
       return NextResponse.json({ success: true, message: 'All notifications marked as read' });
     }
-
+ 
     if (notification_ids && Array.isArray(notification_ids)) {
       const { error } = await supabase
         .from('core.notifications')
         .update({ is_read: true, read_at: new Date().toISOString() })
         .in('id', notification_ids)
         .eq('user_id', auth.userId);
-
+ 
       if (error) {
         return NextResponse.json({ error: error.message }, { status: 500 });
       }
-
+ 
       return NextResponse.json({ success: true, message: `${notification_ids.length} notification(s) marked as read` });
     }
-
+ 
     return NextResponse.json({ error: 'Provide notification_ids or mark_all_read' }, { status: 400 });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
+

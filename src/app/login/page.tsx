@@ -1,172 +1,143 @@
-"use client";
-import { useState, FormEvent } from "react";
-import { useSearchParams } from "next/navigation";
-import { supabase } from "@/lib/supabase";
-import { logAudit } from "@/lib/logAction";
-import Button from "@/components/ui/Button";
-import Input from "@/components/ui/Input";
-import Link from "next/link";
+'use client';
+
+import { useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { createBrowserClient } from '@supabase/ssr';
 
 export default function LoginPage() {
+  const router = useRouter();
   const searchParams = useSearchParams();
-  const redirectTo = searchParams.get('redirect') || '/dashboard';
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-  
-  // MFA States
-  const [mfaRequired, setMfaRequired] = useState(false);
-  const [mfaFactorId, setMfaFactorId] = useState("");
-  const [mfaChallengeId, setMfaChallengeId] = useState("");
-  const [totpCode, setTotpCode] = useState("");
-  const [mfaLoading, setMfaLoading] = useState(false);
 
-  // 1. Normal Login Flow
-  async function handleSubmit(e: FormEvent) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const supabase = createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+
+  // FPH1: Sanitize redirect URL to prevent Open Redirect attacks
+  function sanitizeRedirect(raw: string | null): string {
+    if (!raw) return '/dashboard';
+    try {
+      const url = new URL(raw, window.location.origin);
+      // Only allow same-origin relative paths
+      if (url.origin !== window.location.origin) {
+        return '/dashboard';
+      }
+      // Block protocol-relative URLs starting with //
+      if (raw.startsWith('//')) {
+        return '/dashboard';
+      }
+      // Return only the pathname + search
+      return url.pathname + url.search || '/dashboard';
+    } catch {
+      return '/dashboard';
+    }
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setError("");
+    setError(null);
     setLoading(true);
 
     try {
-      const { data, error: signInErr } = await supabase.auth.signInWithPassword({ email, password });
+      const { error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
 
-      if (signInErr) {
-        // ✅ AUDIT: Log failed login attempt (Spec 8.2)
-        logAudit.loginFailed(email);
-        setError(signInErr.message || "Login failed");
+      if (authError) {
+        setError(authError.message);
         setLoading(false);
         return;
       }
 
-      // Supabase listFactors returns { all, totp, phone, webauthn }
-      const { data: factorData, error: factorErr } = await supabase.auth.mfa.listFactors();
-      const verifiedFactors = factorData?.all?.filter((f: any) => f.status === "verified") || [];
-
-      if (verifiedFactors.length > 0) {
-        const factor = verifiedFactors[0];
-        const { data: challengeData, error: challengeErr } = await supabase.auth.mfa.challenge({
-          factorId: factor.id,
-        });
-
-        if (challengeErr) {
-          setError("MFA Challenge failed: " + challengeErr.message);
-          setLoading(false);
-          return;
-        }
-
-        setMfaFactorId(factor.id);
-        setMfaChallengeId(challengeData.id);
-        setMfaRequired(true);
-        setLoading(false);
-        return;
-      }
-
-      // ✅ AUDIT: Log successful login (Spec 8.2)
-      logAudit.login();
-      // FIX: window.location.href forces FULL page reload — middleware ko fresh
-      // cookies milte hain jo createBrowserClient ne set ki hain.
-      // router.push() soft navigation tha — cookies middleware tak nahi pahunchte the.
-      window.location.href = redirectTo;
+      // Get redirect from query params and sanitize it
+      const rawRedirect = searchParams.get('redirect');
+      const safeRedirect = sanitizeRedirect(rawRedirect);
+      router.push(safeRedirect);
+      router.refresh();
     } catch (err: any) {
-      // ✅ AUDIT: Log unexpected login error
-      logAudit.loginFailed(email);
-      setError(err.message || "Login failed");
-    } finally {
+      setError(err?.message || 'An unexpected error occurred');
       setLoading(false);
     }
   }
 
-  // 2. MFA Verification Flow
-  async function handleMfaVerify(e: FormEvent) {
-    e.preventDefault();
-    setError("");
-    setMfaLoading(true);
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950 px-4">
+      <div className="w-full max-w-md">
+        <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-800 p-8">
+          {/* Header */}
+          <div className="text-center mb-8">
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
+              Finance Management System
+            </h1>
+            <p className="text-gray-500 dark:text-gray-400 mt-2">
+              Sign in to your account
+            </p>
+          </div>
 
-    try {
-      const { error: verifyErr } = await supabase.auth.mfa.verify({
-        factorId: mfaFactorId,
-        challengeId: mfaChallengeId,
-        code: totpCode,
-      });
-
-      if (verifyErr) {
-        // ✅ AUDIT: Log MFA verification failure (Spec 8.2)
-        logSecurityEventFromClient("MFA_VERIFICATION_FAILURE", false, { factor_id: mfaFactorId });
-        setError("Invalid code. Please try again.");
-        setMfaLoading(false);
-        return;
-      }
-
-      // ✅ AUDIT: Log MFA verification success + full login (Spec 8.2)
-      logSecurityEventFromClient("MFA_VERIFICATION_SUCCESS", true, { factor_id: mfaFactorId });
-      logAudit.login();
-      window.location.href = redirectTo;
-    } catch (err: any) {
-      setError(err.message || "MFA verification failed");
-    } finally {
-      setMfaLoading(false);
-    }
-  }
-
-  // ─── MFA Challenge Screen ───
-  if (mfaRequired) {
-    return (
-      <main className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-gray-900">
-        <div className="w-full max-w-md bg-white dark:bg-gray-800 p-8 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm">
-          <h1 className="text-2xl font-bold text-center mb-2 text-gray-900 dark:text-white">
-            Two-Factor Authentication
-          </h1>
-          <p className="text-center text-sm text-gray-500 dark:text-gray-400 mb-6">
-            Enter the 6-digit code from your authenticator app.
-          </p>
+          {/* Error Alert */}
           {error && (
-            <div className="mb-4 p-3 bg-red-50 dark:bg-red-500/20 border border-red-200 dark:border-red-500/50 text-red-600 dark:text-red-300 rounded-lg text-sm">
-              {error}
+            <div className="mb-6 p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 rounded-lg">
+              <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
             </div>
           )}
-          <form onSubmit={handleMfaVerify} className="space-y-4">
-            <Input id="totp_code" label="Authentication Code" type="text" placeholder="000000"
-              value={totpCode} onChange={e => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              required maxLength={6} />
-            <Button type="submit" loading={mfaLoading}>Verify</Button>
+
+          {/* Form */}
+          <form onSubmit={handleSubmit} className="space-y-5">
+            {/* Email */}
+            <div>
+              <label
+                htmlFor="email"
+                className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+              >
+                Email
+              </label>
+              <input
+                id="email"
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@company.com"
+                className="w-full px-3 py-2.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
+              />
+            </div>
+
+            {/* Password */}
+            <div>
+              <label
+                htmlFor="password"
+                className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+              >
+                Password
+              </label>
+              <input
+                id="password"
+                type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter your password"
+                className="w-full px-3 py-2.5 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
+              />
+            </div>
+
+            {/* Submit Button */}
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-2.5 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed text-white font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900"
+            >
+              {loading ? 'Signing in...' : 'Sign In'}
+            </button>
           </form>
-          <button onClick={() => { setMfaRequired(false); setError(""); }}
-            className="w-full text-center text-sm text-gray-500 hover:text-gray-700 mt-4">
-            Back to login
-          </button>
         </div>
-      </main>
-    );
-  }
-
-  // ─── Normal Login Screen ───
-  return (
-    <main className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-gray-900">
-      <div className="w-full max-w-md bg-white dark:bg-gray-800 p-8 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm">
-        <h1 className="text-2xl font-bold text-center mb-6 text-gray-900 dark:text-white">Welcome Back</h1>
-        {error && (
-          <div className="mb-4 p-3 bg-red-50 dark:bg-red-500/20 border border-red-200 dark:border-red-500/50 text-red-600 dark:text-red-300 rounded-lg text-sm font-medium">
-            {error}
-          </div>
-        )}
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <Input id="email" label="Email" type="email" placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} required />
-          <Input id="password" label="Password" type="password" placeholder="------" value={password} onChange={e => setPassword(e.target.value)} required />
-          <Button type="submit" loading={loading}>Sign In</Button>
-        </form>
-        <p className="text-center text-sm text-gray-600 dark:text-gray-400 mt-6">
-          Don&apos;t have an account?{" "}
-          <Link href="/signup" className="text-blue-600 dark:text-blue-400 hover:underline font-medium">Sign up</Link>
-        </p>
       </div>
-    </main>
+    </div>
   );
-}
-
-// Helper: direct security event call for login-page-only events where we don't have a user session yet
-function logSecurityEventFromClient(eventType: string, success: boolean, details?: Record<string, any>) {
-  import('@/lib/logAction').then(({ logSecurityEvent }) => {
-    logSecurityEvent({ eventType, success, details });
-  }).catch(() => {});
 }

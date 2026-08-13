@@ -2,15 +2,29 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requirePermission } from '@/lib/api-auth';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
-
+ 
 function db() {
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    { cookies: { getAll: async () => (await cookies()).getAll(), setAll: () => {} } }
+    {
+      cookies: {
+        getAll: async () => (await cookies()).getAll(),
+        setAll: async (cookiesToSet: any[]) => {   
+          try {
+            const cookieStore = await cookies();
+            cookiesToSet.forEach(({ name, value, options }: any) =>
+              cookieStore.set(name, value, options)
+            );
+          } catch {
+            // Server Component — read-only cookies
+          }
+        }
+      }
+    }
   );
 }
-
+ 
 // P0: Opening Balance Import API
 // Accepts CSV rows and creates balanced opening journal entries
 //
@@ -20,27 +34,27 @@ function db() {
 //   NEW: Calls `finance.post_journal_entry` with CORRECT signature:
 //     { p_description, p_transaction_date, p_period_id, p_lines, p_currency, p_exchange_rate, p_source_type, p_source_id, p_project_id, p_department_id }
 //   Also: Lines now use debit_amount/credit_amount (matching DB columns), not debit/credit.
-
+ 
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('JOURNAL_CREATE');
   if (auth instanceof NextResponse) return auth;
-
+ 
   try {
     const { action, rows, fiscalYearId } = await req.json();
     const supabase = db();
-
+ 
     if (action === 'import') {
       if (!rows || !Array.isArray(rows) || rows.length === 0) {
         return NextResponse.json({ error: 'rows array is required' }, { status: 400 });
       }
-
+ 
       // Validate rows
       for (const row of rows) {
         if (!row.account_code || (!row.debit_amount && !row.credit_amount)) {
           return NextResponse.json({ error: `Each row needs account_code and at least one of debit_amount/credit_amount` }, { status: 400 });
         }
       }
-
+ 
       // Check total debit = total credit
       let totalDebit = 0;
       let totalCredit = 0;
@@ -48,11 +62,11 @@ export async function POST(req: NextRequest) {
         totalDebit += Math.abs(Number(row.debit_amount) || 0);
         totalCredit += Math.abs(Number(row.credit_amount) || 0);
       }
-
+ 
       if (Math.abs(totalDebit - totalCredit) > 0.02) {
         return NextResponse.json({ error: `Opening balances must balance. Total Debit: ${totalDebit.toFixed(2)}, Total Credit: ${totalCredit.toFixed(2)}, Difference: ${(totalDebit - totalCredit).toFixed(2)}` }, { status: 400 });
       }
-
+ 
       // Get open period for the fiscal year
       let periodId: string | null = null;
       if (fiscalYearId) {
@@ -66,19 +80,19 @@ export async function POST(req: NextRequest) {
           .single()).data;
         periodId = period?.id || null;
       }
-
+ 
       // Get next batch number
       const { data: numData } = await supabase.rpc('get_next_number', {
         p_type: 'OBI',
       });
       const batchId = numData || `OBI-${Date.now().toString().slice(-6)}`;
-
+ 
       // BUG-001 FIX: Build journal lines with CORRECT column names (debit_amount/credit_amount)
       const rpcLines = [];
       for (const row of rows) {
         const debit = Math.abs(Number(row.debit_amount) || 0);
         const credit = Math.abs(Number(row.credit_amount) || 0);
-
+ 
         if (debit > 0) {
           rpcLines.push({
             account_id: row.account_id || null,
@@ -98,7 +112,7 @@ export async function POST(req: NextRequest) {
           });
         }
       }
-
+ 
       // BUG-001 FIX: Use `finance.post_journal_entry` (with schema prefix) and CORRECT parameter names
       const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
         p_description: 'Opening Balance Import',
@@ -110,11 +124,11 @@ export async function POST(req: NextRequest) {
         p_source_type: 'OPENING_BALANCE',
         p_source_id: batchId,
       });
-
+ 
       if (postErr) {
         return NextResponse.json({ error: 'Posting failed: ' + postErr.message }, { status: 500 });
       }
-
+ 
       // Track each import row
       for (const row of rows) {
         await supabase.from('finance.opening_balance_imports').insert({
@@ -134,7 +148,7 @@ export async function POST(req: NextRequest) {
           imported_by: auth.userId,
         });
       }
-
+ 
       // Audit
       try {
         await supabase.from('audit.audit_log').insert({
@@ -142,10 +156,10 @@ export async function POST(req: NextRequest) {
           details: JSON.stringify({ batch_id: batchId, rows: rows.length, total_debit: totalDebit, total_credit: totalCredit, journal_id: journalId }),
         });
       } catch {}
-
+ 
       return NextResponse.json({ success: true, batch_id: batchId, journal_id: journalId, message: `Opening balance imported: ${rows.length} accounts, balanced at PKR ${totalDebit.toLocaleString()}` });
     }
-
+ 
     if (action === 'preview') {
       // Return validation without posting
       let totalDebit = 0;
@@ -161,7 +175,7 @@ export async function POST(req: NextRequest) {
       const balanced = Math.abs(totalDebit - totalCredit) < 0.02;
       return NextResponse.json({ rows: validated, total_debit: totalDebit, total_credit: totalCredit, balanced, difference: totalDebit - totalCredit });
     }
-
+ 
     return NextResponse.json({ error: 'Use action import or preview' }, { status: 400 });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });

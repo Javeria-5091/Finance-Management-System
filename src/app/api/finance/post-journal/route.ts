@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
-
+import { enforceMFA } from '@/lib/mfa-middleware';
+import { postJournalSchema, validateBody } from '@/lib/validations';
+ 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
-
+ 
 // ─── POST: Post approved manual journal entry to General Ledger ───
 // Spec 4.2 FIX: organization_id filter added to journal fetch
 // Posts a DRAFT/SUBMITTED/VERIFIED journal entry that has been through workflow approval
@@ -26,23 +28,26 @@ function getData<T = any>(res: any): T | null {
 //   NOTE: A cleaner long-term fix would be to create a separate DB function:
 //     finance.post_existing_journal(p_journal_id UUID, p_posted_by UUID)
 //   that only handles the GL posting step for an already-created journal.
-
+ 
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('APPROVE_JOURNAL');
   if (auth instanceof NextResponse) return auth;
-
+  // H3 FIX: Enforce MFA for financial posting
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
+  const { supabase } = await getAuthSupabase(req);
+ 
   const orgId = auth.orgId;
   if (!orgId) {
     return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
   }
-
+ 
   try {
-    const { journal_entry_id } = await req.json();
-
-    if (!journal_entry_id) {
-      return NextResponse.json({ error: 'journal_entry_id is required' }, { status: 400 });
-    }
-
+    const rawBody = await req.json();
+    const validation = validateBody(postJournalSchema, rawBody);
+    if (!validation.success) return NextResponse.json({ error: validation.error }, { status: 400 });
+    const journal_entry_id = validation.data.journalId;
+ 
     // ── 1. Fetch the journal entry (WITH org_id filter — Spec 4.2 FIX) ──
     const journal = getData(
       await supabase
@@ -52,18 +57,18 @@ export async function POST(req: NextRequest) {
         .eq('organization_id', orgId)   // ← SECURITY FIX: was missing
         .single()
     );
-
+ 
     if (!journal) {
       return NextResponse.json({ error: 'Journal entry not found or access denied' }, { status: 404 });
     }
-
+ 
     // ── 2. Validate status — only APPROVED journals can be posted ──
     if (journal.status !== 'APPROVED') {
       return NextResponse.json({
         error: `Only APPROVED journal entries can be posted. Current status: ${journal.status}`,
       }, { status: 400 });
     }
-
+ 
     // ── 3. Idempotency check — already posted? ──
     if (journal.posted_at) {
       return NextResponse.json({
@@ -73,7 +78,7 @@ export async function POST(req: NextRequest) {
         posted_at: journal.posted_at,
       }, { status: 400 });
     }
-
+ 
     // ── 4. Fetch journal lines (WITH org_id filter) ──
     const journalLines = getData(
       await supabase
@@ -83,15 +88,15 @@ export async function POST(req: NextRequest) {
         .eq('organization_id', orgId)   // ← SECURITY FIX
         .order('line_number', { ascending: true })
     );
-
+ 
     if (!journalLines || journalLines.length === 0) {
       return NextResponse.json({ error: 'No journal lines found' }, { status: 400 });
     }
-
+ 
     // ── 5. Verify balance ──
     const totalDebit = journalLines.reduce((sum: number, l: any) => sum + (Number(l.debit_amount) || 0), 0);
     const totalCredit = journalLines.reduce((sum: number, l: any) => sum + (Number(l.credit_amount) || 0), 0);
-
+ 
     if (Math.abs(totalDebit - totalCredit) > 0.02) {
       return NextResponse.json({
         error: `Journal entry is unbalanced. Debit: ${totalDebit}, Credit: ${totalCredit}`,
@@ -99,7 +104,7 @@ export async function POST(req: NextRequest) {
         total_credit: totalCredit,
       }, { status: 400 });
     }
-
+ 
     // ── 6. Verify open period ──
     const period = getData(
       await supabase
@@ -109,17 +114,17 @@ export async function POST(req: NextRequest) {
         .eq('organization_id', orgId)   // ← SECURITY FIX
         .maybeSingle()
     );
-
+ 
     if (!period) {
       return NextResponse.json({ error: 'Accounting period not found' }, { status: 404 });
     }
-
+ 
     if (period.status !== 'OPEN') {
       return NextResponse.json({
         error: `Period is not OPEN. Current status: ${period.status}. Cannot post to closed periods.`,
       }, { status: 400 });
     }
-
+ 
     // ── 7. Verify all accounts are active and allow posting ──
     const accountIds = [...new Set(journalLines.map((l: any) => l.account_id))];
     const accounts = getData(
@@ -129,7 +134,7 @@ export async function POST(req: NextRequest) {
         .in('id', accountIds)
         .eq('organization_id', orgId)   // ← SECURITY FIX
     );
-
+ 
     if (!accounts || accounts.length !== accountIds.length) {
       const foundIds = new Set((accounts || []).map((a: any) => a.id));
       const missingIds = accountIds.filter(id => !foundIds.has(id));
@@ -138,7 +143,7 @@ export async function POST(req: NextRequest) {
         missing_account_ids: missingIds,
       }, { status: 400 });
     }
-
+ 
     const inactiveAccounts = accounts.filter((a: any) => !a.is_active || !a.posting_allowed);
     if (inactiveAccounts.length > 0) {
       return NextResponse.json({
@@ -146,7 +151,7 @@ export async function POST(req: NextRequest) {
         accounts: inactiveAccounts.map((a: any) => ({ id: a.id, code: a.code, name: a.name, is_active: a.is_active, posting_allowed: a.posting_allowed })),
       }, { status: 400 });
     }
-
+ 
     // ── 8. BUG-001 FIX: Post via GL engine with CORRECT RPC signature ──
     //    Since the RPC creates a NEW journal entry, we:
     //    a) Build lines from existing journal (strip journal_entry_id — RPC sets it)
@@ -159,7 +164,7 @@ export async function POST(req: NextRequest) {
       credit_amount: l.credit_amount,
       description: l.description,
     }));
-
+ 
     const { data: newJournalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
       p_description: journal.description || journal.reference,
       p_transaction_date: journal.journal_date || journal.entry_date || new Date().toISOString().split('T')[0],
@@ -172,11 +177,11 @@ export async function POST(req: NextRequest) {
       p_project_id: journal.project_id || null,
       p_department_id: journal.department_id || null,
     });
-
+ 
     if (postErr || !newJournalId) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
-
+ 
     // Fetch the new posted journal for reference
     const newJournal = getData(
       await supabase
@@ -185,7 +190,11 @@ export async function POST(req: NextRequest) {
         .eq('id', newJournalId)
         .single()
     );
-
+    // C6 FIX: Null guard
+    if (!newJournal) {
+      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + newJournalId }, { status: 500 });
+    }
+ 
     // Copy approval metadata from old journal to new
     if (journal.approved_by || journal.approved_at) {
       await supabase
@@ -196,34 +205,44 @@ export async function POST(req: NextRequest) {
         })
         .eq('id', newJournalId);
     }
-
-    // Update any source records that referenced the old journal ID
-    if (journal.source_type && journal.source_id) {
- await supabase
-        .from(journal.source_type.toLowerCase() === 'manual_journal' ? 'finance.journal_entries' : journal.source_type.toLowerCase().replace(/_/g, ''))
-        .update({ journal_entry_id: newJournalId })
-        .eq('id', journal.source_id)
-        .then(() => {}); // Ignore errors — source table may not exist
-    }
-
+ 
+    // H10 FIX: Proper source table name mapping
+    const SOURCE_TABLE_MAP: Record<string, string> = {
+      EXPENSE: 'expenses',
+      INCOME: 'incomes',
+      INVOICE: 'invoices',
+      VENDOR_BILL: 'vendor_bills',
+      CREDIT_NOTE: 'credit_notes',
+      PAYMENT_RECEIPT: 'payment_receipts',
+      PAYMENT_REVERSAL: 'payment_receipts',
+      PROFIT_DISTRIBUTION: 'finance.distributions',
+      YEAR_END_CLOSE: 'finance.fiscal_years',
+      MANUAL_JOURNAL: 'finance.journal_entries',
+    };
+    const sourceTable = SOURCE_TABLE_MAP[journal.source_type] || 'finance.journal_entries';
+    await supabase
+      .from(sourceTable)
+      .update({ journal_entry_id: newJournalId })
+      .eq('id', journal.source_id);
+ 
     // Delete old unposted journal lines + header
     await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal_entry_id);
     await supabase.from('finance.journal_entries').delete().eq('id', journal_entry_id);
-
+ 
     // ── 9. Audit log ──
     try {
-      supabase.schema('audit').rpc('log_action', {
+      await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'JOURNAL_POSTED',
         p_entity_type: 'journal_entry',
         p_entity_id: newJournalId,
-        p_description: `Journal posted to GL: ${newJournal?.reference || journal.reference} (DR: ${totalDebit.toFixed(2)}, CR: ${totalCredit.toFixed(2)}, Lines: ${journalLines.length}). Previous draft ID: ${journal_entry_id}`,
+        p_description: `Journal posted to GL: ${newJournal.reference || journal.reference} (DR: ${totalDebit.toFixed(2)}, CR: ${totalCredit.toFixed(2)}, Lines: ${journalLines.length}). Previous draft ID: ${journal_entry_id}`,
         p_previous_status: 'APPROVED',
         p_new_status: 'POSTED',
         p_source_module: 'journal',
         p_severity: 'high',
         p_new_values: {
-          reference: newJournal?.reference || journal.reference,
+          reference: newJournal.reference || journal.reference,
           total_debit: totalDebit,
           total_credit: totalCredit,
           line_count: journalLines.length,
@@ -235,11 +254,11 @@ export async function POST(req: NextRequest) {
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
     }
-
+ 
     return NextResponse.json({
       success: true,
       journalId: newJournalId,
-      reference: newJournal?.reference || journal.reference,
+      reference: newJournal.reference || journal.reference,
       total_debit: totalDebit,
       total_credit: totalCredit,
       line_count: journalLines.length,
@@ -251,3 +270,4 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
+ 

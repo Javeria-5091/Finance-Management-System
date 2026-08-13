@@ -1,10 +1,16 @@
 "use client";
-
+ 
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
-import { Plus, CheckCircle, Split } from "lucide-react";
-
+import { Plus, CheckCircle, Split, Search, ChevronDown } from "lucide-react";
+ 
+interface ClientOption {
+  id: string;
+  name: string;
+  email: string;
+}
+ 
 export default function PaymentReceiptsPage() {
   const { user } = useAuth();
   const [receipts, setReceipts] = useState<any[]>([]);
@@ -15,25 +21,30 @@ export default function PaymentReceiptsPage() {
   const [invoices, setInvoices] = useState<any[]>([]);
   const [allocations, setAllocations] = useState<Record<string, number>>({});
   
-  // Form State - payment_date add ki gayi hai
+  // Client dropdown state
+  const [clients, setClients] = useState<ClientOption[]>([]);
+  const [clientSearch, setClientSearch] = useState("");
+  const [showClientDropdown, setShowClientDropdown] = useState(false);
+  const [selectedClientName, setSelectedClientName] = useState("");
+  
+  // Form State
   const [form, setForm] = useState({
     amount: "", 
     client_id: "", 
     payment_method: "BANK_TRANSFER", 
     reference: "", 
     description: "",
-    payment_date: new Date().toISOString().split("T")[0] // Aaj ki date default
+    payment_date: new Date().toISOString().split("T")[0]
   });
-
+ 
   const totalAllocated = Object.values(allocations).reduce((sum, val) => sum + val, 0);
   const unallocated = parseFloat(form.amount || "0") - totalAllocated;
-  // Ab sirf tab true hoga jab amount exactly 0 ho aur kuch allocate ho ho
   const isBalanced = unallocated === 0 && totalAllocated > 0;
-
+ 
   useEffect(() => {
     fetchReceipts();
   }, []);
-
+ 
   const fetchReceipts = async () => {
     setLoading(true);
     const { data } = await supabase
@@ -43,8 +54,30 @@ export default function PaymentReceiptsPage() {
     if (data) setReceipts(data);
     setLoading(false);
   };
-
+ 
+  const fetchClients = async () => {
+    const { data } = await supabase
+      .from("clients")
+      .select("id, name, email")
+      .eq("status", "ACTIVE")
+      .order("name");
+    if (data) setClients(data as ClientOption[]);
+  };
+ 
+  const filteredClients = clients.filter((cl) =>
+    cl.name.toLowerCase().includes(clientSearch.toLowerCase()) ||
+    cl.email.toLowerCase().includes(clientSearch.toLowerCase())
+  );
+ 
+  const selectClient = (client: ClientOption) => {
+    setForm((prev) => ({ ...prev, client_id: client.id }));
+    setSelectedClientName(client.name);
+    setShowClientDropdown(false);
+    setClientSearch("");
+  };
+ 
   const openCreateModal = async () => {
+    await fetchClients();
     const { data: invData } = await supabase
       .from("invoices")
       .select("*")
@@ -60,11 +93,13 @@ export default function PaymentReceiptsPage() {
       payment_method: "BANK_TRANSFER", 
       reference: "", 
       description: "",
-      payment_date: new Date().toISOString().split("T")[0] // Reset to today
+      payment_date: new Date().toISOString().split("T")[0]
     });
+    setSelectedClientName("");
+    setClientSearch("");
     setShowModal(true);
   };
-
+ 
   const handleAllocate = (invId: string, amount: string) => {
     const val = parseFloat(amount) || 0;
     setAllocations(prev => {
@@ -74,20 +109,17 @@ export default function PaymentReceiptsPage() {
       return next;
     });
   };
-
+ 
   const handleSubmit = async () => {
     if (!isBalanced || !form.amount) {
       return alert("Pura amount invoices k against allocate karna zaroori hai.");
     }
-    
     if (!form.client_id) {
-      return alert("Client ID zaroori hai."); // Safety check
+      return alert("Client select karna zaroori hai.");
     }
-
+ 
     setSaving(true);
-
     try {
-      // 1. Create Payment Receipt (DRAFT)
       const { data: receipt, error: receiptErr } = await supabase
         .from("payment_receipts")
         .insert({
@@ -99,16 +131,15 @@ export default function PaymentReceiptsPage() {
           payment_method: form.payment_method,
           reference: form.reference,
           description: form.description,
-          payment_date: form.payment_date, // Yahan payment_date bhej di
+          payment_date: form.payment_date,
           status: "DRAFT",
           created_by: user?.id
         })
         .select()
         .single();
-
+ 
       if (receiptErr) throw receiptErr;
-
-      // 2. Create Allocations
+ 
       const allocInserts = Object.entries(allocations).map(([invId, amount]) => ({
         payment_receipt_id: receipt.id,
         invoice_id: invId,
@@ -116,30 +147,26 @@ export default function PaymentReceiptsPage() {
         base_allocated_amount: amount,
         allocated_by: user?.id
       }));
-
+ 
       if (allocInserts.length > 0) {
         await supabase.from("payment_allocations").insert(allocInserts);
       }
-
-      // 3. Post to Ledger — dynamically fetch current open period
+ 
       const { data: periodId } = await supabase.rpc('get_current_open_period_id');
       if (!periodId) {
         alert('No open accounting period found. Please open a period in Fiscal Calendar first.');
-        // Still save the receipt as DRAFT, just don't post to GL
       } else {
         await supabase.rpc('post_payment_receipt', {
           p_receipt_id: receipt.id,
           p_period_id: periodId,
           p_transaction_date: form.payment_date
         });
-
-        // 4. Update receipt status to POSTED
         await supabase
           .from('payment_receipts')
           .update({ status: 'POSTED' })
           .eq('id', receipt.id);
       }
-
+ 
       alert("Payment Received & Allocated Successfully!");
       setShowModal(false);
       fetchReceipts();
@@ -150,27 +177,20 @@ export default function PaymentReceiptsPage() {
       setSaving(false);
     }
   };
-
+ 
   return (
     <div className="p-6">
       {/* Header */}
       <div className="flex justify-between items-center mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-            Payment Receipts
-          </h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            Receive payments and allocate against invoices
-          </p>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Payment Receipts</h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400">Receive payments and allocate against invoices</p>
         </div>
-        <button 
-          onClick={openCreateModal} 
-          className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium"
-        >
+        <button onClick={openCreateModal} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium">
           <Plus size={16} /> Record Payment
         </button>
       </div>
-
+ 
       {/* Receipts List */}
       <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
@@ -185,13 +205,9 @@ export default function PaymentReceiptsPage() {
           </thead>
           <tbody className="divide-y dark:divide-gray-700">
             {loading ? (
-              <tr>
-                <td colSpan={5} className="text-center py-8 text-gray-400">Loading...</td>
-              </tr>
+              <tr><td colSpan={5} className="text-center py-8 text-gray-400">Loading...</td></tr>
             ) : receipts.length === 0 ? (
-              <tr>
-                <td colSpan={5} className="text-center py-8 text-gray-400">No receipts yet</td>
-              </tr>
+              <tr><td colSpan={5} className="text-center py-8 text-gray-400">No receipts yet</td></tr>
             ) : (
               receipts.map((r) => (
                 <tr key={r.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
@@ -218,7 +234,7 @@ export default function PaymentReceiptsPage() {
           </tbody>
         </table>
       </div>
-
+ 
       {/* Allocation Modal */}
       {showModal && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
@@ -232,18 +248,60 @@ export default function PaymentReceiptsPage() {
             </div>
             
             <div className="p-5 space-y-4">
-              {/* Missing Fields Added Here */}
               <div className="grid grid-cols-2 gap-4 bg-gray-50 dark:bg-gray-900/30 p-4 rounded-lg">
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Client ID *</label>
-                  <input 
-                    type="text" 
-                    value={form.client_id} 
-                    onChange={(e) => setForm({ ...form, client_id: e.target.value })} 
-                    className="w-full p-2 border dark:border-gray-600 rounded bg-transparent dark:bg-gray-700 text-gray-900 dark:text-white text-sm" 
-                    placeholder="Enter Client UUID" 
-                  />
+ 
+                {/* CLIENT SELECTOR DROPDOWN (replaces raw UUID input) */}
+                <div className="relative col-span-2">
+                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Client *</label>
+                  {selectedClientName ? (
+                    <div className="flex items-center justify-between w-full p-2 border dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm">
+                      <span>{selectedClientName}</span>
+                      <button
+                        type="button"
+                        onClick={() => { setForm((p) => ({ ...p, client_id: '' })); setSelectedClientName(''); }}
+                        className="text-gray-400 hover:text-red-500 text-xs ml-2"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <div className="flex items-center gap-2 w-full p-2 border dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-sm">
+                        <Search size={14} className="text-gray-400 flex-shrink-0" />
+                        <input
+                          type="text"
+                          value={clientSearch}
+                          onChange={(e) => { setClientSearch(e.target.value); setShowClientDropdown(true); }}
+                          onFocus={() => setShowClientDropdown(true)}
+                          className="flex-1 bg-transparent text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none"
+                          placeholder="Search client by name or email..."
+                        />
+                        <ChevronDown size={14} className="text-gray-400 flex-shrink-0" />
+                      </div>
+                      {showClientDropdown && filteredClients.length > 0 && (
+                        <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto bg-white dark:bg-gray-700 border dark:border-gray-600 rounded-lg shadow-lg">
+                          {filteredClients.map((cl) => (
+                            <button
+                              key={cl.id}
+                              type="button"
+                              onClick={() => selectClient(cl)}
+                              className="w-full text-left px-3 py-2 text-sm text-gray-900 dark:text-white hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors"
+                            >
+                              <span className="font-medium">{cl.name}</span>
+                              <span className="text-gray-400 text-xs ml-2">{cl.email}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {showClientDropdown && clientSearch && filteredClients.length === 0 && (
+                        <div className="absolute z-20 mt-1 w-full p-3 bg-white dark:bg-gray-700 border dark:border-gray-600 rounded-lg shadow-lg text-sm text-gray-500 text-center">
+                          No clients found
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
+ 
                 <div>
                   <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Payment Date *</label>
                   <input 
@@ -296,7 +354,7 @@ export default function PaymentReceiptsPage() {
                   />
                 </div>
               </div>
-
+ 
               {/* Unallocated Amount Banner */}
               <div className={`p-3 rounded-lg border-2 flex justify-between items-center ${
                 isBalanced 
@@ -308,7 +366,7 @@ export default function PaymentReceiptsPage() {
                   {unallocated.toLocaleString()} {unallocated < 0 ? "(Over-allocated!)" : ""}
                 </span>
               </div>
-
+ 
               {/* Invoice Allocation List */}
               <div className="space-y-2">
                 <h3 className="text-sm font-bold text-gray-700 dark:text-gray-300">
@@ -342,7 +400,7 @@ export default function PaymentReceiptsPage() {
                 )}
               </div>
             </div>
-
+ 
             <div className="flex justify-end gap-3 p-5 border-t dark:border-gray-700">
               <button 
                 onClick={() => setShowModal(false)} 
@@ -358,7 +416,6 @@ export default function PaymentReceiptsPage() {
                 {saving ? "Processing..." : <><CheckCircle size={16} /> Post Payment</>}
               </button>
             </div>
-
           </div>
         </div>
       )}

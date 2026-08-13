@@ -1,6 +1,9 @@
 // =============================================================================
 // API AUTH MIDDLEWARE — Server-side authentication + permission check for all API routes
 // =============================================================================
+// ⚠️ MERGED FILE — combined from two parallel AI-generated versions of this
+// module so that route files depending on EITHER version keep working.
+// See inline notes for what was kept/reconciled and why.
 
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
@@ -136,6 +139,11 @@ export async function getAuthSupabase(req?: Request) {
 }
 
 // ---------- Require specific permission ----------
+// NOTE (merge fix): one of the two source versions of this function referenced
+// `cookieStore` inside its own createServerClient() call without ever
+// declaring `const cookieStore = await cookies();` in this function's scope —
+// that would throw "cookieStore is not defined" at runtime. Using the
+// working version here.
 export async function requirePermission(requiredPerm: string): Promise<AuthResult | NextResponse> {
   const auth = await getAuthUser();
   if (auth instanceof NextResponse) return auth; // 401
@@ -145,10 +153,24 @@ export async function requirePermission(requiredPerm: string): Promise<AuthResul
 
   // Check against permission table via RPC
   try {
+    const cookieStore = await cookies();
     const supabase = createServerClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      { cookies: { getAll: async () => (await cookies()).getAll(), setAll: (c: any) => { try { c.forEach((cookie: any) => cookieStore.set(cookie.name, cookie.value)); } catch {} } } }
+      {
+        cookies: {
+          getAll: () => cookieStore.getAll(),
+          setAll(cookiesToSet: any[]) {
+            try {
+              cookiesToSet.forEach(({ name, value, options }: any) =>
+                cookieStore.set(name, value, options)
+              );
+            } catch {
+              // Server Component — read-only cookies
+            }
+          },
+        },
+      }
     );
 
     // Try RPC first
@@ -169,10 +191,14 @@ export function enforceMakerChecker(creatorId: string, approverId: string): bool
 }
 
 // ---------- Approval amount limit check ----------
+// NOTE (merge fix): AUDITOR limit (500000) was present in one source version
+// and missing in the other — kept here since AUDITOR also exists in
+// APPROVAL_ROLES above, so dropping it would silently give auditors a 0 limit.
 export function checkApprovalLimit(userRole: string, amount: number): { allowed: boolean; reason: string } {
   const LIMITS: Record<string, number> = {
     CEO: Infinity,
     FINANCE_HEAD: 500000,
+    AUDITOR: 500000,
     ACCOUNTANT: 100000,
     HOD: 100000,
     PROJECT_MANAGER: 25000,
@@ -313,22 +339,51 @@ export async function isSqlSafe(sql: string): Promise<{ safe: boolean; reason: s
   return { safe: true, reason: '' };
 }
 
-// =============================================================================
-// ✅ REMOVED: injectScope() / getScopeParams()
-//
-// These were dead code. They existed to build a parameterized wrapper SQL
-// string (`WHERE user_id = $1 ...`) but nothing in the codebase ever called
-// them — app/api/ai/chat/route.ts had its own local buildScopedSql() that
-// still did raw string interpolation of orgId/userId, which is exactly the
-// pattern this function's own comment claimed had already been fixed.
-//
-// The actual fix (see P1_006_ai_function.sql v2) moves scope-wrapping
-// entirely into the database function execute_ai_readonly_query(), which
-// now takes org_id/user_id as typed `uuid` parameters and builds the
-// wrapper SQL itself using format(...,%L). Application code passes only
-// the validated inner SELECT and never builds the WHERE/LIMIT wrapper —
-// so there is no app-level string-interpolation path left to get wrong.
-// =============================================================================
+// ---------- Spec 9.5: Inject Scope Programmatically ----------
+// ⚠️ MERGE NOTE: one source version removed this block entirely, claiming it
+// was dead code and that scope-wrapping had fully moved into a DB function
+// (execute_ai_readonly_query, per P1_006_ai_function.sql v2). That may be
+// true going forward — but it was kept here because we don't know whether
+// any OTHER route file in this codebase still imports injectScope/
+// validateUuid from this module. Deleting it blind is exactly what broke
+// your build. Recommended next step: grep the codebase for
+// `injectScope(` and `validateUuid(` — if nothing outside this file calls
+// them anymore, it's then safe to delete this whole block and rely purely
+// on the DB function.
+function isValidUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function sqlUuid(value: string): string {
+  if (!isValidUuid(value)) {
+    throw new Error(`Invalid UUID detected: ${value.slice(0, 8)}...`);
+  }
+  return `'${value}'`;
+}
+
+export function validateUuid(value: string): boolean {
+  return isValidUuid(value);
+}
+
+export function injectScope(sql: string, orgId: string, userId: string, enforceUserScope: boolean): string {
+  const safeOrgId = sqlUuid(orgId);
+  const safeUserId = sqlUuid(userId);
+
+  const cleanSql = sql.replace(/;\s*$/, '').trim();
+
+  return `
+    SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
+      WITH llm_query AS (
+        ${cleanSql}
+      )
+      SELECT * FROM llm_query
+      WHERE 1=1
+        AND organization_id = ${safeOrgId}
+        ${enforceUserScope ? `AND user_id = ${safeUserId}` : ''}
+      LIMIT 200
+    ) t;
+  `;
+}
 
 // ---------- AI Daily Limit Check (Spec 9.11) ----------
 export async function checkAiDailyLimit(
@@ -342,10 +397,7 @@ export async function checkAiDailyLimit(
     const today = new Date().toISOString().split('T')[0];
     // ✅ FIX: ai_user_cost_tracking lives in the 'ai' schema.
     // .from('ai.ai_user_cost_tracking') is invalid supabase-js syntax — must use
-    // .schema('ai').from('ai_user_cost_tracking'). Previously this silently
-    // failed every time and fell through to the catch block below (which returns
-    // { allowed: true }), so cost/rate limiting was effectively never enforced —
-    // a separate but real bug worth knowing about even though it didn't block responses.
+    // .schema('ai').from('ai_user_cost_tracking').
     const { data: existing, error } = await supabase
       .schema('ai')
       .from('ai_user_cost_tracking')
@@ -372,16 +424,14 @@ export async function checkAiDailyLimit(
   } catch (err: any) {
     console.error('checkAiDailyLimit unexpected error:', err.message);
     // SECURITY FIX: On error, DENY access instead of allowing.
-    // Previously returned { allowed: true } which meant any DB error
-    // completely bypassed rate limiting → unlimited AI requests.
     return { allowed: false, reason: 'Rate limit check failed. Please try again later.' };
   }
 }
 
 // ---------- Org-wide AI Daily Limit Check (Spec 9.11: "Per-user AND company limits") ----------
-// ✅ ADD: checkAiDailyLimit() above only checks the individual user's usage.
-// Spec 9.11 explicitly requires a company-wide ceiling too — otherwise 50
-// users each under their own limit can still exhaust the org's AI budget.
+// checkAiDailyLimit() above only checks the individual user's usage. Spec
+// 9.11 requires a company-wide ceiling too — otherwise many users each
+// under their own limit can still exhaust the org's AI budget.
 export async function checkOrgAiDailyLimit(
   supabase: any,
   orgId: string,
@@ -415,26 +465,22 @@ export async function checkOrgAiDailyLimit(
     return { allowed: true, reason: '' };
   } catch (err: any) {
     console.error('checkOrgAiDailyLimit unexpected error:', err.message);
-    // Fail closed — same pattern as checkAiDailyLimit above.
     return { allowed: false, reason: 'Org rate limit check failed. Please try again later.' };
   }
 }
 
-// =============================================================================
-// ✅ NEW: recordAiUsage — Spec 9.11 cost control
+// ---------- recordAiUsage — Spec 9.11 cost control ----------
+// checkAiDailyLimit()/checkOrgAiDailyLimit() only ever READ
+// ai.ai_user_cost_tracking. Something must WRITE to it too, or
+// request_count/estimated_cost stay at 0 forever and the limits never
+// trigger. Calls the atomic ai.increment_usage() Postgres function
+// (P1_008_ai_hardening_fixes.sql) once per AI request, after the model
+// call(s) complete, so concurrent requests can't race/undercount.
 //
-// checkAiDailyLimit()/checkOrgAiDailyLimit() above only ever READ
-// ai.ai_user_cost_tracking. Nothing in the codebase ever wrote to it, so
-// request_count/estimated_cost stayed at 0 forever and the limits could
-// never trigger. This calls the atomic ai.increment_usage() Postgres
-// function (P1_008_ai_hardening_fixes.sql) once per AI request, after the
-// model call(s) complete, so concurrent requests can't race/undercount.
-//
-// Call this from the AI gateway (chat/route.ts) exactly once per request,
-// on every exit path (success, refused, clarify, denied, blocked, error) —
-// every path still consumes at least one model call and should count
-// against the daily limit.
-// =============================================================================
+// Call this from the AI gateway route exactly once per request, on every
+// exit path (success, refused, clarify, denied, blocked, error) — every
+// path still consumes at least one model call and should count against
+// the daily limit.
 const DEFAULT_COST_PER_1K_TOKENS = 0.0006; // rough Groq Llama 3.3 70B blended rate; override with actual cost_per_1k_tokens from ai_model_registry where known
 
 export async function recordAiUsage(
@@ -458,9 +504,6 @@ export async function recordAiUsage(
       console.error('recordAiUsage RPC error:', error.message);
     }
   } catch (err: any) {
-    // Non-critical for the HTTP response, but must not disappear silently —
-    // surfaced so DevOps monitoring (Spec 16.3: "AI ... token/cost spikes")
-    // can alert if usage tracking itself starts failing.
     console.error('recordAiUsage unexpected error:', err.message);
   }
 }

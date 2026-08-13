@@ -1,5 +1,5 @@
 "use client";
-
+ 
 import Link from "next/link";
 import { usePermissions } from "@/context/PermissionContext";
 import {
@@ -9,12 +9,9 @@ import {
   DollarSign, TrendingUp, Calculator, FileSpreadsheet,
   ArrowLeftRight, Scale, Clock, AlertTriangle, Users,
 } from "lucide-react";
-
-/* ═══════════════════════════════════════════════════════════════════
-   Reports Landing Page — CEO Spec v1.3 Section 13.2
-   All 12 report groups organized by category
-   ═══════════════════════════════════════════════════════════════════ */
-
+ 
+/* Reports Landing Page - CEO Spec v1.3 Section 13.2 */
+ 
 interface ReportCard {
   id: string;
   title: string;
@@ -24,7 +21,7 @@ interface ReportCard {
   perm: string;
   reports?: string[];
 }
-
+ 
 interface ReportGroup {
   id: string;
   label: string;
@@ -32,7 +29,20 @@ interface ReportGroup {
   icon: any;
   cards: ReportCard[];
 }
-
+ 
+const COLOR_MAP: Record<string, string> = {
+  blue:    "#3B82F6",
+  amber:   "#F59E0B",
+  emerald: "#10B981",
+  cyan:    "#06B6D4",
+  violet:  "#8B5CF6",
+  orange:  "#F97316",
+  teal:    "#14B8A6",
+  purple:  "#A855F7",
+  indigo:  "#6366F1",
+  red:     "#EF4444",
+};
+ 
 const reportGroups: ReportGroup[] = [
   {
     id: "financial-statements",
@@ -223,7 +233,7 @@ const reportGroups: ReportGroup[] = [
     ],
   },
 ];
-
+ 
 const colorStyles: Record<string, { badge: string; iconBg: string; border: string; hoverBorder: string }> = {
   blue:    { badge: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400", iconBg: "bg-blue-50 dark:bg-blue-900/20", border: "border-gray-200 dark:border-gray-700", hoverBorder: "hover:border-blue-300 dark:hover:border-blue-700" },
   amber:   { badge: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400", iconBg: "bg-amber-50 dark:bg-amber-900/20", border: "border-gray-200 dark:border-gray-700", hoverBorder: "hover:border-amber-300 dark:hover:border-amber-700" },
@@ -236,10 +246,10 @@ const colorStyles: Record<string, { badge: string; iconBg: string; border: strin
   indigo:  { badge: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400", iconBg: "bg-indigo-50 dark:bg-indigo-900/20", border: "border-gray-200 dark:border-gray-700", hoverBorder: "hover:border-indigo-300 dark:hover:border-indigo-700" },
   red:     { badge: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400", iconBg: "bg-red-50 dark:bg-red-900/20", border: "border-gray-200 dark:border-gray-700", hoverBorder: "hover:border-red-300 dark:hover:border-red-700" },
 };
-
+ 
 export default function ReportsLandingPage() {
   const { hasPermission, isLoading } = usePermissions();
-
+ 
   const visibleGroups = isLoading
     ? reportGroups
     : reportGroups
@@ -248,7 +258,7 @@ export default function ReportsLandingPage() {
           cards: g.cards.filter((c) => hasPermission(c.perm)),
         }))
         .filter((g) => g.cards.length > 0);
-
+ 
   return (
     <div className="max-w-[1600px] mx-auto space-y-8">
       {/* Page Header */}
@@ -258,19 +268,20 @@ export default function ReportsLandingPage() {
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white tracking-tight">Reports</h2>
         </div>
         <p className="text-sm text-gray-500 dark:text-gray-400 ml-10">
-          Formal financial statements, operational reports, and management analysis — CEO Spec v1.3 Section 13
+          Formal financial statements, operational reports, and management analysis - CEO Spec v1.3 Section 13
         </p>
       </div>
-
+ 
       {/* Report Groups */}
       {visibleGroups.map((group) => {
         const styles = colorStyles[group.color] || colorStyles.blue;
         const GroupIcon = group.icon;
+        const iconColor = COLOR_MAP[group.color] || COLOR_MAP.blue;
         return (
           <section key={group.id}>
             <div className="flex items-center gap-2.5 mb-4">
               <div className={`w-7 h-7 rounded-lg ${styles.iconBg} flex items-center justify-center`}>
-                <GroupIcon className={`w-4 h-4`} style={{ color: `var(--tw-color-${group.color})` }} />
+                <GroupIcon className="w-4 h-4" style={{ color: iconColor }} />
               </div>
               <h3 className="text-sm font-bold text-gray-900 dark:text-white uppercase tracking-wider">
                 {group.label}
@@ -279,7 +290,7 @@ export default function ReportsLandingPage() {
                 {group.cards.reduce((sum, c) => sum + (c.reports?.length || 1), 0)} reports
               </span>
             </div>
-
+ 
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {group.cards.map((card) => {
                 const CardIcon = card.icon;
@@ -291,7 +302,7 @@ export default function ReportsLandingPage() {
                   >
                     <div className="flex items-start justify-between mb-3">
                       <div className={`w-10 h-10 ${styles.iconBg} rounded-lg flex items-center justify-center`}>
-                        <CardIcon className={`w-5 h-5`} style={{ color: `var(--tw-color-${group.color})` }} />
+                        <CardIcon className="w-5 h-5" style={{ color: iconColor }} />
                       </div>
                       <ArrowRight className="w-4 h-4 text-gray-300 dark:text-gray-600 group-hover:text-gray-500 dark:group-hover:text-gray-400 transition-colors" />
                     </div>
@@ -325,13 +336,13 @@ export default function ReportsLandingPage() {
           </section>
         );
       })}
-
+ 
       {/* Spec Compliance Notice */}
       <div className="bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30 rounded-xl p-4">
         <div className="flex items-start gap-3">
           <AlertTriangle className="w-5 h-5 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
           <div>
-            <p className="text-sm font-semibold text-blue-800 dark:text-blue-300">Spec v1.3 Section 13.3 — Report Controls</p>
+            <p className="text-sm font-semibold text-blue-800 dark:text-blue-300">Spec v1.3 Section 13.3 - Report Controls</p>
             <p className="text-xs text-blue-700 dark:text-blue-400 mt-1 leading-relaxed">
               Every report displays organization, basis, period, currency, data-as-of timestamp, and active filters.
               Reports reconcile to the ledger or are clearly labeled as operational/forecast. Exports are permission-gated and audit-logged.

@@ -1,16 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
 import {
   postDistributionWithWHT,
   recordWithholdingForTaxCompliance,
   type PostDistributionWithWHTInput,
 } from '@/services/distribution-wht.service';
-
+ 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
-
+ 
 // ─── POST: Post approved profit distribution to General Ledger with WHT ───
 // Spec 5.13: "Calculate distributable profit only after approved expenses,
 //            liabilities, fees, taxes/withholding, and period-close adjustments."
@@ -23,24 +24,28 @@ function getData<T = any>(res: any): T | null {
 //
 // BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
 //   with single atomic RPC call using correct signature.
-
+ 
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('PROFIT_DISTRIBUTION_UPDATE');
   if (auth instanceof NextResponse) return auth;
-
+  // H3 FIX: Enforce MFA for financial posting
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
+  const { supabase } = await getAuthSupabase(req);
+ 
   const orgId = auth.orgId;
   if (!orgId) {
     return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
   }
-
+ 
   try {
     const body = await req.json();
     const { distribution_id, description, distribution_date, withholding_override } = body;
-
+ 
     if (!distribution_id) {
       return NextResponse.json({ error: 'distribution_id is required' }, { status: 400 });
     }
-
+ 
     // 1. Fetch the distribution
     const distribution = getData(
       await supabase
@@ -50,17 +55,17 @@ export async function POST(req: NextRequest) {
         .eq('organization_id', orgId)
         .single()
     );
-
+ 
     if (!distribution) {
       return NextResponse.json({ error: 'Distribution not found' }, { status: 404 });
     }
-
+ 
     if (distribution.status !== 'APPROVED') {
       return NextResponse.json({
         error: `Only APPROVED distributions can be posted. Current: ${distribution.status}`,
       }, { status: 400 });
     }
-
+ 
     // 2. Idempotency check — already posted?
     const existingJournal = getData(
       await supabase
@@ -70,7 +75,7 @@ export async function POST(req: NextRequest) {
         .eq('source_id', distribution_id)
         .maybeSingle()
     );
-
+ 
     if (existingJournal) {
       return NextResponse.json({
         error: 'Already posted to GL',
@@ -78,7 +83,7 @@ export async function POST(req: NextRequest) {
         reference: existingJournal.reference,
       }, { status: 400 });
     }
-
+ 
     // 3. Get open period
     const period = getData(
       await supabase
@@ -89,11 +94,11 @@ export async function POST(req: NextRequest) {
         .limit(1)
         .single()
     );
-
+ 
     if (!period) {
       return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
     }
-
+ 
     // 4. Calculate WHT and prepare journal data
     const input: PostDistributionWithWHTInput = {
       distribution_id,
@@ -104,24 +109,24 @@ export async function POST(req: NextRequest) {
       distribution_date: distribution_date || new Date().toISOString().split('T')[0],
       withholding_override,
     };
-
+ 
     const result = await postDistributionWithWHT(input);
-
+ 
     if ('error' in result && result.status) {
       return NextResponse.json(
         { error: (result as any).error },
         { status: (result as any).status }
       );
     }
-
+ 
     if (!result.journalLines || !result.whtCalculation || !result.withholding_config) {
       return NextResponse.json({ error: 'Incomplete WHT calculation result' }, { status: 500 });
     }
-
+ 
     const journalLines = result.journalLines;
     const whtCalculation = result.whtCalculation;
     const withholding_config = result.withholding_config;
-
+ 
     // 5. Build RPC lines from service output (strip journal_entry_id — RPC handles it)
     const rpcLines = journalLines.map((line: any) => ({
       account_id: line.account_id,
@@ -129,7 +134,7 @@ export async function POST(req: NextRequest) {
       credit_amount: line.credit_amount,
       description: line.description,
     }));
-
+ 
     // 6. BUG-001 FIX: Single atomic RPC call with CORRECT signature
     //    (replaces: manual header insert + manual lines insert + wrong RPC)
     const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
@@ -142,11 +147,11 @@ export async function POST(req: NextRequest) {
       p_source_type: 'PROFIT_DISTRIBUTION',
       p_source_id: distribution_id,
     });
-
+ 
     if (postErr || !journalId) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
-
+ 
     // Fetch the created journal
     const journal = getData(
       await supabase
@@ -155,8 +160,12 @@ export async function POST(req: NextRequest) {
         .eq('id', journalId)
         .single()
     );
-    const reference = journal?.reference || `JE-PD-${journalId}`;
-
+    // C6 FIX: Null guard
+    if (!journal) {
+      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
+    }
+    const reference = journal.reference || `JE-PD-${journalId}`;
+ 
     // 7. Update distribution status to POSTED
     const { error: statusErr } = await supabase
       .from('finance.distributions')
@@ -169,11 +178,11 @@ export async function POST(req: NextRequest) {
         total_net_payment: whtCalculation.total_net_payment,
       })
       .eq('id', distribution_id);
-
+ 
     if (statusErr) {
       console.error('Distribution status update failed:', statusErr.message);
     }
-
+ 
     // 8. Update distribution lines with WHT amounts
     for (const line of whtCalculation.lines) {
       await supabase
@@ -187,7 +196,7 @@ export async function POST(req: NextRequest) {
         .eq('distribution_id', distribution_id)
         .eq('owner_id', line.owner_id);
     }
-
+ 
     // 9. Record WHT for tax compliance (Spec 2.10 — tax_credits_and_withholding)
     const whtRecord = await recordWithholdingForTaxCompliance(
       distribution_id,
@@ -196,10 +205,10 @@ export async function POST(req: NextRequest) {
       auth.userId,
       journalId
     );
-
+ 
     // 10. Audit log
     try {
-      supabase.schema('audit').rpc('log_action', {
+      await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'PROFIT_DISTRIBUTION_POSTED',
         p_entity_type: 'profit_distribution',
@@ -225,7 +234,7 @@ export async function POST(req: NextRequest) {
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
     }
-
+ 
     return NextResponse.json({
       success: true,
       journalId,
@@ -254,27 +263,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
+ 
 // ─── GET: Preview withholding tax calculation for a distribution ─────────────
 // Allows CEO/Finance to preview WHT before posting
-
+ 
 export async function GET(req: NextRequest) {
   const auth = await requirePermission('PROFIT_DISTRIBUTION_READ');
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   const orgId = auth.orgId;
   if (!orgId) {
     return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
   }
-
+ 
   try {
     const { searchParams } = new URL(req.url);
     const distributionId = searchParams.get('distribution_id');
-
+ 
     if (!distributionId) {
       return NextResponse.json({ error: 'distribution_id query parameter is required' }, { status: 400 });
     }
-
+ 
     const distribution = getData(
       await supabase
         .from('finance.distributions')
@@ -283,23 +293,23 @@ export async function GET(req: NextRequest) {
         .eq('organization_id', orgId)
         .maybeSingle()
     );
-
+ 
     if (!distribution) {
       return NextResponse.json({ error: 'Distribution not found' }, { status: 404 });
     }
-
+ 
     const { getWithholdingTaxConfig, calculateWithholdingTax } = await import('@/services/distribution-wht.service');
     const whtConfig = await getWithholdingTaxConfig(orgId);
-
+ 
     const linesWithWHT = calculateWithholdingTax(
       distribution.distribution_lines || [],
       whtConfig
     );
-
+ 
     const totalGross = linesWithWHT.reduce((sum, l) => sum + l.gross_amount, 0);
     const totalWHT = linesWithWHT.reduce((sum, l) => sum + l.withholding_amount, 0);
     const totalNet = linesWithWHT.reduce((sum, l) => sum + l.net_amount, 0);
-
+ 
     return NextResponse.json({
       distribution_id: distributionId,
       distribution_status: distribution.status,

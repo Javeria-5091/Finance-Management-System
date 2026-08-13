@@ -1,16 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getAuthSupabase } from '@/lib/api-auth';
 import { getAuthUser, requirePermission } from '@/lib/api-auth';
-
+ 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
-
+ 
 // ─── GET: List all clients with search, pagination, and filters ───
 export async function GET(req: NextRequest) {
   const auth = await requirePermission('CLIENT_READ');
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   try {
     const { searchParams } = new URL(req.url);
     const page = parseInt(searchParams.get('page') || '1');
@@ -18,30 +19,30 @@ export async function GET(req: NextRequest) {
     const search = searchParams.get('search') || '';
     const isActive = searchParams.get('is_active');
     const projectFilter = searchParams.get('project_id') || '';
-
+ 
     let query = supabase
       .from('clients')
       .select('*, projects(id, name, status)', { count: 'exact' })
       .eq('organization_id', auth.orgId);
-
+ 
     if (search) {
       query = query.or(`name.ilike.%${search}%,client_code.ilike.%${search}%,email.ilike.%${search}%,phone.ilike.%${search}%,tax_registration.ilike.%${search}%`);
     }
     if (isActive !== null && isActive !== undefined) {
       query = query.eq('is_active', isActive === 'true');
     }
-
+ 
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
-
+ 
     const { data, error, count } = await query
       .order('name', { ascending: true })
       .range(from, to);
-
+ 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-
+ 
     return NextResponse.json({
       data,
       total: count || 0,
@@ -52,12 +53,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
+ 
 // ─── POST: Create a new client ───
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('CLIENT_CREATE');
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   try {
     const body = await req.json();
     const {
@@ -65,15 +67,15 @@ export async function POST(req: NextRequest) {
       tax_registration, tax_type, payment_terms, default_currency,
       notes, website,
     } = body;
-
+ 
     if (!name) {
       return NextResponse.json({ error: 'Client name is required' }, { status: 400 });
     }
-
+ 
     // Generate client code using DB sequence
     const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'CLT' });
     const clientCode = numData || `CLT-${Date.now().toString().slice(-6)}`;
-
+ 
     const { data: client, error } = await supabase
       .from('clients')
       .insert({
@@ -97,13 +99,13 @@ export async function POST(req: NextRequest) {
       })
       .select()
       .single();
-
+ 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-
+ 
     try {
-      supabase.schema('audit').rpc('log_action', {
+      await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'CLIENT_CREATED',
         p_entity_type: 'client',
@@ -118,7 +120,7 @@ export async function POST(req: NextRequest) {
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
     }
-
+ 
     return NextResponse.json({
       success: true,
       client,
@@ -128,3 +130,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
+ 
+

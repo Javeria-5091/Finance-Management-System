@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
+import { postVendorBillSchema, validateBody } from '@/lib/validations';
 import { checkBudgetForTransaction, createBudgetAlertNotifications } from '@/services/budget-check.service';
-
+ 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
-
+ 
 // --- POST: Post approved vendor bill to General Ledger ---
 // Spec: When vendor bill is APPROVED -> DR Expense/Cost, CR Accounts Payable
 // Spec 5.4: Budget check BEFORE posting — warn or block based on configurable policy
@@ -15,18 +17,22 @@ function getData<T = any>(res: any): T | null {
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('APPROVE_EXPENSE');
   if (auth instanceof NextResponse) return auth;
-
+  // H3 FIX: Enforce MFA for financial posting
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
+  const { supabase } = await getAuthSupabase(req);
+ 
   const orgId = auth.orgId;
   if (!orgId) {
     return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
   }
-
+ 
   try {
-    const { vendorBillId, force_budget_override } = await req.json();
-    if (!vendorBillId) {
-      return NextResponse.json({ error: 'vendorBillId is required' }, { status: 400 });
-    }
-
+    const rawBody = await req.json();
+    const validation = validateBody(postVendorBillSchema, rawBody);
+    if (!validation.success) return NextResponse.json({ error: validation.error }, { status: 400 });
+    const { vendorBillId, force_budget_override } = validation.data;
+ 
     // 1. Fetch vendor bill with line items (org isolated)
     const bill = getData(await supabase
       .from('vendor_bills')
@@ -34,17 +40,17 @@ export async function POST(req: NextRequest) {
       .eq('id', vendorBillId)
       .eq('organization_id', orgId)
       .single());
-
+ 
     if (!bill) {
       return NextResponse.json({ error: 'Vendor bill not found' }, { status: 404 });
     }
-
+ 
     if (bill.status !== 'APPROVED') {
       return NextResponse.json({
         error: `Only APPROVED vendor bills can be posted. Current: ${bill.status}`,
       }, { status: 400 });
     }
-
+ 
     // 2. Idempotency check
     const existingJournal = getData(await supabase
       .from('finance.journal_entries')
@@ -52,7 +58,7 @@ export async function POST(req: NextRequest) {
       .eq('source_type', 'VENDOR_BILL')
       .eq('source_id', vendorBillId)
       .maybeSingle());
-
+ 
     if (existingJournal) {
       return NextResponse.json({
         error: 'Already posted to GL',
@@ -60,7 +66,7 @@ export async function POST(req: NextRequest) {
         reference: existingJournal.reference,
       }, { status: 400 });
     }
-
+ 
     // --- BUDGET CHECK ---
     const totalBillAmount = Number(bill.total_amount) || 0;
     const budgetCheck = await checkBudgetForTransaction({
@@ -71,15 +77,15 @@ export async function POST(req: NextRequest) {
       currency: bill.currency || 'PKR',
       organization_id: orgId,
     });
-
+ 
     if (budgetCheck.notifications && budgetCheck.notifications.length > 0) {
       await createBudgetAlertNotifications(budgetCheck.notifications, orgId, auth.userId, vendorBillId);
     }
-
+ 
     if (budgetCheck.blocked) {
       if (force_budget_override && ['CEO', 'FINANCE_HEAD', 'Admin'].includes(auth.role)) {
         try {
-          supabase.schema('audit').rpc('log_action', {
+          await supabase.schema('audit').rpc('log_action', {
             p_user_id: auth.userId, p_action: 'BUDGET_OVERRIDE', p_entity_type: 'vendor_bill',
             p_entity_id: vendorBillId,
             p_description: `Budget override on vendor bill posting by ${auth.role}.`,
@@ -97,7 +103,7 @@ export async function POST(req: NextRequest) {
         }, { status: 422 });
       }
     }
-
+ 
     // 3. Get open period
     const period = getData(await supabase
       .from('finance.accounting_periods')
@@ -109,43 +115,43 @@ export async function POST(req: NextRequest) {
     if (!period) {
       return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
     }
-
+ 
     // 4. Find accounts
     const payableAccount = getData(await supabase
       .from('finance.chart_of_accounts').select('id, code, name')
       .eq('account_type', 'LIABILITY').eq('is_active', true).like('code', '21%').limit(1).single());
-
+ 
     let fallbackLiability = null;
     if (!payableAccount) {
       fallbackLiability = getData(await supabase
         .from('finance.chart_of_accounts').select('id, code, name')
         .eq('account_type', 'LIABILITY').eq('is_active', true).ilike('name', '%payable%').limit(1).single());
     }
-
+ 
     const taxAccount = getData(await supabase
       .from('finance.chart_of_accounts').select('id, code, name')
       .eq('account_type', 'LIABILITY').eq('is_active', true).ilike('name', '%tax%').limit(1).single());
-
+ 
     const creditAccountId = payableAccount?.id || fallbackLiability?.id;
-
+ 
     if (!creditAccountId) {
       return NextResponse.json({
         error: 'Required accounts not found. Set up LIABILITY (Accounts Payable) accounts in Chart of Accounts.',
       }, { status: 400 });
     }
-
+ 
     // 5-9. Build journal lines and post via GL engine (BUG-001 FIX + BUG-005 FIX)
     const totalAmount = Number(bill.total_amount) || 0;
     const totalTax = Number(bill.tax_amount) || Number(bill.withholding_amount) || 0;
     const subtotal = totalAmount - totalTax;
-
+ 
     const rpcLines: any[] = [];
-
+ 
     if (bill.vendor_bill_lines && bill.vendor_bill_lines.length > 0) {
       for (const line of bill.vendor_bill_lines) {
         const lineAmount = Number(line.amount) || 0;
         if (lineAmount <= 0) continue;
-
+ 
         let expenseAccountId: string | null = null;
         if (line.account_id) {
           expenseAccountId = line.account_id;
@@ -157,14 +163,14 @@ export async function POST(req: NextRequest) {
             .ilike('name', `%${escapedCategory}%`).limit(1).maybeSingle());
           expenseAccountId = matched?.id || null;
         }
-
+ 
         if (!expenseAccountId) {
           const defaultExp = getData(await supabase
             .from('finance.chart_of_accounts').select('id')
             .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).limit(1).single());
           expenseAccountId = defaultExp?.id || null;
         }
-
+ 
         if (expenseAccountId) {
           rpcLines.push({
             account_id: expenseAccountId,
@@ -178,11 +184,11 @@ export async function POST(req: NextRequest) {
       const expenseAccount = getData(await supabase
         .from('finance.chart_of_accounts').select('id, code, name')
         .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).limit(1).single());
-
+ 
       if (!expenseAccount) {
         return NextResponse.json({ error: 'No OPERATING_EXPENSE account found in Chart of Accounts.' }, { status: 400 });
       }
-
+ 
       rpcLines.push({
         account_id: expenseAccount.id,
         debit_amount: subtotal,
@@ -190,7 +196,7 @@ export async function POST(req: NextRequest) {
         description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${bill.description || 'Vendor Expense'}`,
       });
     }
-
+ 
     // BUG-005 FIX: Build CR lines CORRECTLY — no pop(), construct explicitly
     if (totalTax > 0 && taxAccount) {
       rpcLines.push({
@@ -207,7 +213,7 @@ export async function POST(req: NextRequest) {
         description: `Payable: Vendor Bill ${bill.bill_number || 'N/A'} - ${bill.vendor_id || 'Vendor'}`,
       });
     }
-
+ 
     const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
       p_description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${bill.vendor_id || 'Vendor'} - ${bill.description || ''}`,
       p_transaction_date: bill.bill_date || new Date().toISOString().split('T')[0],
@@ -220,30 +226,34 @@ export async function POST(req: NextRequest) {
       p_project_id: bill.project_id || null,
       p_department_id: bill.department || null,
     });
-
+ 
     if (postErr || !journalId) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
-
+ 
     const journal = getData(await supabase
       .from('finance.journal_entries')
       .select('id, reference, total_debit, total_credit')
       .eq('id', journalId).single());
-    const reference = journal?.reference || `JE-VB-${journalId}`;
-    const totalDebit = journal?.total_debit || 0;
-    const totalCredit = journal?.total_credit || 0;
-
+    // C6 FIX: Null guard
+    if (!journal) {
+      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
+    }
+    const reference = journal.reference || `JE-VB-${journalId}`;
+    const totalDebit = journal.total_debit || 0;
+    const totalCredit = journal.total_credit || 0;
+ 
     // 10. Update vendor bill status
     const { error: statusErr } = await supabase.from('vendor_bills').update({
       status: 'POSTED', posted_at: new Date().toISOString(),
       journal_entry_id: journalId, posted_by: auth.userId,
     }).eq('id', vendorBillId);
-
+ 
     if (statusErr) { console.error('Vendor bill status update failed:', statusErr.message); }
-
+ 
     // 11. Audit log
     try {
-      supabase.schema('audit').rpc('log_action', {
+await       supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId, p_action: 'VENDOR_BILL_POSTED', p_entity_type: 'vendor_bill',
         p_entity_id: vendorBillId,
         p_description: `Posted vendor bill ${bill.bill_number || vendorBillId} to GL: ${reference}`,
@@ -253,7 +263,7 @@ export async function POST(req: NextRequest) {
         p_related_journal_id: journalId,
       });
     } catch (auditErr: any) { console.error('Audit log failed:', auditErr); }
-
+ 
     return NextResponse.json({
       success: true, journalId, reference, totalDebit, totalCredit,
       lineCount: rpcLines.length,

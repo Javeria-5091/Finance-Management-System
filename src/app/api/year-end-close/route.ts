@@ -1,28 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
 import { yearEndCloseSchema, validateBody } from '@/lib/validations';
-
+ 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
-
+ 
 // ─── POST: Year-End Close — Close fiscal year & transfer P&L to Retained Earnings ───
 // Spec 12.10: Fiscal-year close and next-year opening
 // Spec 4.2 FIX: organization_id filter added to ALL record fetches
 // Spec 4.1 FIX: Retained Earnings is CREDITED for profit (not DEBITED)
 // BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
 //   with single atomic RPC call using correct signature.
-
+ 
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('YEAR_END_CLOSE');
   if (auth instanceof NextResponse) return auth;
-
+  // H3 FIX: Enforce MFA for financial posting
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
+  const { supabase } = await getAuthSupabase(req);
+ 
   const orgId = auth.orgId;
   if (!orgId) {
     return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
   }
-
+ 
   try {
     // P0 FIX: Zod input validation (was manual/inconsistent before)
     const rawBody = await req.json();
@@ -31,7 +36,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: validation.error }, { status: 400 });
     }
     const { fiscal_year_id, description } = validation.data;
-
+ 
     // ── 1. Fetch fiscal year (WITH org_id filter — Spec 4.2 FIX) ──
     const fiscalYear = getData(
       await supabase
@@ -41,15 +46,15 @@ export async function POST(req: NextRequest) {
         .eq('organization_id', orgId)   // ← SECURITY FIX: was missing
         .single()
     );
-
+ 
     if (!fiscalYear) {
       return NextResponse.json({ error: 'Fiscal year not found or access denied' }, { status: 404 });
     }
-
+ 
     if (fiscalYear.status === 'CLOSED') {
       return NextResponse.json({ error: 'Fiscal year is already closed' }, { status: 400 });
     }
-
+ 
     // ── 2. Verify all periods belong to this fiscal year ──
     const periods = getData(
       await supabase
@@ -59,11 +64,11 @@ export async function POST(req: NextRequest) {
         .eq('organization_id', orgId)   // ← SECURITY FIX
         .order('start_date', { ascending: true })
     );
-
+ 
     if (!periods || periods.length === 0) {
       return NextResponse.json({ error: 'No accounting periods found for this fiscal year' }, { status: 400 });
     }
-
+ 
     const unclosedPeriods = periods.filter((p:any)=> p.status !== 'HARD_CLOSED');
     if (unclosedPeriods.length > 0) {
       return NextResponse.json({
@@ -71,36 +76,36 @@ export async function POST(req: NextRequest) {
         unclosed_periods: unclosedPeriods.map((p:any) => ({ id: p.id, status: p.status })),
       }, { status: 400 });
     }
-
+ 
     // ── 3. Get P&L accounts for the fiscal year ──
     const { data: revenueAccounts, error: revErr } = await supabase.rpc('finance.get_pnl_accounts', {
       p_fiscal_year_id: fiscal_year_id,
       p_organization_id: orgId,
       p_account_type: 'REVENUE',
     });
-
+ 
     if (revErr) {
       return NextResponse.json({ error: 'Failed to fetch revenue accounts: ' + revErr.message }, { status: 500 });
     }
-
+ 
     const { data: expenseAccounts, error: expErr } = await supabase.rpc('finance.get_pnl_accounts', {
       p_fiscal_year_id: fiscal_year_id,
       p_organization_id: orgId,
       p_account_type: 'EXPENSE',
     });
-
+ 
     if (expErr) {
       return NextResponse.json({ error: 'Failed to fetch expense accounts: ' + expErr.message }, { status: 500 });
     }
-
+ 
     const revenueLines: any[] = revenueAccounts || [];
     const expenseLines: any[] = expenseAccounts || [];
-
+ 
     // ── 4. Calculate totals ──
     const totalRevenue = revenueLines.reduce((sum: number, a: any) => sum + Math.abs(Number(a.balance) || 0), 0);
     const totalExpenses = expenseLines.reduce((sum: number, a: any) => sum + Math.abs(Number(a.balance) || 0), 0);
     const netIncome = totalRevenue - totalExpenses; // positive = profit, negative = loss
-
+ 
     // If zero profit/loss, nothing to close
     if (Math.abs(netIncome) < 0.02) {
       return NextResponse.json({
@@ -111,7 +116,7 @@ export async function POST(req: NextRequest) {
         net_income: 0,
       });
     }
-
+ 
     // ── 5. Get Retained Earnings account ──
     const retainedEarningsAccount = getData(
       await supabase
@@ -123,14 +128,14 @@ export async function POST(req: NextRequest) {
         .eq('is_active', true)
         .maybeSingle()
     );
-
+ 
     if (!retainedEarningsAccount) {
       return NextResponse.json({ error: 'Retained Earnings account not found. Create an EQUITY account with code 3000 or name containing "Retained Earnings".' }, { status: 400 });
     }
-
+ 
     // ── 6. Build closing journal lines for RPC ──
     const rpcLines: any[] = [];
-
+ 
     // DR Revenue accounts to zero them out
     for (const acct of revenueLines) {
       const balance = Math.abs(Number(acct.balance) || 0);
@@ -143,7 +148,7 @@ export async function POST(req: NextRequest) {
         });
       }
     }
-
+ 
     // CR Expense accounts to zero them out
     for (const acct of expenseLines) {
       const balance = Math.abs(Number(acct.balance) || 0);
@@ -156,7 +161,7 @@ export async function POST(req: NextRequest) {
         });
       }
     }
-
+ 
     // CRITICAL FIX (Spec 4.1): Retained Earnings on CORRECT side
     if (netIncome > 0) {
       // PROFIT: CREDIT Retained Earnings
@@ -175,7 +180,7 @@ export async function POST(req: NextRequest) {
         description: `Year-End Close: Transfer net loss to Retained Earnings`,
       });
     }
-
+ 
     // Balance check
     const totalDebit = rpcLines.reduce((s: number, l: any) => s + (Number(l.debit_amount) || 0), 0);
     const totalCredit = rpcLines.reduce((s: number, l: any) => s + (Number(l.credit_amount) || 0), 0);
@@ -186,13 +191,13 @@ export async function POST(req: NextRequest) {
         total_credit: totalCredit,
       }, { status: 500 });
     }
-
+ 
     // ── 7. Get reference number ──
     const { data: refData } = await supabase.rpc('get_next_number', {
       p_type: 'YEAR_END_CLOSE',
     });
     const reference = refData || `YEC-${fiscal_year_id.slice(0, 8)}`;
-
+ 
     // ── 8. BUG-001 FIX: Single atomic RPC call with CORRECT signature ──
     //    Replaces: manual journal header insert + manual lines insert + wrong RPC({ p_journal_id, p_posted_by })
     const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
@@ -205,11 +210,11 @@ export async function POST(req: NextRequest) {
       p_source_type: 'YEAR_END_CLOSE',
       p_source_id: fiscal_year_id,
     });
-
+ 
     if (postErr || !journalId) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
-
+ 
     // Fetch the created journal for reference
     const journal = getData(
       await supabase
@@ -218,9 +223,13 @@ export async function POST(req: NextRequest) {
         .eq('id', journalId)
         .single()
     );
-    const journalReference = journal?.reference || reference;
-
-    // ── 9. Close the fiscal year ──
+    // C6 FIX: Null guard
+    if (!journal) {
+      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
+    }
+    const journalReference = journal.reference || reference;
+ 
+    // H11 FIX: Treat fiscal year update failure as ERROR, not silent log
     const { error: fyErr } = await supabase
       .from('finance.fiscal_years')
       .update({
@@ -231,15 +240,20 @@ export async function POST(req: NextRequest) {
         net_income: netIncome,
       })
       .eq('id', fiscal_year_id)
-      .eq('organization_id', orgId);   // ← SECURITY FIX
-
+      .eq('organization_id', orgId);
+ 
     if (fyErr) {
-      console.error('Fiscal year status update failed:', fyErr.message);
+      return NextResponse.json({
+        error: 'Journal posted successfully but fiscal year status update failed. Manual reconciliation required: ' + fyErr.message,
+        journalId,
+        reference: journalReference,
+        partial_success: true,
+      }, { status: 500 });
     }
-
+ 
     // ── 10. Audit log ──
     try {
-      supabase.schema('audit').rpc('log_action', {
+      await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'YEAR_END_CLOSED',
         p_entity_type: 'fiscal_year',
@@ -262,7 +276,7 @@ export async function POST(req: NextRequest) {
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
     }
-
+ 
     return NextResponse.json({
       success: true,
       journalId,
@@ -280,26 +294,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
+ 
 // ─── GET: Year-End Close Preview ────────────────────────────────────────────────
-
+ 
 export async function GET(req: NextRequest) {
   const auth = await requirePermission('YEAR_END_CLOSE_READ');
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   const orgId = auth.orgId;
   if (!orgId) {
     return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
   }
-
+ 
   try {
     const { searchParams } = new URL(req.url);
     const fiscalYearId = searchParams.get('fiscal_year_id');
-
+ 
     if (!fiscalYearId) {
       return NextResponse.json({ error: 'fiscal_year_id query parameter is required' }, { status: 400 });
     }
-
+ 
     const fiscalYear = getData(
       await supabase
         .from('finance.fiscal_years')
@@ -308,11 +323,11 @@ export async function GET(req: NextRequest) {
         .eq('organization_id', orgId)
         .maybeSingle()
     );
-
+ 
     if (!fiscalYear) {
       return NextResponse.json({ error: 'Fiscal year not found' }, { status: 404 });
     }
-
+ 
     const periods = getData(
       await supabase
         .from('finance.accounting_periods')
@@ -321,9 +336,9 @@ export async function GET(req: NextRequest) {
         .eq('organization_id', orgId)
         .order('start_date', { ascending: true })
     );
-
+ 
     const unclosed = (periods || []).filter((p:any) => p.status !== 'HARD_CLOSED');
-
+ 
     return NextResponse.json({
       fiscal_year: {
         id: fiscalYear.id,
@@ -341,3 +356,5 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
+ 
+

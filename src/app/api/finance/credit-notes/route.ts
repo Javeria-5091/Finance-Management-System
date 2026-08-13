@@ -1,16 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
-
+import { creditNoteCreateSchema, validateBody, sanitizeSearch } from '@/lib/validations';
+ 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
-
+ 
 // ─── GET: List credit notes ───
 export async function GET(req: NextRequest) {
   const auth = await requirePermission('INVOICE_READ');
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   try {
     const { searchParams } = new URL(req.url);
     const page = parseInt(searchParams.get('page') || '1');
@@ -18,14 +20,15 @@ export async function GET(req: NextRequest) {
     const search = searchParams.get('search') || '';
     const status = searchParams.get('status') || '';
     const invoiceId = searchParams.get('invoice_id') || '';
-
+ 
     let query = supabase
       .from('credit_notes')
       .select('*, invoice:invoices(id, invoice_number, client_id)', { count: 'exact' })
       .eq('organization_id', auth.orgId);
-
+ 
     if (search) {
-      query = query.or(`credit_note_number.ilike.%${search}%,reason.ilike.%${search}%`);
+      const safeSearch = sanitizeSearch(search);
+      query = query.or(`credit_note_number.ilike.%${safeSearch}%,reason.ilike.%${safeSearch}%`);
     }
     if (status) {
       query = query.eq('status', status);
@@ -33,41 +36,40 @@ export async function GET(req: NextRequest) {
     if (invoiceId) {
       query = query.eq('invoice_id', invoiceId);
     }
-
+ 
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
-
+ 
     const { data, error, count } = await query
       .order('created_at', { ascending: false })
       .range(from, to);
-
+ 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-
+ 
     return NextResponse.json({ data, total: count || 0, page, pageSize });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
+ 
 // ─── POST: Create a new credit note ───
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('INVOICE_CREATE');
   if (auth instanceof NextResponse) return auth;
-
+  const { supabase } = await getAuthSupabase(req);
+ 
   try {
-    const body = await req.json();
+    const rawBody = await req.json();
+    const validation = validateBody(creditNoteCreateSchema, rawBody);
+    if (!validation.success) return NextResponse.json({ error: validation.error }, { status: 400 });
     const {
       invoice_id, reason, line_items,
       total_amount, tax_amount, currency,
       exchange_rate, notes,
-    } = body;
-
-    if (!invoice_id || !total_amount) {
-      return NextResponse.json({ error: 'invoice_id and total_amount are required' }, { status: 400 });
-    }
-
+    } = validation.data;
+ 
     // Validate the referenced invoice exists and belongs to org
     const invoice = getData(await supabase
       .from('invoices')
@@ -75,15 +77,15 @@ export async function POST(req: NextRequest) {
       .eq('id', invoice_id)
       .eq('organization_id', auth.orgId)
       .single());
-
+ 
     if (!invoice) {
       return NextResponse.json({ error: 'Referenced invoice not found' }, { status: 404 });
     }
-
+ 
     // Generate credit note number
     const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'CN' });
     const creditNoteNumber = numData || `CN-${Date.now().toString().slice(-6)}`;
-
+ 
     const { data: creditNote, error } = await supabase
       .from('credit_notes')
       .insert({
@@ -103,13 +105,13 @@ export async function POST(req: NextRequest) {
       })
       .select()
       .single();
-
+ 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
-
+ 
     try {
-      supabase.schema('audit').rpc('log_action', {
+      await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'CREDIT_NOTE_CREATED',
         p_entity_type: 'credit_note',
@@ -124,7 +126,7 @@ export async function POST(req: NextRequest) {
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
     }
-
+ 
     return NextResponse.json({
       success: true,
       creditNote,
