@@ -3,16 +3,13 @@
 // GET /api/ai/conversations/[id]/messages
 // Loads all messages for a given conversation (for "load past conversation")
 //
-// NOTE: This route was missing from the files you shared — AiChat.tsx calls
-// fetch(`/api/ai/conversations/${convId}/messages`) but no matching file existed
-// (what was pasted as "message/route.ts" was actually a duplicate of feedback/route.ts).
-// Without this file, clicking a past conversation in the history panel does nothing.
-// Place this at: app/api/ai/conversations/[id]/messages/route.ts
+// ✅ FIX (Gap 5 — auth inconsistency): switched from a local
+// createServerClient + getSession() (cookie-only) to getAuthSupabase()
+// (cookie OR Bearer token), matching chat/route.ts and conversations/route.ts.
 // =============================================================================
 
-import { createServerClient } from '@supabase/ssr';
-import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
+import { getAuthSupabase } from '@/lib/api-auth';
 
 export async function GET(
   req: Request,
@@ -21,25 +18,14 @@ export async function GET(
   try {
     const conversationId = params.id;
 
-    // ─── 1. Auth check ───
-    const cookieStore = await cookies();
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          getAll() { return cookieStore.getAll(); },
-          setAll() {},
-        },
-      }
-    );
-
-    const { data: { session }, error: authError } = await supabase.auth.getSession();
-    if (authError || !session?.user) {
+    // ─── 1. Auth check (cookie session OR Bearer token) ───
+    const { supabase, user, authError } = await getAuthSupabase(req);
+    if (authError || !user) {
       return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
     }
 
-    // ─── 2. Verify the conversation belongs to this user (defense in depth, RLS also enforces this) ───
+    // ─── 2. Verify the conversation is visible to this user (defense in
+    //         depth — RLS also enforces owner-or-privileged-role access) ───
     const { data: conv, error: convError } = await supabase
       .schema('ai')
       .from('ai_conversations')
@@ -51,7 +37,10 @@ export async function GET(
       console.error('ai_conversations lookup error:', convError.message);
       return NextResponse.json({ error: 'Failed to load conversation' }, { status: 500 });
     }
-    if (!conv || conv.user_id !== session.user.id) {
+    if (!conv) {
+      // RLS already filtered out conversations this user can't see (not
+      // owner and not a privileged role) — a missing row means "not found
+      // or not permitted", which we deliberately don't distinguish.
       return NextResponse.json({ error: 'Conversation not found' }, { status: 404 });
     }
 

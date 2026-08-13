@@ -1,43 +1,33 @@
 // =============================================================================
 // AI Conversations API — Spec 9.9
 // GET: List user's past conversations (for history panel)
+//
+// ✅ FIX (Gap 5 — auth inconsistency): this route previously built its own
+// createServerClient + getSession() call, which only reads the cookie
+// session. app/api/ai/chat/route.ts uses getAuthSupabase(), which also
+// accepts a Bearer token — so a client authenticated via Bearer could chat
+// but would get 401s loading its own conversation history. Switched to the
+// same getAuthSupabase() helper used everywhere else in the AI gateway.
 // =============================================================================
 
-import { createServerClient } from '@supabase/ssr';
-import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
+import { getAuthSupabase } from '@/lib/api-auth';
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    // ─── 1. Auth check ───
-    const cookieStore = await cookies();
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          getAll() { return cookieStore.getAll(); },
-          setAll() {},
-        },
-      }
-    );
-
-    const { data: { session }, error: authError } = await supabase.auth.getSession();
-    if (authError || !session?.user) {
+    // ─── 1. Auth check (cookie session OR Bearer token) ───
+    const { supabase, user, authError } = await getAuthSupabase(req);
+    if (authError || !user) {
       return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
     }
 
-    // ─── 2. Fetch conversations (RLS ensures user only sees own) ───
-    // ✅ REAL FIX: ai_conversations DOES exist in the 'ai' schema (confirmed in your SQL file).
-    // The problem is not the table's existence — it's that supabase-js requires
-    // .schema('ai').from('ai_conversations') to reach a non-public schema.
-    // Writing .from('ai.ai_conversations') makes it look for a table literally
-    // named "ai.ai_conversations" inside the public schema, which fails.
+    // ─── 2. Fetch conversations (RLS ensures user only sees own, or org-wide
+    //         for CEO/FINANCE_HEAD/AUDITOR/Admin per P1_008 migration) ───
     const { data, error } = await supabase
       .schema('ai')
       .from('ai_conversations')
       .select('id, title, status, created_at, updated_at')
-      .eq('user_id', session.user.id)
+      .eq('user_id', user.id)
       .eq('status', 'active')
       .order('updated_at', { ascending: false })
       .limit(20);

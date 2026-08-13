@@ -1,33 +1,24 @@
 // =============================================================================
 // AI Feedback API — Spec 9.9 (ai_feedback)
 // Records user thumbs-up/down on AI responses for quality evaluation (Spec 9.11)
+//
+// ✅ FIX (Gap 5 — auth inconsistency): switched from a local
+// createServerClient + getSession() (cookie-only) to getAuthSupabase()
+// (cookie OR Bearer token), matching chat/route.ts.
 // =============================================================================
 
-import { createServerClient } from '@supabase/ssr';
-import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
+import { getAuthSupabase } from '@/lib/api-auth';
 
 export async function POST(req: NextRequest) {
   try {
-    // ─── 1. Auth check ───
-    const cookieStore = await cookies();
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          getAll() { return cookieStore.getAll(); },
-          setAll() {},
-        },
-      }
-    );
-
-    const { data: { session }, error: authError } = await supabase.auth.getSession();
-    if (authError || !session?.user) {
+    // ─── 1. Auth check (cookie session OR Bearer token) ───
+    const { supabase, user, authError } = await getAuthSupabase(req);
+    if (authError || !user) {
       return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
     }
 
-    const userId = session.user.id;
+    const userId = user.id;
 
     // ─── 2. Parse body ───
     const body = await req.json();
@@ -48,7 +39,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ─── 3. Get org_id from profile ───
-    // ✅ FIX: 'profiles' is in the PUBLIC schema (confirmed) — query unqualified.
+    // 'profiles' is in the PUBLIC schema (confirmed) — query unqualified.
     const { data: profile } = await supabase
       .from('profiles')
       .select('organization_id')
@@ -58,9 +49,9 @@ export async function POST(req: NextRequest) {
     const orgId = profile?.organization_id || '';
 
     // ─── 4. Insert feedback (Spec 9.9 — with conversation_id) ───
-    // ✅ FIX: ai_feedback lives in the 'ai' schema — must use .schema('ai').from('ai_feedback'),
+    // ai_feedback lives in the 'ai' schema — must use .schema('ai').from('ai_feedback'),
     // NOT .from('ai.ai_feedback'). The dotted string is not valid schema-qualification
-    // syntax in supabase-js; it was silently failing and returning a 500 every time.
+    // syntax in supabase-js.
     const { data, error } = await supabase
       .schema('ai')
       .from('ai_feedback')

@@ -34,13 +34,13 @@ const APPROVAL_ROLES: Record<string, number> = {
   CEO: 100,
   FINANCE_HEAD: 80,
   ACCOUNTANT: 60,
-  AUDITOR: 55,           
+  AUDITOR: 55,
   HOD: 40,
   PROJECT_MANAGER: 20,
   TECHNICAL_ADMIN: 15,
   EMPLOYEE: 10,
   VIEWER: 0,
-  Admin: 100, 
+  Admin: 100,
 };
 
 // ---------- Core: get authenticated user from session ----------
@@ -313,31 +313,22 @@ export async function isSqlSafe(sql: string): Promise<{ safe: boolean; reason: s
   return { safe: true, reason: '' };
 }
 
-// ---------- Spec 9.5: Inject Scope Programmatically ----------
-export function injectScope(sql: string, orgId: string, userId: string, enforceUserScope: boolean): string {
-  const cleanSql = sql.replace(/;\s*$/, '').trim();
-
-  // SECURITY FIX: Use parameterized query via EXECUTE ... USING instead of
-  // string interpolation of userId. This prevents SQL injection even if
-  // AST validation is bypassed.
-  return `
-    SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
-      WITH llm_query AS (
-        ${cleanSql}
-      )
-      SELECT * FROM llm_query
-      WHERE 1=1
-      ${enforceUserScope ? 'AND user_id = $1' : ''}
-      LIMIT 200
-    ) t;
-  `;
-}
-
-// Parameter values for the injected scope query
-// Returns parameters to pass to EXECUTE ... USING
-export function getScopeParams(userId: string, enforceUserScope: boolean): any[] {
-  return enforceUserScope ? [userId] : [];
-}
+// =============================================================================
+// ✅ REMOVED: injectScope() / getScopeParams()
+//
+// These were dead code. They existed to build a parameterized wrapper SQL
+// string (`WHERE user_id = $1 ...`) but nothing in the codebase ever called
+// them — app/api/ai/chat/route.ts had its own local buildScopedSql() that
+// still did raw string interpolation of orgId/userId, which is exactly the
+// pattern this function's own comment claimed had already been fixed.
+//
+// The actual fix (see P1_006_ai_function.sql v2) moves scope-wrapping
+// entirely into the database function execute_ai_readonly_query(), which
+// now takes org_id/user_id as typed `uuid` parameters and builds the
+// wrapper SQL itself using format(...,%L). Application code passes only
+// the validated inner SELECT and never builds the WHERE/LIMIT wrapper —
+// so there is no app-level string-interpolation path left to get wrong.
+// =============================================================================
 
 // ---------- AI Daily Limit Check (Spec 9.11) ----------
 export async function checkAiDailyLimit(
@@ -384,5 +375,92 @@ export async function checkAiDailyLimit(
     // Previously returned { allowed: true } which meant any DB error
     // completely bypassed rate limiting → unlimited AI requests.
     return { allowed: false, reason: 'Rate limit check failed. Please try again later.' };
+  }
+}
+
+// ---------- Org-wide AI Daily Limit Check (Spec 9.11: "Per-user AND company limits") ----------
+// ✅ ADD: checkAiDailyLimit() above only checks the individual user's usage.
+// Spec 9.11 explicitly requires a company-wide ceiling too — otherwise 50
+// users each under their own limit can still exhaust the org's AI budget.
+export async function checkOrgAiDailyLimit(
+  supabase: any,
+  orgId: string,
+  maxOrgRequests: number = 2000,
+  maxOrgCost: number = 30.0
+): Promise<{ allowed: boolean; reason: string }> {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const { data, error } = await supabase
+      .schema('ai')
+      .from('ai_user_cost_tracking')
+      .select('request_count, estimated_cost')
+      .eq('organization_id', orgId)
+      .eq('period_date', today);
+
+    if (error) {
+      console.error('checkOrgAiDailyLimit fetch error:', error.message);
+      return { allowed: false, reason: 'Org rate limit check failed. Please try again later.' };
+    }
+
+    const rows = data || [];
+    const totalRequests = rows.reduce((sum: number, r: any) => sum + (r.request_count || 0), 0);
+    const totalCost = rows.reduce((sum: number, r: any) => sum + parseFloat(r.estimated_cost || '0'), 0);
+
+    if (totalRequests >= maxOrgRequests) {
+      return { allowed: false, reason: 'Organization-wide daily AI request limit reached. Contact administrator.' };
+    }
+    if (totalCost >= maxOrgCost) {
+      return { allowed: false, reason: 'Organization-wide daily AI cost limit reached. Contact administrator.' };
+    }
+    return { allowed: true, reason: '' };
+  } catch (err: any) {
+    console.error('checkOrgAiDailyLimit unexpected error:', err.message);
+    // Fail closed — same pattern as checkAiDailyLimit above.
+    return { allowed: false, reason: 'Org rate limit check failed. Please try again later.' };
+  }
+}
+
+// =============================================================================
+// ✅ NEW: recordAiUsage — Spec 9.11 cost control
+//
+// checkAiDailyLimit()/checkOrgAiDailyLimit() above only ever READ
+// ai.ai_user_cost_tracking. Nothing in the codebase ever wrote to it, so
+// request_count/estimated_cost stayed at 0 forever and the limits could
+// never trigger. This calls the atomic ai.increment_usage() Postgres
+// function (P1_008_ai_hardening_fixes.sql) once per AI request, after the
+// model call(s) complete, so concurrent requests can't race/undercount.
+//
+// Call this from the AI gateway (chat/route.ts) exactly once per request,
+// on every exit path (success, refused, clarify, denied, blocked, error) —
+// every path still consumes at least one model call and should count
+// against the daily limit.
+// =============================================================================
+const DEFAULT_COST_PER_1K_TOKENS = 0.0006; // rough Groq Llama 3.3 70B blended rate; override with actual cost_per_1k_tokens from ai_model_registry where known
+
+export async function recordAiUsage(
+  supabase: any,
+  userId: string,
+  orgId: string,
+  tokens: number,
+  costUsd?: number
+): Promise<void> {
+  try {
+    const estimatedCost = costUsd ?? (Math.max(tokens, 0) / 1000) * DEFAULT_COST_PER_1K_TOKENS;
+
+    const { error } = await supabase.schema('ai').rpc('increment_usage', {
+      p_user_id: userId,
+      p_organization_id: orgId,
+      p_tokens: Math.max(Math.round(tokens), 0),
+      p_cost: estimatedCost,
+    });
+
+    if (error) {
+      console.error('recordAiUsage RPC error:', error.message);
+    }
+  } catch (err: any) {
+    // Non-critical for the HTTP response, but must not disappear silently —
+    // surfaced so DevOps monitoring (Spec 16.3: "AI ... token/cost spikes")
+    // can alert if usage tracking itself starts failing.
+    console.error('recordAiUsage unexpected error:', err.message);
   }
 }
