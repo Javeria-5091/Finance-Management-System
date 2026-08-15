@@ -47,6 +47,13 @@ CREATE SCHEMA IF NOT EXISTS "reporting";
 ALTER SCHEMA "reporting" OWNER TO "postgres";
 
 
+CREATE EXTENSION IF NOT EXISTS "btree_gist" WITH SCHEMA "extensions";
+
+
+
+
+
+
 CREATE EXTENSION IF NOT EXISTS "pg_stat_statements" WITH SCHEMA "extensions";
 
 
@@ -75,8 +82,31 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
+CREATE OR REPLACE FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'ai'
+    AS $$
+BEGIN
+  INSERT INTO ai.ai_user_cost_tracking
+    (user_id, organization_id, period_date, request_count, total_tokens, estimated_cost)
+  VALUES
+    (p_user_id, p_organization_id, CURRENT_DATE, 1, GREATEST(p_tokens, 0), GREATEST(p_cost, 0))
+  ON CONFLICT (user_id, organization_id, period_date)
+  DO UPDATE SET
+    request_count  = ai.ai_user_cost_tracking.request_count + 1,
+    total_tokens    = ai.ai_user_cost_tracking.total_tokens + GREATEST(p_tokens, 0),
+    estimated_cost  = ai.ai_user_cost_tracking.estimated_cost + GREATEST(p_cost, 0),
+    updated_at      = now();
+END;
+$$;
+
+
+ALTER FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "audit"."ai_audit_report"("p_start" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_end" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_user_id" "uuid" DEFAULT NULL::"uuid", "p_tool" "text" DEFAULT NULL::"text", "p_status" "text" DEFAULT NULL::"text", "p_page" integer DEFAULT 1, "p_page_size" integer DEFAULT 50) RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'audit', 'public'
     AS $$
 DECLARE
   v_offset INTEGER := GREATEST(p_page - 1, 0) * p_page_size;
@@ -134,6 +164,7 @@ ALTER FUNCTION "audit"."ai_audit_report"("p_start" timestamp with time zone, "p_
 
 CREATE OR REPLACE FUNCTION "audit"."audit_log_report"("p_start" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_end" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_user_id" "uuid" DEFAULT NULL::"uuid", "p_action" "text" DEFAULT NULL::"text", "p_entity_type" "text" DEFAULT NULL::"text", "p_severity" "text" DEFAULT NULL::"text", "p_approval_level" "text" DEFAULT NULL::"text", "p_source_module" "text" DEFAULT NULL::"text", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_min_amount" numeric DEFAULT NULL::numeric, "p_max_amount" numeric DEFAULT NULL::numeric, "p_page" integer DEFAULT 1, "p_page_size" integer DEFAULT 50) RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'audit', 'public'
     AS $$
 DECLARE
   v_offset INTEGER := GREATEST(p_page - 1, 0) * p_page_size;
@@ -203,6 +234,7 @@ ALTER FUNCTION "audit"."audit_log_report"("p_start" timestamp with time zone, "p
 
 CREATE OR REPLACE FUNCTION "audit"."log_action"("p_user_id" "uuid", "p_user_email" "text" DEFAULT NULL::"text", "p_user_name" "text" DEFAULT NULL::"text", "p_action" "text" DEFAULT NULL::"text", "p_entity_type" "text" DEFAULT NULL::"text", "p_entity_id" "uuid" DEFAULT NULL::"uuid", "p_description" "text" DEFAULT ''::"text", "p_old_values" "jsonb" DEFAULT NULL::"jsonb", "p_new_values" "jsonb" DEFAULT NULL::"jsonb", "p_ip_address" "inet" DEFAULT NULL::"inet", "p_user_agent" "text" DEFAULT NULL::"text", "p_status" "text" DEFAULT 'success'::"text", "p_error_message" "text" DEFAULT NULL::"text", "p_severity" "text" DEFAULT 'info'::"text", "p_reason" "text" DEFAULT NULL::"text", "p_source_module" "text" DEFAULT NULL::"text", "p_request_id" "text" DEFAULT NULL::"text", "p_previous_status" "text" DEFAULT NULL::"text", "p_new_status" "text" DEFAULT NULL::"text", "p_approval_level" "text" DEFAULT NULL::"text", "p_approval_comments" "text" DEFAULT NULL::"text", "p_delegated_authority" "text" DEFAULT NULL::"text", "p_limit_decision" "text" DEFAULT NULL::"text", "p_session_id" "text" DEFAULT NULL::"text", "p_auth_method" "text" DEFAULT NULL::"text", "p_attachment_ids" "uuid"[] DEFAULT NULL::"uuid"[], "p_import_batch_id" "uuid" DEFAULT NULL::"uuid", "p_external_ref" "text" DEFAULT NULL::"text", "p_related_journal_id" "uuid" DEFAULT NULL::"uuid", "p_related_payment_id" "uuid" DEFAULT NULL::"uuid", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_amount" numeric DEFAULT NULL::numeric, "p_amount_currency" "text" DEFAULT NULL::"text") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'audit', 'public'
     AS $$
 DECLARE
   v_id UUID;
@@ -261,6 +293,7 @@ ALTER FUNCTION "audit"."log_action"("p_user_id" "uuid", "p_user_email" "text", "
 
 CREATE OR REPLACE FUNCTION "audit"."log_ai_event"("p_user_id" "uuid", "p_user_email" "text" DEFAULT NULL::"text", "p_user_name" "text" DEFAULT NULL::"text", "p_action" "text" DEFAULT 'AI_QUERY'::"text", "p_status" "text" DEFAULT 'success'::"text", "p_severity" "text" DEFAULT 'info'::"text", "p_entity_type" "text" DEFAULT NULL::"text", "p_entity_id" "uuid" DEFAULT NULL::"uuid", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_ai_question" "text" DEFAULT NULL::"text", "p_ai_normalized_intent" "text" DEFAULT NULL::"text", "p_ai_selected_tool" "text" DEFAULT NULL::"text", "p_ai_generated_sql" "text" DEFAULT NULL::"text", "p_ai_template_id" "text" DEFAULT NULL::"text", "p_ai_row_count" integer DEFAULT NULL::integer, "p_ai_model" "text" DEFAULT NULL::"text", "p_ai_latency_ms" integer DEFAULT NULL::integer, "p_ai_cost_usd" numeric DEFAULT NULL::numeric, "p_ai_input_tokens" integer DEFAULT NULL::integer, "p_ai_output_tokens" integer DEFAULT NULL::integer, "p_ai_refusal_reason" "text" DEFAULT NULL::"text", "p_request_id" "text" DEFAULT NULL::"text", "p_ip_address" "inet" DEFAULT NULL::"inet", "p_user_agent" "text" DEFAULT NULL::"text") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'audit', 'public'
     AS $$
 DECLARE
   v_id UUID;
@@ -318,6 +351,7 @@ ALTER FUNCTION "audit"."log_ai_event"("p_user_id" "uuid", "p_user_email" "text",
 
 CREATE OR REPLACE FUNCTION "audit"."log_data_access_event"("p_user_id" "uuid" DEFAULT NULL::"uuid", "p_user_email" "text" DEFAULT NULL::"text", "p_accessed_entity_type" "text" DEFAULT NULL::"text", "p_accessed_entity_id" "uuid" DEFAULT NULL::"uuid", "p_access_type" "text" DEFAULT 'read'::"text", "p_access_granted" boolean DEFAULT true, "p_request_id" "text" DEFAULT NULL::"text") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'audit', 'public'
     AS $$
 DECLARE
   v_id UUID;
@@ -339,6 +373,7 @@ ALTER FUNCTION "audit"."log_data_access_event"("p_user_id" "uuid", "p_user_email
 
 CREATE OR REPLACE FUNCTION "audit"."log_export_event"("p_user_id" "uuid" DEFAULT NULL::"uuid", "p_user_email" "text" DEFAULT NULL::"text", "p_user_name" "text" DEFAULT NULL::"text", "p_report_name" "text" DEFAULT NULL::"text", "p_report_type" "text" DEFAULT NULL::"text", "p_format" "text" DEFAULT 'csv'::"text", "p_filters" "jsonb" DEFAULT NULL::"jsonb", "p_row_count" integer DEFAULT NULL::integer, "p_file_size_bytes" integer DEFAULT NULL::integer) RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'audit', 'public'
     AS $$
 DECLARE
   v_id UUID;
@@ -360,6 +395,7 @@ ALTER FUNCTION "audit"."log_export_event"("p_user_id" "uuid", "p_user_email" "te
 
 CREATE OR REPLACE FUNCTION "audit"."log_security_event"("p_user_id" "uuid" DEFAULT NULL::"uuid", "p_user_email" "text" DEFAULT NULL::"text", "p_event_type" "text" DEFAULT NULL::"text", "p_success" boolean DEFAULT true, "p_details" "jsonb" DEFAULT NULL::"jsonb", "p_request_id" "text" DEFAULT NULL::"text") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'audit', 'public'
     AS $$
 DECLARE
   v_id UUID;
@@ -381,6 +417,7 @@ ALTER FUNCTION "audit"."log_security_event"("p_user_id" "uuid", "p_user_email" "
 
 CREATE OR REPLACE FUNCTION "audit"."trigger_audit_log"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'audit', 'public'
     AS $$
 DECLARE
     v_old JSONB;
@@ -527,8 +564,97 @@ $$;
 ALTER FUNCTION "audit"."trigger_audit_log"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "core"."can_approve_amount"("p_user_id" "uuid", "p_permission_code" "text", "p_transaction_type" "text", "p_amount" numeric, "p_currency" "text" DEFAULT 'PKR'::"text") RETURNS boolean
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
+    AS $$
+DECLARE
+  v_denied boolean;
+  v_user_limit numeric;
+  v_role_limit numeric;
+  v_base_ok boolean;
+BEGIN
+  -- 1. Explicit per-user DENY override always wins.
+  SELECT EXISTS (
+    SELECT 1 FROM core.user_permission_overrides upo
+    JOIN core.permissions p ON p.id = upo.permission_id
+    WHERE upo.user_id = p_user_id
+      AND p.code = p_permission_code
+      AND upo.override_type = 'DENY'
+      AND CURRENT_DATE >= upo.effective_from
+      AND (upo.effective_to IS NULL OR upo.effective_to >= CURRENT_DATE)
+  ) INTO v_denied;
+
+  IF v_denied THEN
+    RETURN false;
+  END IF;
+
+  -- 2. Base permission (role-based or explicit per-user ALLOW override).
+  v_base_ok := core.has_permission(p_user_id, p_permission_code);
+  IF NOT v_base_ok THEN
+    SELECT EXISTS (
+      SELECT 1 FROM core.user_permission_overrides upo
+      JOIN core.permissions p ON p.id = upo.permission_id
+      WHERE upo.user_id = p_user_id
+        AND p.code = p_permission_code
+        AND upo.override_type = 'ALLOW'
+        AND CURRENT_DATE >= upo.effective_from
+        AND (upo.effective_to IS NULL OR upo.effective_to >= CURRENT_DATE)
+    ) INTO v_base_ok;
+  END IF;
+
+  IF NOT v_base_ok THEN
+    RETURN false;
+  END IF;
+
+  -- 3. Most specific applicable limit wins: per-user transaction-type limit,
+  --    then role-level transaction-type limit, then role_permissions.amount_limit.
+  SELECT MIN(al.max_amount) INTO v_user_limit
+  FROM core.approval_limits al
+  WHERE al.user_id = p_user_id
+    AND al.transaction_type = p_transaction_type
+    AND al.currency = p_currency
+    AND CURRENT_DATE >= al.effective_from
+    AND (al.effective_to IS NULL OR al.effective_to >= CURRENT_DATE);
+
+  IF v_user_limit IS NOT NULL AND p_amount > v_user_limit THEN
+    RETURN false;
+  END IF;
+
+  IF v_user_limit IS NULL THEN
+    SELECT MIN(al.max_amount) INTO v_role_limit
+    FROM core.approval_limits al
+    JOIN core.user_roles ur ON ur.role_id = al.role_id
+    WHERE ur.user_id = p_user_id
+      AND ur.is_active = true
+      AND al.transaction_type = p_transaction_type
+      AND al.currency = p_currency
+      AND CURRENT_DATE >= al.effective_from
+      AND (al.effective_to IS NULL OR al.effective_to >= CURRENT_DATE);
+
+    IF v_role_limit IS NOT NULL AND p_amount > v_role_limit THEN
+      RETURN false;
+    END IF;
+  END IF;
+
+  -- 4. Fall back to the existing role_permissions.amount_limit check so this
+  --    function is a strict superset, never a regression, of the existing
+  --    has_permission_with_limit.
+  RETURN core.has_permission_with_limit(p_user_id, p_permission_code, p_amount);
+END;
+$$;
+
+
+ALTER FUNCTION "core"."can_approve_amount"("p_user_id" "uuid", "p_permission_code" "text", "p_transaction_type" "text", "p_amount" numeric, "p_currency" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "core"."can_approve_amount"("p_user_id" "uuid", "p_permission_code" "text", "p_transaction_type" "text", "p_amount" numeric, "p_currency" "text") IS 'Composite approval check: DENY override > ALLOW override/role permission > per-user limit > per-role transaction-type limit > role_permissions.amount_limit (spec 7.2, 7.3).';
+
+
+
 CREATE OR REPLACE FUNCTION "core"."current_user_id"() RETURNS "uuid"
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
     AS $$ BEGIN
     RETURN auth.uid();
 END;
@@ -540,6 +666,7 @@ ALTER FUNCTION "core"."current_user_id"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "core"."get_data_scope"("p_user_id" "uuid", "p_permission_code" "text") RETURNS "text"
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
     AS $$ DECLARE
   v_scope TEXT := 'NONE';
 BEGIN
@@ -572,6 +699,7 @@ ALTER FUNCTION "core"."get_data_scope"("p_user_id" "uuid", "p_permission_code" "
 
 CREATE OR REPLACE FUNCTION "core"."get_user_max_level"("p_user_id" "uuid") RETURNS integer
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
     AS $$ DECLARE
   v_max_level INTEGER := 0;
 BEGIN
@@ -592,6 +720,7 @@ ALTER FUNCTION "core"."get_user_max_level"("p_user_id" "uuid") OWNER TO "postgre
 
 CREATE OR REPLACE FUNCTION "core"."get_user_permissions"("p_user_id" "uuid") RETURNS TABLE("code" "text", "module" "text", "action" "text", "data_scope" "text", "amount_limit" numeric)
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
     AS $$ BEGIN
   RETURN QUERY
   SELECT DISTINCT ON (p.code)
@@ -613,6 +742,7 @@ ALTER FUNCTION "core"."get_user_permissions"("p_user_id" "uuid") OWNER TO "postg
 
 CREATE OR REPLACE FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permission_code" "text") RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
     AS $$ DECLARE
   v_result BOOLEAN;
 BEGIN
@@ -639,6 +769,7 @@ ALTER FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permission_code" "
 
 CREATE OR REPLACE FUNCTION "core"."has_permission_with_limit"("p_user_id" "uuid", "p_permission_code" "text", "p_amount" numeric) RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
     AS $$ DECLARE
   v_result BOOLEAN;
 BEGIN
@@ -667,43 +798,78 @@ ALTER FUNCTION "core"."has_permission_with_limit"("p_user_id" "uuid", "p_permiss
 
 CREATE OR REPLACE FUNCTION "core"."has_role"("p_role" "text") RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    AS $$ DECLARE
-    user_role TEXT;
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
+    AS $$
+DECLARE
+  v_has_configured_role BOOLEAN;
+  v_legacy_role TEXT;
 BEGIN
-    SELECT role INTO user_role
-    FROM public.profiles
-    WHERE user_id = auth.uid();
-    
-    RETURN COALESCE(user_role, 'User') = p_role;
+  SELECT EXISTS (
+    SELECT 1
+    FROM core.user_roles ur
+    JOIN core.roles r ON r.id = ur.role_id
+    WHERE ur.user_id = auth.uid()
+      AND ur.is_active = true
+      AND (ur.effective_to IS NULL OR ur.effective_to >= CURRENT_DATE)
+      AND r.name = p_role
+  ) INTO v_has_configured_role;
+
+  IF v_has_configured_role THEN
+    RETURN true;
+  END IF;
+
+  -- Fallback for users not yet represented in core.user_roles.
+  IF NOT EXISTS (
+    SELECT 1 FROM core.user_roles ur
+    WHERE ur.user_id = auth.uid() AND ur.is_active = true
+      AND (ur.effective_to IS NULL OR ur.effective_to >= CURRENT_DATE)
+  ) THEN
+    SELECT role INTO v_legacy_role FROM public.profiles WHERE user_id = auth.uid();
+    RETURN COALESCE(v_legacy_role, 'VIEWER') = p_role;
+  END IF;
+
+  RETURN false;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "core"."has_role"("p_role" "text") OWNER TO "postgres";
 
 
+COMMENT ON FUNCTION "core"."has_role"("p_role" "text") IS 'Fixed 2026 (migration 018): now checks core.user_roles/core.roles first; falls back to public.profiles.role only for users not yet migrated. See audit issue C4/C7.';
+
+
+
 CREATE OR REPLACE FUNCTION "core"."is_ceo_or_admin"() RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
     AS $$ BEGIN
-    RETURN core.has_role('CEO') OR core.has_role('Admin');
+    RETURN core.has_role('CEO');
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "core"."is_ceo_or_admin"() OWNER TO "postgres";
 
 
+COMMENT ON FUNCTION "core"."is_ceo_or_admin"() IS 'Fixed 2026 (migration 018): removed dead literal ''Admin'' which could never match profiles_role_check. See audit issue C7.';
+
+
+
 CREATE OR REPLACE FUNCTION "core"."is_finance_head"() RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
     AS $$ BEGIN
-    RETURN core.has_role('CEO') 
-        OR core.has_role('Admin') 
-        OR core.has_role('HOD');
+    RETURN core.has_role('CEO') OR core.has_role('FINANCE_HEAD');
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "core"."is_finance_head"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "core"."is_finance_head"() IS 'Fixed 2026 (migration 018): removed dead literal ''HOD'' and added the correct ''FINANCE_HEAD'' check -- previously this function could NEVER return true for an actual Finance Head user. See audit issue C7.';
+
 
 
 CREATE OR REPLACE FUNCTION "core"."set_updated_at"() RETURNS "trigger"
@@ -718,8 +884,64 @@ END;
 ALTER FUNCTION "core"."set_updated_at"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE
+  v_status TEXT;
+  v_source_type TEXT;
+BEGIN
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Only Finance Head or Accountant may approve and post a journal entry';
+  END IF;
+
+  SELECT status, source_type INTO v_status, v_source_type
+  FROM finance.journal_entries WHERE id = p_journal_id FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Journal entry % not found', p_journal_id;
+  END IF;
+
+  IF v_status <> 'DRAFT' THEN
+    RAISE EXCEPTION 'Journal entry % is not in DRAFT status (current: %)', p_journal_id, v_status;
+  END IF;
+
+  IF COALESCE(v_source_type, 'MANUAL') <> 'MANUAL' THEN
+    RAISE EXCEPTION 'System-sourced journal entries post automatically and cannot be approved through this function';
+  END IF;
+
+  -- The trg_maker_checker + trg_prevent_closed_period_posting triggers on
+  -- finance.journal_entries, and trg_check_journal_balance on
+  -- finance.journal_lines, all fire on this UPDATE and enforce their rules.
+  UPDATE finance.journal_entries
+  SET status = 'POSTED',
+      submitted_by = COALESCE(submitted_by, auth.uid()),
+      submitted_at = COALESCE(submitted_at, NOW()),
+      verified_by = COALESCE(verified_by, auth.uid()),
+      verified_at = COALESCE(verified_at, NOW()),
+      approved_by = auth.uid(),
+      approved_at = NOW(),
+      posted_by = auth.uid(),
+      posted_at = NOW(),
+      posting_date = CURRENT_DATE
+  WHERE id = p_journal_id;
+
+  RETURN p_journal_id;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") IS 'Added migration 029. Completes the maker-checker approval + posting step for a MANUAL journal left in DRAFT by finance.post_journal_entry(). Enforces creator <> approver via trg_maker_checker.';
+
+
+
 CREATE OR REPLACE FUNCTION "finance"."auto_match_statement_lines"("p_statement_id" "uuid") RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
     v_matched INTEGER := 0;
@@ -795,6 +1017,7 @@ ALTER FUNCTION "finance"."auto_match_statement_lines"("p_statement_id" "uuid") O
 
 CREATE OR REPLACE FUNCTION "finance"."auto_update_bill_status"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ 
 DECLARE
   v_bill_id UUID;
@@ -837,44 +1060,48 @@ ALTER FUNCTION "finance"."auto_update_bill_status"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."auto_update_invoice_status"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    AS $$ DECLARE
-  v_outstanding NUMERIC(18,2);
-  v_total NUMERIC(18,2);
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE
+  v_outstanding      NUMERIC(18,2);
   v_base_outstanding NUMERIC(18,2);
+  v_total            NUMERIC(18,2);
+  v_base_total        NUMERIC(18,2);
 BEGIN
-  -- Calculate total allocated against this invoice
-  SELECT 
+  -- Calculate outstanding (original currency and base/PKR currency)
+  SELECT
     i.total_amount - COALESCE(SUM(pa.allocated_amount), 0),
-    i.base_total_amount - COALESCE(SUM(pa.base_allocated_amount), 0)
-  INTO v_outstanding, v_base_outstanding
+    i.base_total_amount - COALESCE(SUM(pa.base_allocated_amount), 0),
+    i.total_amount,
+    i.base_total_amount
+  INTO v_outstanding, v_base_outstanding, v_total, v_base_total
   FROM public.invoices i
   LEFT JOIN finance.payment_allocations pa ON pa.invoice_id = i.id
   WHERE i.id = NEW.invoice_id
   GROUP BY i.total_amount, i.base_total_amount;
-  
-  -- Get totals
-  SELECT total_amount, base_total_amount INTO v_total, v_base_outstanding 
-  FROM public.invoices WHERE id = NEW.invoice_id;
-  
-  -- Update balances and status based on outstanding
-  UPDATE public.invoices SET 
-    amount_paid = v_total - v_outstanding,
-    base_amount_paid = v_base_outstanding - v_base_outstanding,
-    outstanding_amount = v_outstanding,
-    base_outstanding_amount = v_base_outstanding,
-    status = CASE 
+
+  UPDATE public.invoices SET
+    amount_paid              = v_total - v_outstanding,
+    base_amount_paid         = v_base_total - v_base_outstanding,   -- FIXED (was always 0)
+    outstanding_amount       = v_outstanding,
+    base_outstanding_amount  = v_base_outstanding,
+    status = CASE
       WHEN v_outstanding <= 0 THEN 'PAID'
       WHEN v_outstanding < v_total THEN 'PARTIALLY_PAID'
-      ELSE status -- Keep existing if still fully unpaid
+      ELSE status
     END
   WHERE id = NEW.invoice_id;
-  
+
   RETURN NEW;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."auto_update_invoice_status"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."auto_update_invoice_status"() IS 'Fixed 2026: base_amount_paid previously always computed as 0 due to variable reuse. See migration 016.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."check_journal_balance"() RETURNS "trigger"
@@ -916,6 +1143,7 @@ ALTER FUNCTION "finance"."check_journal_balance"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."compute_platform_fee"("p_platform_id" "uuid", "p_amount" numeric, "p_source_type" character varying DEFAULT 'EXPENSE'::character varying) RETURNS numeric
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
   v_fee NUMERIC(18,4) := 0;
@@ -1002,6 +1230,7 @@ ALTER FUNCTION "finance"."compute_platform_fee"("p_platform_id" "uuid", "p_amoun
 
 CREATE OR REPLACE FUNCTION "finance"."compute_tax_liability"("p_tax_recon_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
     v_recon RECORD;
@@ -1091,6 +1320,7 @@ ALTER FUNCTION "finance"."compute_tax_liability"("p_tax_recon_id" "uuid") OWNER 
 
 CREATE OR REPLACE FUNCTION "finance"."create_fiscal_year_with_periods"("p_name" "text", "p_start_date" "date", "p_end_date" "date", "p_description" "text" DEFAULT NULL::"text", "p_created_by" "uuid" DEFAULT NULL::"uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ 
 DECLARE
     v_fy_id UUID;
@@ -1168,6 +1398,7 @@ ALTER FUNCTION "finance"."create_fiscal_year_with_periods"("p_name" "text", "p_s
 
 CREATE OR REPLACE FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ DECLARE v_count INT;
 BEGIN
     UPDATE finance.statement_lines sl SET reconciliation_status = 'DUPLICATE', exclusion_reason = 'Auto-detected duplicate'
@@ -1191,6 +1422,7 @@ ALTER FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uu
 
 CREATE OR REPLACE FUNCTION "finance"."enforce_maker_checker"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
   v_creator_id UUID;
@@ -1228,8 +1460,43 @@ $$;
 ALTER FUNCTION "finance"."enforce_maker_checker"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."enforce_postable_account"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE
+  v_posting_allowed boolean;
+  v_is_active boolean;
+  v_code text;
+BEGIN
+  SELECT posting_allowed, is_active, code
+    INTO v_posting_allowed, v_is_active, v_code
+  FROM finance.chart_of_accounts
+  WHERE id = NEW.account_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Journal line references unknown account_id %', NEW.account_id;
+  END IF;
+
+  IF v_posting_allowed IS DISTINCT FROM true THEN
+    RAISE EXCEPTION 'Account % (posting_allowed = false, typically a summary/parent account) cannot receive postings', v_code;
+  END IF;
+
+  IF v_is_active IS DISTINCT FROM true THEN
+    RAISE EXCEPTION 'Account % is inactive and cannot receive postings', v_code;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."enforce_postable_account"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason" "text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ BEGIN
     IF p_reason IS NULL OR p_reason = '' THEN RAISE EXCEPTION 'Reason required'; END IF;
     UPDATE finance.statement_lines SET reconciliation_status = 'EXCLUDED', exclusion_reason = p_reason
@@ -1596,6 +1863,7 @@ ALTER FUNCTION "finance"."fn_validate_fa_ledger"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."get_current_open_period_id"() RETURNS "uuid"
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ 
 DECLARE
   v_period_id UUID;
@@ -1617,6 +1885,7 @@ ALTER FUNCTION "finance"."get_current_open_period_id"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."get_current_period"() RETURNS TABLE("period_id" "uuid", "fiscal_year_id" "uuid", "fiscal_year_name" "text", "period_number" integer, "period_name" "text", "period_start" "date", "period_end" "date", "period_status" "text")
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ BEGIN
     RETURN QUERY
     SELECT 
@@ -1643,6 +1912,7 @@ ALTER FUNCTION "finance"."get_current_period"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."get_next_number"("p_type" "text") RETURNS "text"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ DECLARE
     v_seq RECORD;
     v_next_num INTEGER;
@@ -1686,6 +1956,7 @@ ALTER FUNCTION "finance"."get_next_number"("p_type" "text") OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."get_period_by_date"("p_date" "date") RETURNS TABLE("period_id" "uuid", "fiscal_year_id" "uuid", "fiscal_year_name" "text", "period_number" integer, "period_name" "text", "period_start" "date", "period_end" "date", "period_status" "text", "fy_status" "text")
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ BEGIN
     RETURN QUERY
     SELECT 
@@ -1711,6 +1982,7 @@ ALTER FUNCTION "finance"."get_period_by_date"("p_date" "date") OWNER TO "postgre
 
 CREATE OR REPLACE FUNCTION "finance"."is_date_in_open_period"("p_date" "date") RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ DECLARE
     v_is_open BOOLEAN;
 BEGIN
@@ -1733,6 +2005,7 @@ ALTER FUNCTION "finance"."is_date_in_open_period"("p_date" "date") OWNER TO "pos
 
 CREATE OR REPLACE FUNCTION "finance"."manual_match_statement_line"("p_line_id" "uuid", "p_journal_line_id" "uuid", "p_reason" "text" DEFAULT NULL::"text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ DECLARE v_sl RECORD; v_ledger UUID;
 BEGIN
     SELECT * INTO v_sl FROM finance.statement_lines WHERE id = p_line_id;
@@ -1763,6 +2036,7 @@ ALTER FUNCTION "finance"."manual_match_statement_line"("p_line_id" "uuid", "p_jo
 
 CREATE OR REPLACE FUNCTION "finance"."mark_overdue_invoices"() RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ 
 DECLARE
   v_count INTEGER := 0;
@@ -1790,6 +2064,7 @@ ALTER FUNCTION "finance"."mark_overdue_invoices"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."mark_paid_invoices"() RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ 
 DECLARE
   v_count INTEGER := 0;
@@ -1814,6 +2089,7 @@ ALTER FUNCTION "finance"."mark_paid_invoices"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."open_period"("p_period_id" "uuid", "p_opened_by" "uuid" DEFAULT NULL::"uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ 
 DECLARE
     v_period RECORD;
@@ -1856,6 +2132,7 @@ ALTER FUNCTION "finance"."open_period"("p_period_id" "uuid", "p_opened_by" "uuid
 
 CREATE OR REPLACE FUNCTION "finance"."peek_next_number"("p_type" "text") RETURNS "text"
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ DECLARE
     v_seq RECORD;
     v_next_num INTEGER;
@@ -1894,6 +2171,7 @@ ALTER FUNCTION "finance"."peek_next_number"("p_type" "text") OWNER TO "postgres"
 
 CREATE OR REPLACE FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
     v_t RECORD;
@@ -1971,6 +2249,7 @@ ALTER FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_
 
 CREATE OR REPLACE FUNCTION "finance"."post_credit_note"("p_cn_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
     v_cn RECORD;
@@ -2021,6 +2300,7 @@ ALTER FUNCTION "finance"."post_credit_note"("p_cn_id" "uuid", "p_period_id" "uui
 
 CREATE OR REPLACE FUNCTION "finance"."post_distribution_payment"("p_line_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_bank_account_id" "uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ DECLARE
     v_line RECORD; v_lines JSONB := '[]'::JSONB;
     v_payable UUID; v_bank_ledger UUID; v_owner_name TEXT;
@@ -2045,6 +2325,7 @@ ALTER FUNCTION "finance"."post_distribution_payment"("p_line_id" "uuid", "p_peri
 
 CREATE OR REPLACE FUNCTION "finance"."post_invoice_ar"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
     v_inv RECORD;
@@ -2115,7 +2396,8 @@ ALTER FUNCTION "finance"."post_invoice_ar"("p_invoice_id" "uuid", "p_period_id" 
 
 CREATE OR REPLACE FUNCTION "finance"."post_journal_entry"("p_description" "text", "p_transaction_date" "date", "p_period_id" "uuid", "p_lines" "jsonb", "p_currency" "text" DEFAULT 'PKR'::"text", "p_exchange_rate" numeric DEFAULT 1.0000, "p_source_type" "text" DEFAULT 'MANUAL'::"text", "p_source_id" "uuid" DEFAULT NULL::"uuid", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_department_id" "uuid" DEFAULT NULL::"uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    AS $$ 
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
 DECLARE
   v_journal_id UUID;
   v_ref TEXT;
@@ -2124,16 +2406,23 @@ DECLARE
   v_total_cr NUMERIC(18,2) := 0;
   v_line_num INTEGER := 0;
   v_line JSONB;
+  v_is_manual BOOLEAN;
 BEGIN
+  v_is_manual := (COALESCE(p_source_type, 'MANUAL') = 'MANUAL');
+
   -- 1. Get Fiscal Year from Period
   SELECT fiscal_year_id INTO v_fiscal_year_id
   FROM finance.accounting_periods WHERE id = p_period_id;
-  
+
   IF v_fiscal_year_id IS NULL THEN
     RAISE EXCEPTION 'Invalid period_id: %', p_period_id;
   END IF;
 
-  -- 2. Validate & Calculate Totals
+  -- 2. Validate & Calculate Totals.
+  --    This early check is kept for a fast, friendly error message before
+  --    we build any rows. finance.check_journal_balance() (attached as a
+  --    deferred constraint trigger in migration 028) remains the actual
+  --    authoritative, unbypassable enforcement at COMMIT time.
   IF jsonb_array_length(p_lines) < 2 THEN
     RAISE EXCEPTION 'Journal must have at least 2 lines';
   END IF;
@@ -2150,25 +2439,42 @@ BEGIN
   -- 3. Get Reference
   v_ref := finance.get_next_number('JOURNAL_ENTRY');
 
-  -- 4. Insert Header (Directly POSTED for system entries)
-  INSERT INTO finance.journal_entries (
-    reference, description, status, transaction_date, posting_date,
-    period_id, fiscal_year_id, currency, exchange_rate, base_currency,
-    total_debit, total_credit, source_type, source_id, project_id, department_id,
-    created_by, submitted_by, submitted_at, verified_by, verified_at,
-    approved_by, approved_at, posted_by, posted_at
-  ) VALUES (
-    v_ref, p_description, 'POSTED', p_transaction_date, CURRENT_DATE,
-    p_period_id, v_fiscal_year_id, p_currency, p_exchange_rate, 'PKR',
-    v_total_dr, v_total_cr, p_source_type, p_source_id, p_project_id, p_department_id,
-    auth.uid(), auth.uid(), NOW(), auth.uid(), NOW(), 
-    auth.uid(), NOW(), auth.uid(), NOW()
-  ) RETURNING id INTO v_journal_id;
+  -- 4. Insert Header.
+  --    System-sourced (non-MANUAL) postings: already approved via their own
+  --    module workflow -> insert directly as POSTED, approved_by left NULL
+  --    (no separate journal-level approver; see header comment).
+  --    Manual postings: insert as DRAFT, only created_by set. Must be
+  --    completed via finance.approve_and_post_journal_entry() below.
+  IF v_is_manual THEN
+    INSERT INTO finance.journal_entries (
+      reference, description, status, transaction_date,
+      period_id, fiscal_year_id, currency, exchange_rate, base_currency,
+      total_debit, total_credit, source_type, source_id, project_id, department_id,
+      created_by
+    ) VALUES (
+      v_ref, p_description, 'DRAFT', p_transaction_date,
+      p_period_id, v_fiscal_year_id, p_currency, p_exchange_rate, 'PKR',
+      v_total_dr, v_total_cr, p_source_type, p_source_id, p_project_id, p_department_id,
+      auth.uid()
+    ) RETURNING id INTO v_journal_id;
+  ELSE
+    INSERT INTO finance.journal_entries (
+      reference, description, status, transaction_date, posting_date,
+      period_id, fiscal_year_id, currency, exchange_rate, base_currency,
+      total_debit, total_credit, source_type, source_id, project_id, department_id,
+      created_by, posted_by, posted_at
+    ) VALUES (
+      v_ref, p_description, 'POSTED', p_transaction_date, CURRENT_DATE,
+      p_period_id, v_fiscal_year_id, p_currency, p_exchange_rate, 'PKR',
+      v_total_dr, v_total_cr, p_source_type, p_source_id, p_project_id, p_department_id,
+      auth.uid(), auth.uid(), NOW()
+    ) RETURNING id INTO v_journal_id;
+  END IF;
 
-  -- 5. Insert Lines
+  -- 5. Insert Lines (unchanged)
   FOR v_line IN SELECT * FROM jsonb_array_elements(p_lines) LOOP
     v_line_num := v_line_num + 1;
-    
+
     INSERT INTO finance.journal_lines (
       journal_entry_id, line_number, account_id, description,
       debit_amount, credit_amount, currency, exchange_rate,
@@ -2189,14 +2495,19 @@ BEGIN
 
   RETURN v_journal_id;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."post_journal_entry"("p_description" "text", "p_transaction_date" "date", "p_period_id" "uuid", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_source_type" "text", "p_source_id" "uuid", "p_project_id" "uuid", "p_department_id" "uuid") OWNER TO "postgres";
 
 
+COMMENT ON FUNCTION "finance"."post_journal_entry"("p_description" "text", "p_transaction_date" "date", "p_period_id" "uuid", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_source_type" "text", "p_source_id" "uuid", "p_project_id" "uuid", "p_department_id" "uuid") IS 'Fixed migration 029: MANUAL-source journals now insert as DRAFT (no self-approval); system-sourced journals post directly with approved_by left NULL to satisfy maker-checker. See audit Critical #4/#5.';
+
+
+
 CREATE OR REPLACE FUNCTION "finance"."post_payment_receipt"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
     v_receipt RECORD;
@@ -2251,6 +2562,7 @@ ALTER FUNCTION "finance"."post_payment_receipt"("p_receipt_id" "uuid", "p_period
 
 CREATE OR REPLACE FUNCTION "finance"."post_profit_distribution"("p_distribution_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ DECLARE
     v_dist RECORD; v_lines JSONB := '[]'::JSONB;
     v_pnl UUID; v_reserve UUID; v_payable UUID;
@@ -2283,6 +2595,7 @@ ALTER FUNCTION "finance"."post_profit_distribution"("p_distribution_id" "uuid", 
 
 CREATE OR REPLACE FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
     v_bill RECORD;
@@ -2365,6 +2678,7 @@ ALTER FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "u
 
 CREATE OR REPLACE FUNCTION "finance"."post_vendor_payment"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
     v_pay RECORD;
@@ -2508,6 +2822,7 @@ ALTER FUNCTION "finance"."prevent_posted_edit"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."reset_sequence"("p_type" "text", "p_fy_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ BEGIN
     INSERT INTO finance.numbering_sequences (sequence_type, prefix, padding, fiscal_year_id, reset_per_period, format, created_by)
     SELECT 
@@ -2525,6 +2840,7 @@ ALTER FUNCTION "finance"."reset_sequence"("p_type" "text", "p_fy_id" "uuid") OWN
 
 CREATE OR REPLACE FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ 
 DECLARE
   v_original RECORD;
@@ -2586,6 +2902,7 @@ ALTER FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "p_rever
 
 CREATE OR REPLACE FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text" DEFAULT NULL::"text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$ DECLARE v_sl RECORD;
 BEGIN
     SELECT * INTO v_sl FROM finance.statement_lines WHERE id = p_line_id;
@@ -2599,8 +2916,113 @@ END;
 ALTER FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."validate_ownership_percentage_total"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE
+  v_check_date DATE;
+  v_total_pct  NUMERIC(6,2);
+BEGIN
+  v_check_date := COALESCE(NEW.effective_from, CURRENT_DATE);
+
+  SELECT COALESCE(SUM(oh.ownership_percentage), 0) INTO v_total_pct
+  FROM finance.ownership_history oh
+  JOIN finance.owners o ON o.id = oh.owner_id
+  WHERE o.status = 'ACTIVE'
+    AND oh.effective_from <= v_check_date
+    AND (oh.effective_to IS NULL OR oh.effective_to >= v_check_date)
+    AND oh.id IS DISTINCT FROM NEW.id;
+
+  v_total_pct := v_total_pct + NEW.ownership_percentage;
+
+  IF v_total_pct > 100.00 THEN
+        RAISE EXCEPTION 'Ownership percentages for effective date % would total %% (Current Total: %), which exceeds 100%%. Adjust or end-date an existing ownership record first.', v_check_date, v_total_pct;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."validate_ownership_percentage_total"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."validate_payment_allocation"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE
+  v_invoice_total     NUMERIC(18,2);
+  v_already_allocated NUMERIC(18,2);
+BEGIN
+  SELECT total_amount INTO v_invoice_total
+  FROM public.invoices
+  WHERE id = NEW.invoice_id
+  FOR UPDATE;
+
+  IF v_invoice_total IS NULL THEN
+    RAISE EXCEPTION 'Cannot allocate payment: invoice % does not exist', NEW.invoice_id;
+  END IF;
+
+  SELECT COALESCE(SUM(allocated_amount), 0) INTO v_already_allocated
+  FROM finance.payment_allocations
+  WHERE invoice_id = NEW.invoice_id
+    AND id IS DISTINCT FROM NEW.id;
+
+  IF (v_already_allocated + NEW.allocated_amount) > v_invoice_total THEN
+    RAISE EXCEPTION
+      'Payment allocation of % exceeds invoice outstanding balance (already allocated %, invoice total %)',
+      NEW.allocated_amount, v_already_allocated, v_invoice_total;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."validate_payment_allocation"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."validate_vendor_payment_allocation"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE
+  v_bill_total        NUMERIC(18,2);
+  v_already_allocated NUMERIC(18,2);
+BEGIN
+  SELECT total_amount INTO v_bill_total
+  FROM finance.vendor_bills
+  WHERE id = NEW.vendor_bill_id
+  FOR UPDATE;
+
+  IF v_bill_total IS NULL THEN
+    RAISE EXCEPTION 'Cannot allocate payment: vendor bill % does not exist', NEW.vendor_bill_id;
+  END IF;
+
+  SELECT COALESCE(SUM(allocated_amount), 0) INTO v_already_allocated
+  FROM finance.vendor_payment_allocations
+  WHERE vendor_bill_id = NEW.vendor_bill_id
+    AND id IS DISTINCT FROM NEW.id;
+
+  IF (v_already_allocated + NEW.allocated_amount) > v_bill_total THEN
+    RAISE EXCEPTION
+      'Vendor payment allocation of % exceeds bill outstanding balance (already allocated %, bill total %)',
+      NEW.allocated_amount, v_already_allocated, v_bill_total;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."validate_vendor_payment_allocation"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text" DEFAULT 'User'::"text", "p_full_name" "text" DEFAULT ''::"text") RETURNS json
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'public'
     AS $$ DECLARE
   v_new_user_id UUID;
 BEGIN
@@ -2650,6 +3072,7 @@ ALTER FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "t
 
 CREATE OR REPLACE FUNCTION "public"."ensure_profile_exists"("target_user_id" "uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'public'
     AS $$
 DECLARE
   v_profile_id UUID;
@@ -2678,12 +3101,14 @@ $$;
 ALTER FUNCTION "public"."ensure_profile_exists"("target_user_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."execute_ai_readonly_query"("query_string" "text") RETURNS "jsonb"
+CREATE OR REPLACE FUNCTION "public"."execute_ai_readonly_query"("query_string" "text", "p_org_id" "uuid", "p_user_id" "uuid", "p_enforce_user_scope" boolean DEFAULT true) RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'reporting'
     AS $$
 DECLARE
   result jsonb;
+  wrapped_sql text;
+  user_filter text := '';
 BEGIN
   -- Switch into the restricted, minimal-privilege role for the duration of
   -- this statement only. SET LOCAL automatically reverts at the end of the
@@ -2692,7 +3117,27 @@ BEGIN
   SET LOCAL ROLE ai_readonly_role;
   SET LOCAL statement_timeout = '5s';
 
-  EXECUTE query_string INTO result;
+  IF p_enforce_user_scope THEN
+    user_filter := format('AND user_id = %L', p_user_id);
+  END IF;
+
+  -- org_id/user_id are typed uuid parameters here — they never come from
+  -- LLM output or raw app-level string concatenation, so %L is
+  -- defense-in-depth on top of that, not the sole safety mechanism.
+  wrapped_sql := format(
+    'SELECT COALESCE(jsonb_agg(t), ''[]''::jsonb) FROM (
+       WITH llm_query AS ( %s )
+       SELECT * FROM llm_query
+       WHERE organization_id = %L
+       %s
+       LIMIT 200
+     ) t',
+    query_string,
+    p_org_id,
+    user_filter
+  );
+
+  EXECUTE wrapped_sql INTO result;
 
   RESET ROLE;
   RESET statement_timeout;
@@ -2705,6 +3150,9 @@ EXCEPTION
   WHEN insufficient_privilege THEN
     RESET ROLE;
     RAISE EXCEPTION 'Access denied. AI can only query approved reporting views.';
+  WHEN undefined_column THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'That view does not expose an organization_id/user_id column needed for scoping.';
   WHEN OTHERS THEN
     RESET ROLE;
     RAISE EXCEPTION 'Query execution failed: %', SQLERRM;
@@ -2712,11 +3160,12 @@ END;
 $$;
 
 
-ALTER FUNCTION "public"."execute_ai_readonly_query"("query_string" "text") OWNER TO "postgres";
+ALTER FUNCTION "public"."execute_ai_readonly_query"("query_string" "text", "p_org_id" "uuid", "p_user_id" "uuid", "p_enforce_user_scope" boolean) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."execute_sql_query"("query_string" "text") RETURNS json
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'public'
     AS $$ 
 DECLARE
   result JSON;
@@ -2752,13 +3201,25 @@ END;
 ALTER FUNCTION "public"."execute_sql_query"("query_string" "text") OWNER TO "postgres";
 
 
+COMMENT ON FUNCTION "public"."execute_sql_query"("query_string" "text") IS 'RESTRICTED to service_role only (migration 027). This function has no schema/table allowlist and runs as the function owner, bypassing RLS. It must never be reachable from the AI gateway or any authenticated end-user session; use public.execute_ai_readonly_query (scoped to the ai_readonly_role and public/reporting schemas) for AI-driven querying instead, per spec Section 9.5.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."find_auth_user_by_email"("search_email" "text") RETURNS TABLE("user_id" "uuid", "email" "text")
-    LANGUAGE "sql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'core'
     AS $$
- SELECT id, email
-  FROM auth.users
-  WHERE email ILIKE '%' || search_email || '%'
+BEGIN
+  IF NOT core.has_permission(auth.uid(), 'ADMIN_USERS') THEN
+    RAISE EXCEPTION 'Access denied: ADMIN_USERS permission required';
+  END IF;
+
+  RETURN QUERY
+  SELECT u.id, u.email
+  FROM auth.users u
+  WHERE u.email ILIKE '%' || search_email || '%'
   LIMIT 10;
+END;
 $$;
 
 
@@ -2766,9 +3227,16 @@ ALTER FUNCTION "public"."find_auth_user_by_email"("search_email" "text") OWNER T
 
 
 CREATE OR REPLACE FUNCTION "public"."get_all_system_users"() RETURNS TABLE("user_id" "uuid", "email" "text", "full_name" "text", "profile_role" "text", "has_profile" boolean)
-    LANGUAGE "sql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'core'
     AS $$
- SELECT 
+BEGIN
+  IF NOT core.has_permission(auth.uid(), 'ADMIN_USERS') THEN
+    RAISE EXCEPTION 'Access denied: ADMIN_USERS permission required';
+  END IF;
+
+  RETURN QUERY
+  SELECT
     u.id AS user_id,
     u.email,
     COALESCE(p.full_name, '') AS full_name,
@@ -2777,6 +3245,7 @@ CREATE OR REPLACE FUNCTION "public"."get_all_system_users"() RETURNS TABLE("user
   FROM auth.users u
   LEFT JOIN public.profiles p ON p.user_id = u.id
   ORDER BY COALESCE(p.full_name, u.email);
+END;
 $$;
 
 
@@ -2785,6 +3254,7 @@ ALTER FUNCTION "public"."get_all_system_users"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."get_my_permissions"() RETURNS TABLE("permission_code" "text", "permission_name" "text", "module" "text", "data_scope" "text")
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'public'
     AS $$ BEGIN
   RETURN QUERY
   SELECT DISTINCT
@@ -2810,6 +3280,7 @@ ALTER FUNCTION "public"."get_my_permissions"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."get_my_user_roles"() RETURNS TABLE("role_id" "uuid", "role" "text", "display_name" "text", "is_active" boolean, "effective_from" "date", "effective_to" "date", "level" integer)
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'public'
     AS $$ BEGIN
   RETURN QUERY
   SELECT 
@@ -2836,6 +3307,7 @@ ALTER FUNCTION "public"."get_my_user_roles"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."get_user_permissions"("p_user_id" "uuid") RETURNS TABLE("code" "text", "module" "text", "action" "text", "data_scope" "text", "amount_limit" numeric)
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'public'
     AS $$ BEGIN
   RETURN QUERY SELECT * FROM core.get_user_permissions(p_user_id);
 END;
@@ -2847,27 +3319,24 @@ ALTER FUNCTION "public"."get_user_permissions"("p_user_id" "uuid") OWNER TO "pos
 
 CREATE OR REPLACE FUNCTION "public"."get_user_roles_by_id"("p_target_user_id" "uuid") RETURNS TABLE("id" "uuid", "user_id" "uuid", "role_id" "uuid", "role" "text", "role_display_name" "text", "role_level" integer, "is_active" boolean, "effective_from" "date", "effective_to" "date", "delegated_from" "uuid", "created_at" timestamp with time zone, "updated_at" timestamp with time zone, "created_by" "uuid")
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    AS $$ BEGIN
+    SET "search_path" TO 'pg_catalog', 'public', 'core'
+    AS $$
+BEGIN
+  IF auth.uid() IS DISTINCT FROM p_target_user_id
+     AND NOT core.has_permission(auth.uid(), 'ADMIN_USERS') THEN
+    RAISE EXCEPTION 'Access denied: cannot view another user''s role history';
+  END IF;
+
   RETURN QUERY
-  SELECT 
-    ur.id,
-    ur.user_id,
-    ur.role_id,
-    r.name,
-    r.display_name,
-    r.level,
-    ur.is_active,
-    ur.effective_from,
-    ur.effective_to,
-    ur.delegated_from,
-    ur.created_at,
-    ur.updated_at,
-    ur.created_by
+  SELECT
+    ur.id, ur.user_id, ur.role_id, r.name, r.display_name, r.level,
+    ur.is_active, ur.effective_from, ur.effective_to, ur.delegated_from,
+    ur.created_at, ur.updated_at, ur.created_by
   FROM core.user_roles ur
   INNER JOIN core.roles r ON r.id = ur.role_id
   WHERE ur.user_id = p_target_user_id;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "public"."get_user_roles_by_id"("p_target_user_id" "uuid") OWNER TO "postgres";
@@ -2875,6 +3344,7 @@ ALTER FUNCTION "public"."get_user_roles_by_id"("p_target_user_id" "uuid") OWNER 
 
 CREATE OR REPLACE FUNCTION "public"."handle_new_user"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'public'
     AS $$ BEGIN
     INSERT INTO public.profiles (
         user_id, full_name, role, email,
@@ -2903,6 +3373,7 @@ ALTER FUNCTION "public"."handle_new_user"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."is_admin"() RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'public'
     AS $$ 
 DECLARE
     user_role TEXT;
@@ -2985,6 +3456,27 @@ $$;
 ALTER FUNCTION "public"."rls_auto_enable"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."sync_invoice_client_name"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  v_client_name TEXT;
+BEGIN
+  IF NEW.client_id IS NOT NULL THEN
+    SELECT name INTO v_client_name FROM public.clients WHERE id = NEW.client_id;
+    IF v_client_name IS NOT NULL THEN
+      NEW.client_name := v_client_name;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."sync_invoice_client_name"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."update_updated_at"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$ BEGIN
@@ -2999,6 +3491,7 @@ ALTER FUNCTION "public"."update_updated_at"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."user_has_role"("p_role_name" "text") RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'public'
     AS $$ DECLARE
   v_current_user uuid;
   v_result boolean;
@@ -3026,6 +3519,7 @@ ALTER FUNCTION "public"."user_has_role"("p_role_name" "text") OWNER TO "postgres
 
 CREATE OR REPLACE FUNCTION "reporting"."cash_distribution"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t)), '[]'::JSON) FROM (
     SELECT id, account_name, institution_type, currency, masked_identifier, opening_balance as balance
@@ -3040,6 +3534,7 @@ ALTER FUNCTION "reporting"."cash_distribution"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_aging"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN json_build_object(
     'receivable', COALESCE(json_build_object(
@@ -3068,6 +3563,7 @@ ALTER FUNCTION "reporting"."ceo_chart_aging"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_budget"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t)), '[]'::JSON) FROM (
     SELECT 
@@ -3091,6 +3587,7 @@ ALTER FUNCTION "reporting"."ceo_chart_budget"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_cash"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t) ORDER BY balance DESC), '[]'::JSON) FROM (
     SELECT id, account_name, institution_type, currency, masked_identifier, opening_balance as balance
@@ -3105,6 +3602,7 @@ ALTER FUNCTION "reporting"."ceo_chart_cash"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_categories"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN json_build_object(
     'expenses', COALESCE((SELECT json_agg(row_to_json(t) ORDER BY total DESC) FROM (
@@ -3190,6 +3688,7 @@ ALTER FUNCTION "reporting"."ceo_chart_categories"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_monthly"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t) ORDER BY sort_order), '[]'::JSON) FROM (
     SELECT TO_CHAR(ap.start_date, 'Mon YYYY') as month, TO_CHAR(ap.start_date, 'YY-MM') as month_short,
@@ -3212,6 +3711,7 @@ ALTER FUNCTION "reporting"."ceo_chart_monthly"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_dashboard_kpis"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ DECLARE
   v_period_id UUID;
   v_prev_period_id UUID;
@@ -3290,6 +3790,7 @@ ALTER FUNCTION "reporting"."ceo_dashboard_kpis"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_table_audit"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
 BEGIN
     RETURN COALESCE(json_agg(row_to_json(t)), '[]'::JSON) FROM (
@@ -3317,6 +3818,7 @@ ALTER FUNCTION "reporting"."ceo_table_audit"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_table_equity_tax"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ DECLARE
   v_profit_before_tax NUMERIC := 0;
 BEGIN
@@ -3373,6 +3875,7 @@ ALTER FUNCTION "reporting"."ceo_table_equity_tax"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_table_fiscal"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
 BEGIN
     RETURN COALESCE(json_agg(row_to_json(t) ORDER BY t.start_date), '[]'::JSON) FROM (
@@ -3400,6 +3903,7 @@ ALTER FUNCTION "reporting"."ceo_table_fiscal"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date") RETURNS TABLE("section_order" integer, "section" "text", "code" "text", "account_name" "text", "net_amount" numeric)
     LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
 SELECT
     CASE coa.account_type
@@ -3434,6 +3938,7 @@ ALTER FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date") OWNER TO "
 
 CREATE OR REPLACE FUNCTION "reporting"."get_cash_flow"("p_start_date" "date", "p_end_date" "date") RETURNS TABLE("section" "text", "account_name" "text", "amount" numeric)
     LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
 WITH pnl_changes AS (
     -- Operating Activities: P&L items
@@ -3532,6 +4037,7 @@ ALTER FUNCTION "reporting"."get_cash_flow"("p_start_date" "date", "p_end_date" "
 
 CREATE OR REPLACE FUNCTION "reporting"."get_ceo_metrics"() RETURNS TABLE("total_cash" numeric, "total_receivables" numeric, "total_payables" numeric, "current_month_pl" numeric)
     LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ WITH gl_balances AS (
     SELECT 
         coa.report_mapping,
@@ -3567,6 +4073,7 @@ ALTER FUNCTION "reporting"."get_ceo_metrics"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."get_profit_and_loss"("p_start_date" "date", "p_end_date" "date") RETURNS TABLE("section_order" integer, "section" "text", "code" "text", "account_name" "text", "debit_total" numeric, "credit_total" numeric, "net_amount" numeric)
     LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
 SELECT
     CASE coa.report_mapping
@@ -3605,6 +4112,7 @@ ALTER FUNCTION "reporting"."get_profit_and_loss"("p_start_date" "date", "p_end_d
 
 CREATE OR REPLACE FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p_end_date" "date") RETURNS TABLE("project_id" "uuid", "project_name" "text", "total_revenue" numeric, "total_costs" numeric, "gross_profit" numeric, "margin_pct" numeric)
     LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ SELECT 
     je.project_id,
     COALESCE(p.name, 'Unassigned') AS project_name,
@@ -3637,6 +4145,7 @@ ALTER FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p
 
 CREATE OR REPLACE FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[]) RETURNS TABLE("account_id" "uuid", "code" "text", "name" "text", "account_type" "text", "normal_balance" "text", "total_debit" numeric, "total_credit" numeric, "net_balance" numeric)
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN QUERY
   SELECT 
@@ -3672,6 +4181,7 @@ ALTER FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[]) OWNER TO
 
 CREATE OR REPLACE FUNCTION "reporting"."pending_approvals_list"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(
     json_agg(row_to_json(t) ORDER BY t.created_at DESC)
@@ -3709,6 +4219,7 @@ ALTER FUNCTION "reporting"."pending_approvals_list"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."project_profitability"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(
     json_agg(row_to_json(t) ORDER BY t.gross_profit DESC)
@@ -3746,6 +4257,7 @@ ALTER FUNCTION "reporting"."project_profitability"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."receivable_aging_summary"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ DECLARE v_result JSON;
 BEGIN
   SELECT json_build_object(
@@ -3766,6 +4278,7 @@ ALTER FUNCTION "reporting"."receivable_aging_summary"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."revenue_expense_monthly"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t)), '[]'::JSON) FROM (
     SELECT TO_CHAR(ap.start_date, 'Mon YYYY') as month, TO_CHAR(ap.start_date, 'YY-MM') as month_short,
@@ -3787,6 +4300,7 @@ ALTER FUNCTION "reporting"."revenue_expense_monthly"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."transaction_detail"("p_id" "uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ DECLARE
   v_result JSON;
   v_settlement_lines JSON := '[]'::JSON;
@@ -3890,6 +4404,7 @@ ALTER FUNCTION "reporting"."transaction_detail"("p_id" "uuid") OWNER TO "postgre
 
 CREATE OR REPLACE FUNCTION "reporting"."transaction_list"("p_search" "text" DEFAULT ''::"text", "p_type" "text" DEFAULT 'ALL'::"text", "p_status" "text" DEFAULT 'ALL'::"text", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date", "p_limit" integer DEFAULT 25, "p_offset" integer DEFAULT 0) RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t) ORDER BY t.entry_date DESC, t.created_at DESC), '[]'::JSON) FROM (
     SELECT 
@@ -3945,6 +4460,7 @@ ALTER FUNCTION "reporting"."transaction_list"("p_search" "text", "p_type" "text"
 
 CREATE OR REPLACE FUNCTION "reporting"."transaction_summary"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ DECLARE
   v_period_id UUID;
 BEGIN
@@ -3966,6 +4482,7 @@ ALTER FUNCTION "reporting"."transaction_summary"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "reporting"."unreconciled_summary"() RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(
     json_agg(row_to_json(t) ORDER BY t.unreconciled_amount DESC)
@@ -4315,6 +4832,248 @@ CREATE TABLE IF NOT EXISTS "audit"."security_events" (
 ALTER TABLE "audit"."security_events" OWNER TO "postgres";
 
 
+CREATE OR REPLACE VIEW "audit"."v_unsafe_security_definer_functions" AS
+ SELECT "n"."nspname" AS "schema_name",
+    "p"."proname" AS "function_name",
+    "pg_get_function_identity_arguments"("p"."oid") AS "arguments"
+   FROM ("pg_proc" "p"
+     JOIN "pg_namespace" "n" ON (("n"."oid" = "p"."pronamespace")))
+  WHERE (("n"."nspname" = ANY (ARRAY['ai'::"name", 'audit'::"name", 'core'::"name", 'finance'::"name", 'public'::"name", 'reporting'::"name"])) AND ("p"."prosecdef" = true) AND (NOT (EXISTS ( SELECT 1
+           FROM "unnest"(COALESCE("p"."proconfig", ARRAY[]::"text"[])) "cfg"("cfg")
+          WHERE ("cfg"."cfg" ~~ 'search_path=%'::"text")))));
+
+
+ALTER VIEW "audit"."v_unsafe_security_definer_functions" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "audit"."v_unsafe_security_definer_functions" IS 'Guardrail view (spec Section 20): any row here is a SECURITY DEFINER function shipped without a pinned search_path and must be fixed before release.';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."approval_actions" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "approval_step_id" "uuid" NOT NULL,
+    "actor_user_id" "uuid" NOT NULL,
+    "action" "text" NOT NULL,
+    "comment" "text",
+    "delegated_from" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "approval_actions_action_check" CHECK (("action" = ANY (ARRAY['APPROVE'::"text", 'REJECT'::"text", 'ESCALATE'::"text", 'DELEGATE'::"text", 'RETURN'::"text"])))
+);
+
+
+ALTER TABLE "core"."approval_actions" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."approval_actions" IS 'Immutable log of individual approve/reject/escalate/delegate actions. Added migration 021 (audit issue H8).';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."approval_limits" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "role_id" "uuid",
+    "user_id" "uuid",
+    "transaction_type" "text" NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "max_amount" numeric(18,2),
+    "scope" "text" DEFAULT 'ALL'::"text" NOT NULL,
+    "effective_from" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "effective_to" "date",
+    "notes" "text",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    CONSTRAINT "approval_limits_dates_chk" CHECK ((("effective_to" IS NULL) OR ("effective_to" >= "effective_from"))),
+    CONSTRAINT "approval_limits_max_amount_chk" CHECK ((("max_amount" IS NULL) OR ("max_amount" >= (0)::numeric))),
+    CONSTRAINT "approval_limits_role_or_user_chk" CHECK (((("role_id" IS NOT NULL) AND ("user_id" IS NULL)) OR (("role_id" IS NULL) AND ("user_id" IS NOT NULL)))),
+    CONSTRAINT "approval_limits_scope_chk" CHECK (("scope" = ANY (ARRAY['OWN'::"text", 'PROJECT'::"text", 'DEPARTMENT'::"text", 'ALL'::"text"]))),
+    CONSTRAINT "approval_limits_transaction_type_chk" CHECK (("transaction_type" = ANY (ARRAY['EXPENSE'::"text", 'PURCHASE'::"text", 'VENDOR_PAYMENT'::"text", 'BUDGET_REVISION'::"text", 'JOURNAL_ENTRY'::"text", 'BANK_TRANSFER'::"text", 'SALARY_PAYROLL'::"text", 'OWNER_DISTRIBUTION'::"text", 'PERIOD_REOPEN'::"text", 'INVOICE_CREDIT_NOTE'::"text", 'VENDOR_BILL'::"text", 'RESERVE_ALLOCATION'::"text"])))
+);
+
+
+ALTER TABLE "core"."approval_limits" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."approval_limits" IS 'Configurable monetary approval ceilings by role or individual user, per transaction type and currency (spec 7.3). max_amount NULL = unlimited (e.g. CEO).';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."approval_requests" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "entity_type" "text" NOT NULL,
+    "entity_id" "uuid" NOT NULL,
+    "transaction_type" "text" NOT NULL,
+    "amount" numeric(18,2),
+    "currency" "text" DEFAULT 'PKR'::"text",
+    "requested_by" "uuid" NOT NULL,
+    "current_step" integer DEFAULT 1 NOT NULL,
+    "status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "approval_requests_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'APPROVED'::"text", 'REJECTED'::"text", 'ESCALATED'::"text", 'CANCELLED'::"text"])))
+);
+
+
+ALTER TABLE "core"."approval_requests" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."approval_requests" IS 'Generic maker-checker approval chain header. Added migration 021 (audit issue H8).';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."approval_steps" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "approval_request_id" "uuid" NOT NULL,
+    "step_number" integer NOT NULL,
+    "required_role_id" "uuid",
+    "assigned_user_id" "uuid",
+    "sla_hours" integer,
+    "escalate_to_user_id" "uuid",
+    "status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "approval_steps_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'APPROVED'::"text", 'REJECTED'::"text", 'ESCALATED'::"text", 'SKIPPED'::"text"])))
+);
+
+
+ALTER TABLE "core"."approval_steps" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."approval_steps" IS 'Per-level approval steps with SLA/escalation. Added migration 021 (audit issue H8).';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."budget_policies" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "enforcement_mode" "text" DEFAULT 'HARD_BLOCK'::"text" NOT NULL,
+    "caution_threshold" numeric(5,2) DEFAULT 75 NOT NULL,
+    "warning_threshold" numeric(5,2) DEFAULT 90 NOT NULL,
+    "block_threshold" numeric(5,2) DEFAULT 100 NOT NULL,
+    "is_active" boolean DEFAULT true NOT NULL,
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_block" CHECK ((("block_threshold" >= (0)::numeric) AND ("block_threshold" <= (100)::numeric))),
+    CONSTRAINT "chk_caution" CHECK ((("caution_threshold" >= (0)::numeric) AND ("caution_threshold" <= (100)::numeric))),
+    CONSTRAINT "chk_enforcement_mode" CHECK (("enforcement_mode" = ANY (ARRAY['WARN_ONLY'::"text", 'HARD_BLOCK'::"text"]))),
+    CONSTRAINT "chk_warning" CHECK ((("warning_threshold" >= (0)::numeric) AND ("warning_threshold" <= (100)::numeric)))
+);
+
+
+ALTER TABLE "core"."budget_policies" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."budget_policies" IS 'Per-organization budget enforcement policy configuration. Referenced by budget-check.service.ts.';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."delegations" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "from_user_id" "uuid" NOT NULL,
+    "to_user_id" "uuid" NOT NULL,
+    "permission_ids" "uuid"[] NOT NULL,
+    "reason" "text" NOT NULL,
+    "effective_from" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "effective_to" "date" NOT NULL,
+    "status" "text" DEFAULT 'ACTIVE'::"text" NOT NULL,
+    "revoked_by" "uuid",
+    "revoked_at" timestamp with time zone,
+    "revoke_reason" "text",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    CONSTRAINT "delegations_dates_chk" CHECK (("effective_to" >= "effective_from")),
+    CONSTRAINT "delegations_not_self_chk" CHECK (("from_user_id" <> "to_user_id")),
+    CONSTRAINT "delegations_permission_ids_not_empty_chk" CHECK (("array_length"("permission_ids", 1) > 0)),
+    CONSTRAINT "delegations_reason_not_blank_chk" CHECK (("btrim"("reason") <> ''::"text")),
+    CONSTRAINT "delegations_status_chk" CHECK (("status" = ANY (ARRAY['ACTIVE'::"text", 'EXPIRED'::"text", 'REVOKED'::"text"])))
+);
+
+
+ALTER TABLE "core"."delegations" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."delegations" IS 'Time-limited delegation of specific permissions from one user to another with mandatory reason (spec 10.1, 7.2).';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."employee_links" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "shared_person_id" "uuid" NOT NULL,
+    "source_module" "text" DEFAULT 'FINANCE'::"text" NOT NULL,
+    "external_employee_id" "text",
+    "schema_version" integer DEFAULT 1 NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "core"."employee_links" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "core"."idempotency_keys" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "scope" "text" NOT NULL,
+    "key" "text" NOT NULL,
+    "request_hash" "text",
+    "response_snapshot" "jsonb",
+    "created_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "core"."idempotency_keys" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."idempotency_keys" IS 'General-purpose idempotency guard for payment/import/webhook/posting commands (spec 11.2). Added migration 021.';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."integration_events" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "schema_version" integer DEFAULT 1 NOT NULL,
+    "source_module" "text" NOT NULL,
+    "event_type" "text" NOT NULL,
+    "organization_id" "uuid",
+    "idempotency_key" "text" NOT NULL,
+    "occurred_at" timestamp with time zone NOT NULL,
+    "effective_business_date" "date",
+    "actor_user_id" "uuid",
+    "correlation_id" "uuid",
+    "payload" "jsonb" NOT NULL,
+    "payload_hash" "text" NOT NULL,
+    "processing_status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
+    "processed_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "integration_events_status_check" CHECK (("processing_status" = ANY (ARRAY['PENDING'::"text", 'PROCESSED'::"text", 'FAILED'::"text", 'DEAD_LETTER'::"text"])))
+);
+
+
+ALTER TABLE "core"."integration_events" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."integration_events" IS 'Versioned, idempotent cross-module events (Appendix D). Added migration 021 (audit issue H6).';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."integration_failures" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "integration_event_id" "uuid" NOT NULL,
+    "retry_count" integer DEFAULT 0 NOT NULL,
+    "last_error" "text",
+    "next_retry_at" timestamp with time zone,
+    "dead_letter" boolean DEFAULT false NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "core"."integration_failures" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."integration_failures" IS 'Retry/dead-letter tracking for integration_events. Added migration 021 (audit issue H6).';
+
+
+
 CREATE TABLE IF NOT EXISTS "core"."organization_config" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
@@ -4341,6 +5100,29 @@ CREATE TABLE IF NOT EXISTS "core"."organization_config" (
 
 
 ALTER TABLE "core"."organization_config" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "core"."organization_modules" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "module_key" "text" NOT NULL,
+    "enabled" boolean DEFAULT false NOT NULL,
+    "config" "jsonb" DEFAULT '{}'::"jsonb",
+    "config_version" integer DEFAULT 1 NOT NULL,
+    "effective_from" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "effective_to" "date",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    CONSTRAINT "organization_modules_module_key_chk" CHECK (("module_key" = ANY (ARRAY['FINANCE'::"text", 'HR'::"text", 'PAYROLL'::"text", 'ATTENDANCE'::"text", 'AI'::"text", 'REPORTING'::"text", 'INTEGRATION'::"text"])))
+);
+
+
+ALTER TABLE "core"."organization_modules" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."organization_modules" IS 'Per-organization module enablement/config, e.g. gating the future HR/Payroll modules on the shared Supabase platform (spec 10.1, Appendix D).';
+
 
 
 CREATE TABLE IF NOT EXISTS "core"."organizations" (
@@ -4425,6 +5207,58 @@ CREATE TABLE IF NOT EXISTS "core"."roles" (
 ALTER TABLE "core"."roles" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "core"."shared_people" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "auth_user_id" "uuid",
+    "display_name" "text" NOT NULL,
+    "person_type" "text" DEFAULT 'EMPLOYEE'::"text" NOT NULL,
+    "status" "text" DEFAULT 'ACTIVE'::"text" NOT NULL,
+    "external_reference" "text",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    CONSTRAINT "shared_people_person_type_chk" CHECK (("person_type" = ANY (ARRAY['EMPLOYEE'::"text", 'CONTRACTOR'::"text", 'OWNER'::"text", 'OTHER'::"text"]))),
+    CONSTRAINT "shared_people_status_chk" CHECK (("status" = ANY (ARRAY['ACTIVE'::"text", 'INACTIVE'::"text", 'TERMINATED'::"text"])))
+);
+
+
+ALTER TABLE "core"."shared_people" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."shared_people" IS 'Stable cross-module person identity (spec Appendix D.2). Finance, and later HR/attendance/payroll, reference this ID rather than maintaining independent, conflicting identity records.';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."user_permission_overrides" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "permission_id" "uuid" NOT NULL,
+    "override_type" "text" NOT NULL,
+    "data_scope" "text" DEFAULT 'ALL'::"text",
+    "amount_limit" numeric(18,2),
+    "reason" "text" NOT NULL,
+    "effective_from" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "effective_to" "date",
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    CONSTRAINT "upo_data_scope_chk" CHECK (("data_scope" = ANY (ARRAY['OWN'::"text", 'DEPARTMENT'::"text", 'PROJECT'::"text", 'ALL'::"text"]))),
+    CONSTRAINT "upo_dates_chk" CHECK ((("effective_to" IS NULL) OR ("effective_to" >= "effective_from"))),
+    CONSTRAINT "upo_override_type_chk" CHECK (("override_type" = ANY (ARRAY['ALLOW'::"text", 'DENY'::"text"]))),
+    CONSTRAINT "upo_reason_not_blank_chk" CHECK (("btrim"("reason") <> ''::"text"))
+);
+
+
+ALTER TABLE "core"."user_permission_overrides" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."user_permission_overrides" IS 'Per-user ALLOW/DENY override of a specific permission, independent of role assignment (spec 7.2).';
+
+
+
 CREATE TABLE IF NOT EXISTS "core"."user_roles" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -4471,7 +5305,7 @@ CREATE TABLE IF NOT EXISTS "finance"."chart_of_accounts" (
 ALTER TABLE "finance"."chart_of_accounts" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "finance"."account_type_summary" AS
+CREATE OR REPLACE VIEW "finance"."account_type_summary" WITH ("security_invoker"='true') AS
  SELECT "account_type",
     "count"(*) AS "total_accounts",
     "count"(*) FILTER (WHERE ("is_active" = true)) AS "active_accounts",
@@ -4584,6 +5418,27 @@ CREATE TABLE IF NOT EXISTS "finance"."attachments" (
 ALTER TABLE "finance"."attachments" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "finance"."attendance_period_snapshots" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "shared_person_id" "uuid" NOT NULL,
+    "period_start" "date" NOT NULL,
+    "period_end" "date" NOT NULL,
+    "source_event_id" "uuid",
+    "snapshot_payload" "jsonb" NOT NULL,
+    "payload_hash" "text" NOT NULL,
+    "locked" boolean DEFAULT true NOT NULL,
+    "received_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "attendance_snapshot_period_valid" CHECK (("period_end" >= "period_start"))
+);
+
+
+ALTER TABLE "finance"."attendance_period_snapshots" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "finance"."attendance_period_snapshots" IS 'Immutable, versioned attendance/payroll-input snapshot consumed by payroll calculation. Once locked=true, snapshot_payload must never be edited -- payroll runs must reference this row, not live attendance data. Added migration 021 (audit issue H6 / Appendix D).';
+
+
+
 CREATE TABLE IF NOT EXISTS "finance"."bank_statements" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "financial_account_id" "uuid" NOT NULL,
@@ -4665,7 +5520,32 @@ CREATE TABLE IF NOT EXISTS "finance"."budget_lines" (
 ALTER TABLE "finance"."budget_lines" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "finance"."coa_tree" AS
+CREATE TABLE IF NOT EXISTS "finance"."budget_revisions" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "budget_id" "uuid" NOT NULL,
+    "revision_number" integer NOT NULL,
+    "previous_amount" numeric(18,2) NOT NULL,
+    "revised_amount" numeric(18,2) NOT NULL,
+    "change_amount" numeric(18,2) GENERATED ALWAYS AS (("revised_amount" - "previous_amount")) STORED,
+    "reason" "text" NOT NULL,
+    "requested_by" "uuid" NOT NULL,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "budget_revisions_reason_not_blank" CHECK (("btrim"("reason") <> ''::"text")),
+    CONSTRAINT "budget_revisions_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'APPROVED'::"text", 'REJECTED'::"text"])))
+);
+
+
+ALTER TABLE "finance"."budget_revisions" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "finance"."budget_revisions" IS 'Budget revision history with reasons and approvals. Added migration 021 (audit issue H5).';
+
+
+
+CREATE OR REPLACE VIEW "finance"."coa_tree" WITH ("security_invoker"='true') AS
  WITH RECURSIVE "coa_hierarchy" AS (
          SELECT ("chart_of_accounts"."id")::"text" AS "id",
             "chart_of_accounts"."code",
@@ -4775,6 +5655,29 @@ CREATE TABLE IF NOT EXISTS "finance"."depreciation_schedule" (
 
 
 ALTER TABLE "finance"."depreciation_schedule" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."dimensions" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "type" "text" NOT NULL,
+    "code" "text" NOT NULL,
+    "name" "text" NOT NULL,
+    "parent_id" "uuid",
+    "manager_user_id" "uuid",
+    "is_active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    CONSTRAINT "dimensions_type_check" CHECK (("type" = ANY (ARRAY['DEPARTMENT'::"text", 'COST_CENTER'::"text", 'BUSINESS_UNIT'::"text"])))
+);
+
+
+ALTER TABLE "finance"."dimensions" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "finance"."dimensions" IS 'Departments / cost centers / business units transactions can be tagged against. Added migration 021 (audit issue H4).';
+
 
 
 CREATE TABLE IF NOT EXISTS "finance"."distribution_lines" (
@@ -4930,7 +5833,7 @@ CREATE TABLE IF NOT EXISTS "finance"."fiscal_years" (
 ALTER TABLE "finance"."fiscal_years" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "finance"."fiscal_year_summary" AS
+CREATE OR REPLACE VIEW "finance"."fiscal_year_summary" WITH ("security_invoker"='true') AS
  SELECT "fy"."id",
     "fy"."name",
     "fy"."start_date",
@@ -5235,7 +6138,7 @@ CREATE TABLE IF NOT EXISTS "finance"."platforms" (
 ALTER TABLE "finance"."platforms" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "finance"."postable_accounts" AS
+CREATE OR REPLACE VIEW "finance"."postable_accounts" WITH ("security_invoker"='true') AS
  SELECT "id",
     "code",
     "name",
@@ -5297,7 +6200,7 @@ CREATE TABLE IF NOT EXISTS "finance"."reserve_policies" (
 ALTER TABLE "finance"."reserve_policies" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "finance"."sequence_status" AS
+CREATE OR REPLACE VIEW "finance"."sequence_status" WITH ("security_invoker"='true') AS
  SELECT "id",
     "sequence_type",
     "prefix",
@@ -5357,6 +6260,107 @@ CREATE TABLE IF NOT EXISTS "finance"."tax_adjustments" (
 ALTER TABLE "finance"."tax_adjustments" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "finance"."tax_computations" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "tax_rule_set_id" "uuid",
+    "fiscal_year_id" "uuid",
+    "period_id" "uuid",
+    "tax_type" "text" DEFAULT 'corporate'::"text" NOT NULL,
+    "period_start" "date" NOT NULL,
+    "period_end" "date" NOT NULL,
+    "gross_income" numeric(18,2) DEFAULT 0,
+    "total_deductions" numeric(18,2) DEFAULT 0,
+    "taxable_income" numeric(18,2) DEFAULT 0,
+    "tax_rate" numeric(8,4) DEFAULT 0,
+    "computed_tax" numeric(18,2) DEFAULT 0 NOT NULL,
+    "surcharge" numeric(18,2) DEFAULT 0,
+    "extra_tax" numeric(18,2) DEFAULT 0,
+    "total_tax" numeric(18,2) GENERATED ALWAYS AS ((("computed_tax" + COALESCE("surcharge", (0)::numeric)) + COALESCE("extra_tax", (0)::numeric))) STORED,
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "reviewed_by" "uuid",
+    "reviewed_at" timestamp with time zone,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "tax_return_id" "uuid",
+    "notes" "text",
+    "computation_json" "jsonb",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "tax_computations_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'REVIEWED'::"text", 'APPROVED'::"text", 'FILED'::"text", 'ADJUSTED'::"text"]))),
+    CONSTRAINT "tax_computations_tax_type_check" CHECK (("tax_type" = ANY (ARRAY['corporate'::"text", 'sales'::"text", 'withholding'::"text", 'presumptive'::"text"])))
+);
+
+
+ALTER TABLE "finance"."tax_computations" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."tax_credits_and_withholding" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "tax_computation_id" "uuid",
+    "fiscal_year_id" "uuid",
+    "period_id" "uuid",
+    "credit_type" "text" NOT NULL,
+    "counterparty_name" "text",
+    "counterparty_cnic" "text",
+    "counterparty_ntn" "text",
+    "source_type" "text",
+    "source_id" "uuid",
+    "gross_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "wht_rate" numeric(8,4) DEFAULT 0,
+    "credit_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text",
+    "status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
+    "tax_return_id" "uuid",
+    "notes" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "tax_credits_and_withholding_credit_type_check" CHECK (("credit_type" = ANY (ARRAY['WHT_DEDUCTED'::"text", 'WHT_COLLECTED'::"text", 'TAX_CREDIT'::"text", 'CARRY_FORWARD'::"text", 'ADJUSTMENT'::"text", 'PREVIOUS_YEAR_CREDIT'::"text"]))),
+    CONSTRAINT "tax_credits_and_withholding_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'CLAIMED'::"text", 'REJECTED'::"text", 'ADJUSTED'::"text"])))
+);
+
+
+ALTER TABLE "finance"."tax_credits_and_withholding" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."tax_payments_and_refunds" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "tax_computation_id" "uuid",
+    "tax_return_id" "uuid",
+    "fiscal_year_id" "uuid",
+    "period_id" "uuid",
+    "payment_type" "text" NOT NULL,
+    "tax_authority" "text" DEFAULT 'FBR'::"text",
+    "cpr_number" "text",
+    "prs_number" "text",
+    "amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text",
+    "penalty_amount" numeric(18,2) DEFAULT 0,
+    "surcharge_amount" numeric(18,2) DEFAULT 0,
+    "total_paid" numeric(18,2) GENERATED ALWAYS AS ((("amount" + COALESCE("penalty_amount", (0)::numeric)) + COALESCE("surcharge_amount", (0)::numeric))) STORED,
+    "payment_reference" "text",
+    "payment_method" "text" DEFAULT 'bank_transfer'::"text",
+    "payment_date" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "financial_account_id" "uuid",
+    "journal_entry_id" "uuid",
+    "status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
+    "notes" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "tax_payments_and_refunds_payment_method_check" CHECK (("payment_method" = ANY (ARRAY['bank_transfer'::"text", 'cheque'::"text", 'online'::"text", 'adjustment'::"text"]))),
+    CONSTRAINT "tax_payments_and_refunds_payment_type_check" CHECK (("payment_type" = ANY (ARRAY['PAYMENT'::"text", 'REFUND'::"text", 'ADVANCE_PAYMENT'::"text", 'ADJUSTMENT'::"text"]))),
+    CONSTRAINT "tax_payments_and_refunds_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'COMPLETED'::"text", 'FAILED'::"text", 'REVERSED'::"text"])))
+);
+
+
+ALTER TABLE "finance"."tax_payments_and_refunds" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "finance"."tax_reconciliations" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "tax_year" "text" NOT NULL,
@@ -5389,6 +6393,53 @@ CREATE TABLE IF NOT EXISTS "finance"."tax_reconciliations" (
 
 
 ALTER TABLE "finance"."tax_reconciliations" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."tax_returns" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "tax_rule_set_id" "uuid",
+    "fiscal_year_id" "uuid",
+    "period_id" "uuid",
+    "tax_reconciliation_id" "uuid",
+    "tax_type" "text" DEFAULT 'corporate'::"text" NOT NULL,
+    "tax_year" "text" NOT NULL,
+    "period_start" "date" NOT NULL,
+    "period_end" "date" NOT NULL,
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "filing_reference" "text",
+    "filing_date" "date",
+    "due_date" "date",
+    "acknowledged_date" "date",
+    "assessed_date" "date",
+    "declared_income" numeric(18,2) DEFAULT 0,
+    "declared_taxable" numeric(18,2) DEFAULT 0,
+    "declared_tax" numeric(18,2) DEFAULT 0,
+    "declared_wht_credits" numeric(18,2) DEFAULT 0,
+    "declared_net_payable" numeric(18,2) DEFAULT 0,
+    "assessed_income" numeric(18,2),
+    "assessed_tax" numeric(18,2),
+    "assessed_penalty" numeric(18,2) DEFAULT 0,
+    "assessed_surcharge" numeric(18,2) DEFAULT 0,
+    "assessed_total_due" numeric(18,2),
+    "prepared_by" "uuid",
+    "prepared_at" timestamp with time zone,
+    "reviewed_by" "uuid",
+    "reviewed_at" timestamp with time zone,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "attachment_ids" "uuid"[],
+    "filing_json" "jsonb",
+    "notes" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "tax_returns_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'PREPARED'::"text", 'UNDER_REVIEW'::"text", 'APPROVED'::"text", 'FILED'::"text", 'ACKNOWLEDGED'::"text", 'ASSESSED'::"text", 'ADJUSTED'::"text", 'CANCELLED'::"text"]))),
+    CONSTRAINT "tax_returns_tax_type_check" CHECK (("tax_type" = ANY (ARRAY['corporate'::"text", 'sales'::"text", 'withholding'::"text", 'presumptive'::"text"])))
+);
+
+
+ALTER TABLE "finance"."tax_returns" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "finance"."tax_rule_sets" (
@@ -5646,7 +6697,7 @@ COMMENT ON COLUMN "public"."budgets"."variance_alert_threshold" IS 'Percentage (
 
 
 
-CREATE OR REPLACE VIEW "public"."chart_of_accounts" AS
+CREATE OR REPLACE VIEW "public"."chart_of_accounts" WITH ("security_invoker"='true') AS
  SELECT "id",
     "created_at",
     "updated_at",
@@ -5691,7 +6742,7 @@ CREATE TABLE IF NOT EXISTS "public"."clients" (
 ALTER TABLE "public"."clients" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."coa_tree" AS
+CREATE OR REPLACE VIEW "public"."coa_tree" WITH ("security_invoker"='true') AS
  SELECT "id",
     "code",
     "name",
@@ -5802,7 +6853,7 @@ COMMENT ON TABLE "public"."contractors" IS 'External contractor engagements with
 
 
 
-CREATE OR REPLACE VIEW "public"."credit_notes" AS
+CREATE OR REPLACE VIEW "public"."credit_notes" WITH ("security_invoker"='true') AS
  SELECT "id",
     "credit_note_number",
     "invoice_id",
@@ -5827,7 +6878,7 @@ CREATE OR REPLACE VIEW "public"."credit_notes" AS
 ALTER VIEW "public"."credit_notes" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."exchange_rates" AS
+CREATE OR REPLACE VIEW "public"."exchange_rates" WITH ("security_invoker"='true') AS
  SELECT "id",
     "from_currency",
     "to_currency",
@@ -5903,7 +6954,7 @@ CREATE TABLE IF NOT EXISTS "public"."financial_accounts" (
 ALTER TABLE "public"."financial_accounts" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."general_ledger" AS
+CREATE OR REPLACE VIEW "reporting"."general_ledger" WITH ("security_invoker"='true') AS
  SELECT "je"."id" AS "journal_entry_id",
     "je"."reference" AS "journal_reference",
     "je"."description" AS "journal_description",
@@ -5942,7 +6993,7 @@ CREATE OR REPLACE VIEW "reporting"."general_ledger" AS
 ALTER VIEW "reporting"."general_ledger" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."general_ledger" AS
+CREATE OR REPLACE VIEW "public"."general_ledger" WITH ("security_invoker"='true') AS
  SELECT "journal_entry_id",
     "journal_reference",
     "journal_description",
@@ -6040,15 +7091,14 @@ CREATE TABLE IF NOT EXISTS "public"."invoices" (
     "issued_at" timestamp with time zone,
     "void_reason" "text",
     "voided_by" "uuid",
-    "voided_at" timestamp with time zone,
-    CONSTRAINT "invoices_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'SUBMITTED'::character varying, 'APPROVED'::character varying, 'ISSUED'::character varying, 'PARTIALLY_PAID'::character varying, 'PAID'::character varying, 'OVERDUE'::character varying, 'VOID'::character varying, 'REVERSED'::character varying, 'Draft'::character varying, 'Pending'::character varying, 'Paid'::character varying])::"text"[])))
+    "voided_at" timestamp with time zone
 );
 
 
 ALTER TABLE "public"."invoices" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."journal_entries" AS
+CREATE OR REPLACE VIEW "public"."journal_entries" WITH ("security_invoker"='true') AS
  SELECT "id",
     "created_at",
     "updated_at",
@@ -6091,7 +7141,7 @@ CREATE OR REPLACE VIEW "public"."journal_entries" AS
 ALTER VIEW "public"."journal_entries" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."journal_lines" AS
+CREATE OR REPLACE VIEW "public"."journal_lines" WITH ("security_invoker"='true') AS
  SELECT "id",
     "created_at",
     "updated_at",
@@ -6144,7 +7194,7 @@ CREATE TABLE IF NOT EXISTS "public"."numbering_sequences" (
 ALTER TABLE "public"."numbering_sequences" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."organization_config" AS
+CREATE OR REPLACE VIEW "public"."organization_config" WITH ("security_invoker"='true') AS
  SELECT "id",
     "created_at",
     "updated_at",
@@ -6167,7 +7217,7 @@ CREATE OR REPLACE VIEW "public"."organization_config" AS
 ALTER VIEW "public"."organization_config" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."payment_allocations" AS
+CREATE OR REPLACE VIEW "public"."payment_allocations" WITH ("security_invoker"='true') AS
  SELECT "id",
     "payment_receipt_id",
     "invoice_id",
@@ -6181,7 +7231,7 @@ CREATE OR REPLACE VIEW "public"."payment_allocations" AS
 ALTER VIEW "public"."payment_allocations" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."payment_receipts" AS
+CREATE OR REPLACE VIEW "public"."payment_receipts" WITH ("security_invoker"='true') AS
  SELECT "id",
     "receipt_number",
     "payment_date",
@@ -6470,7 +7520,7 @@ COMMENT ON TABLE "public"."payroll_runs" IS 'A payroll run is a batch calculatio
 
 
 
-CREATE OR REPLACE VIEW "public"."permissions" AS
+CREATE OR REPLACE VIEW "public"."permissions" WITH ("security_invoker"='true') AS
  SELECT "id",
     "code",
     "name",
@@ -6487,7 +7537,7 @@ CREATE OR REPLACE VIEW "public"."permissions" AS
 ALTER VIEW "public"."permissions" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."postable_accounts" AS
+CREATE OR REPLACE VIEW "public"."postable_accounts" WITH ("security_invoker"='true') AS
  SELECT "id",
     "code",
     "name",
@@ -6506,7 +7556,7 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
     "full_name" "text" DEFAULT ''::"text",
-    "role" "text" DEFAULT 'User'::"text" NOT NULL,
+    "role" "text" DEFAULT 'VIEWER'::"text" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
     "email" "text" DEFAULT ''::"text",
     "can_create_project" boolean DEFAULT false,
@@ -6524,6 +7574,8 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
     "can_manage_budgets" boolean DEFAULT false,
     "mfa_required" boolean DEFAULT false NOT NULL,
     "organization_id" "uuid",
+    "department_id" "uuid",
+    "manager_id" "uuid",
     CONSTRAINT "profiles_role_check" CHECK (("role" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'ACCOUNTANT'::"text", 'PROJECT_MANAGER'::"text", 'EMPLOYEE'::"text", 'VIEWER'::"text"])))
 );
 
@@ -6549,7 +7601,7 @@ CREATE TABLE IF NOT EXISTS "public"."projects" (
 ALTER TABLE "public"."projects" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."role_permissions" AS
+CREATE OR REPLACE VIEW "public"."role_permissions" WITH ("security_invoker"='true') AS
  SELECT "id",
     "role_id",
     "permission_id",
@@ -6566,7 +7618,7 @@ CREATE OR REPLACE VIEW "public"."role_permissions" AS
 ALTER VIEW "public"."role_permissions" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."roles" AS
+CREATE OR REPLACE VIEW "public"."roles" WITH ("security_invoker"='true') AS
  SELECT "id",
     "name",
     "display_name",
@@ -6730,7 +7782,7 @@ CREATE OR REPLACE VIEW "public"."v_audit_log" WITH ("security_invoker"='true') A
 ALTER VIEW "public"."v_audit_log" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."v_commission_by_person" AS
+CREATE OR REPLACE VIEW "public"."v_commission_by_person" WITH ("security_invoker"='true') AS
  SELECT "person_name",
     "person_type",
     "contractor_id",
@@ -6753,7 +7805,7 @@ COMMENT ON VIEW "public"."v_commission_by_person" IS 'Aggregated commission tota
 
 
 
-CREATE OR REPLACE VIEW "public"."v_commission_by_project" AS
+CREATE OR REPLACE VIEW "public"."v_commission_by_project" WITH ("security_invoker"='true') AS
  SELECT COALESCE("p"."name", 'Unassigned'::character varying) AS "project_name",
     COALESCE(("p"."id")::"text", 'none'::"text") AS "project_id",
     "count"(*) AS "commission_count",
@@ -6776,7 +7828,7 @@ COMMENT ON VIEW "public"."v_commission_by_project" IS 'Aggregated commission tot
 
 
 
-CREATE OR REPLACE VIEW "public"."v_commission_by_type" AS
+CREATE OR REPLACE VIEW "public"."v_commission_by_type" WITH ("security_invoker"='true') AS
  SELECT "commission_type",
     "calculation_basis",
     "count"(*) AS "commission_count",
@@ -6796,7 +7848,7 @@ COMMENT ON VIEW "public"."v_commission_by_type" IS 'Commission breakdown by type
 
 
 
-CREATE OR REPLACE VIEW "public"."v_commission_status_summary" AS
+CREATE OR REPLACE VIEW "public"."v_commission_status_summary" WITH ("security_invoker"='true') AS
  SELECT "status",
     "count"(*) AS "commission_count",
     "sum"("commission_amount") AS "total_commission",
@@ -6814,7 +7866,7 @@ COMMENT ON VIEW "public"."v_commission_status_summary" IS 'Commission totals gro
 
 
 
-CREATE OR REPLACE VIEW "public"."v_contractor_costs" AS
+CREATE OR REPLACE VIEW "public"."v_contractor_costs" WITH ("security_invoker"='true') AS
  SELECT "role",
     "count"(*) AS "contractor_count",
     "sum"("rate") AS "raw_total_rate",
@@ -6857,7 +7909,7 @@ COMMENT ON VIEW "public"."v_contractor_costs" IS 'Role-wise annualized and norma
 
 
 
-CREATE OR REPLACE VIEW "public"."v_contractor_expirations" AS
+CREATE OR REPLACE VIEW "public"."v_contractor_expirations" WITH ("security_invoker"='true') AS
  SELECT "id",
     "name",
     "email",
@@ -6902,7 +7954,7 @@ COMMENT ON VIEW "public"."v_contractor_expirations" IS 'Active contractors with 
 
 
 
-CREATE OR REPLACE VIEW "public"."v_contractor_project_costs" AS
+CREATE OR REPLACE VIEW "public"."v_contractor_project_costs" WITH ("security_invoker"='true') AS
  SELECT COALESCE("p"."name", 'Unassigned'::character varying) AS "project_name",
     COALESCE(("p"."id")::"text", 'none'::"text") AS "project_id",
     "count"(*) AS "contractor_count",
@@ -6969,7 +8021,7 @@ COMMENT ON VIEW "public"."v_payroll_summary" IS 'Aggregated payroll run summary 
 
 
 
-CREATE OR REPLACE VIEW "public"."v_permissions" AS
+CREATE OR REPLACE VIEW "public"."v_permissions" WITH ("security_invoker"='true') AS
  SELECT "id",
     "code",
     "name",
@@ -6986,7 +8038,7 @@ CREATE OR REPLACE VIEW "public"."v_permissions" AS
 ALTER VIEW "public"."v_permissions" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."v_role_permissions" AS
+CREATE OR REPLACE VIEW "public"."v_role_permissions" WITH ("security_invoker"='true') AS
  SELECT "rp"."id",
     "rp"."role_id",
     "rp"."permission_id",
@@ -7007,7 +8059,7 @@ CREATE OR REPLACE VIEW "public"."v_role_permissions" AS
 ALTER VIEW "public"."v_role_permissions" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."v_roles" AS
+CREATE OR REPLACE VIEW "public"."v_roles" WITH ("security_invoker"='true') AS
  SELECT "id",
     "name",
     "display_name",
@@ -7023,7 +8075,7 @@ CREATE OR REPLACE VIEW "public"."v_roles" AS
 ALTER VIEW "public"."v_roles" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "public"."v_subscription_renewals" AS
+CREATE OR REPLACE VIEW "public"."v_subscription_renewals" WITH ("security_invoker"='true') AS
  SELECT "id",
     "name",
     "vendor",
@@ -7065,7 +8117,7 @@ COMMENT ON VIEW "public"."v_subscription_renewals" IS 'Active subscriptions with
 
 
 
-CREATE OR REPLACE VIEW "public"."v_subscription_spend" AS
+CREATE OR REPLACE VIEW "public"."v_subscription_spend" WITH ("security_invoker"='true') AS
  SELECT "category",
     "count"(*) AS "subscription_count",
     "sum"("amount") AS "raw_total",
@@ -7111,7 +8163,7 @@ COMMENT ON VIEW "public"."v_subscription_spend" IS 'Category-wise annualized and
 
 
 
-CREATE OR REPLACE VIEW "public"."v_user_roles" AS
+CREATE OR REPLACE VIEW "public"."v_user_roles" WITH ("security_invoker"='true') AS
  SELECT "ur"."id",
     "ur"."user_id",
     "ur"."role_id",
@@ -7132,7 +8184,7 @@ CREATE OR REPLACE VIEW "public"."v_user_roles" AS
 ALTER VIEW "public"."v_user_roles" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."budget_vs_actual" AS
+CREATE OR REPLACE VIEW "reporting"."budget_vs_actual" WITH ("security_invoker"='true') AS
  SELECT "b"."id" AS "budget_id",
     "b"."name" AS "budget_name",
     "b"."category" AS "budget_category",
@@ -7170,7 +8222,7 @@ CREATE OR REPLACE VIEW "reporting"."budget_vs_actual" AS
 ALTER VIEW "reporting"."budget_vs_actual" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."budget_category_summary" AS
+CREATE OR REPLACE VIEW "reporting"."budget_category_summary" WITH ("security_invoker"='true') AS
  SELECT "b"."category",
     "count"(DISTINCT "b"."id") AS "budget_count",
     "sum"("b"."total_amount") AS "total_budgeted",
@@ -7188,7 +8240,7 @@ CREATE OR REPLACE VIEW "reporting"."budget_category_summary" AS
 ALTER VIEW "reporting"."budget_category_summary" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."budget_gl_actual" AS
+CREATE OR REPLACE VIEW "reporting"."budget_gl_actual" WITH ("security_invoker"='true') AS
  SELECT "bl"."id" AS "budget_line_id",
     "bl"."budget_id",
     "b"."name" AS "budget_name",
@@ -7217,7 +8269,7 @@ CREATE OR REPLACE VIEW "reporting"."budget_gl_actual" AS
 ALTER VIEW "reporting"."budget_gl_actual" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."payable_aging" AS
+CREATE OR REPLACE VIEW "reporting"."payable_aging" WITH ("security_invoker"='true') AS
  SELECT "vb"."id" AS "bill_id",
     "vb"."bill_number",
     "vb"."vendor_id",
@@ -7258,7 +8310,7 @@ CREATE OR REPLACE VIEW "reporting"."payable_aging" AS
 ALTER VIEW "reporting"."payable_aging" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."receivable_aging" AS
+CREATE OR REPLACE VIEW "reporting"."receivable_aging" WITH ("security_invoker"='true') AS
  SELECT "id" AS "invoice_id",
     "invoice_number",
     "client_name",
@@ -7301,7 +8353,7 @@ CREATE OR REPLACE VIEW "reporting"."receivable_aging" AS
 ALTER VIEW "reporting"."receivable_aging" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."reconciliation_summary" AS
+CREATE OR REPLACE VIEW "reporting"."reconciliation_summary" WITH ("security_invoker"='true') AS
  SELECT "fa"."id" AS "financial_account_id",
     "fa"."account_name",
     "fa"."institution_name",
@@ -7341,7 +8393,7 @@ CREATE OR REPLACE VIEW "reporting"."reconciliation_summary" AS
 ALTER VIEW "reporting"."reconciliation_summary" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."unreconciled_lines" AS
+CREATE OR REPLACE VIEW "reporting"."unreconciled_lines" WITH ("security_invoker"='true') AS
  SELECT "sl"."id",
     "sl"."line_number",
     "sl"."transaction_date",
@@ -7364,7 +8416,7 @@ CREATE OR REPLACE VIEW "reporting"."unreconciled_lines" AS
 ALTER VIEW "reporting"."unreconciled_lines" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."v_asset_register" AS
+CREATE OR REPLACE VIEW "reporting"."v_asset_register" WITH ("security_invoker"='true') AS
  SELECT "fa"."id",
     "fa"."code",
     "fa"."name",
@@ -7418,7 +8470,7 @@ CREATE OR REPLACE VIEW "reporting"."v_cash_position" WITH ("security_invoker"='t
 ALTER VIEW "reporting"."v_cash_position" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."v_depreciation_summary" AS
+CREATE OR REPLACE VIEW "reporting"."v_depreciation_summary" WITH ("security_invoker"='true') AS
  SELECT "ds"."fiscal_year_id",
     "fy"."name" AS "fiscal_year_name",
     "ds"."period_id",
@@ -7595,8 +8647,78 @@ ALTER TABLE ONLY "audit"."security_events"
 
 
 
+ALTER TABLE ONLY "core"."approval_actions"
+    ADD CONSTRAINT "approval_actions_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "core"."approval_limits"
+    ADD CONSTRAINT "approval_limits_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "core"."approval_requests"
+    ADD CONSTRAINT "approval_requests_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "core"."approval_steps"
+    ADD CONSTRAINT "approval_steps_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "core"."approval_steps"
+    ADD CONSTRAINT "approval_steps_unique_step" UNIQUE ("approval_request_id", "step_number");
+
+
+
+ALTER TABLE ONLY "core"."budget_policies"
+    ADD CONSTRAINT "budget_policies_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "core"."delegations"
+    ADD CONSTRAINT "delegations_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "core"."employee_links"
+    ADD CONSTRAINT "employee_links_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "core"."idempotency_keys"
+    ADD CONSTRAINT "idempotency_keys_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "core"."idempotency_keys"
+    ADD CONSTRAINT "idempotency_keys_unique" UNIQUE ("scope", "key");
+
+
+
+ALTER TABLE ONLY "core"."integration_events"
+    ADD CONSTRAINT "integration_events_idempotency_unique" UNIQUE ("source_module", "event_type", "idempotency_key");
+
+
+
+ALTER TABLE ONLY "core"."integration_events"
+    ADD CONSTRAINT "integration_events_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "core"."integration_failures"
+    ADD CONSTRAINT "integration_failures_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "core"."organization_config"
     ADD CONSTRAINT "organization_config_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "core"."organization_modules"
+    ADD CONSTRAINT "organization_modules_pkey" PRIMARY KEY ("id");
 
 
 
@@ -7635,8 +8757,18 @@ ALTER TABLE ONLY "core"."role_permissions"
 
 
 
+ALTER TABLE ONLY "core"."shared_people"
+    ADD CONSTRAINT "shared_people_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "core"."user_roles"
     ADD CONSTRAINT "ur_user_role_unique" UNIQUE ("user_id", "role_id", "effective_from");
+
+
+
+ALTER TABLE ONLY "core"."user_permission_overrides"
+    ADD CONSTRAINT "user_permission_overrides_pkey" PRIMARY KEY ("id");
 
 
 
@@ -7652,6 +8784,16 @@ ALTER TABLE ONLY "finance"."accounting_periods"
 
 ALTER TABLE ONLY "finance"."accounting_periods"
     ADD CONSTRAINT "ap_fy_period_unique" UNIQUE ("fiscal_year_id", "period_number");
+
+
+
+ALTER TABLE ONLY "finance"."accounting_periods"
+    ADD CONSTRAINT "ap_no_overlapping_ranges_per_fy" EXCLUDE USING "gist" ("fiscal_year_id" WITH =, "daterange"("start_date", "end_date", '[]'::"text") WITH &&);
+
+
+
+ALTER TABLE ONLY "finance"."accounting_periods"
+    ADD CONSTRAINT "ap_unique_period_number_per_fy" UNIQUE ("fiscal_year_id", "period_number");
 
 
 
@@ -7690,6 +8832,16 @@ ALTER TABLE ONLY "finance"."attachments"
 
 
 
+ALTER TABLE ONLY "finance"."attendance_period_snapshots"
+    ADD CONSTRAINT "attendance_period_snapshots_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."attendance_period_snapshots"
+    ADD CONSTRAINT "attendance_snapshot_unique" UNIQUE ("shared_person_id", "period_start", "period_end");
+
+
+
 ALTER TABLE ONLY "finance"."bank_statements"
     ADD CONSTRAINT "bank_statements_pkey" PRIMARY KEY ("id");
 
@@ -7702,6 +8854,16 @@ ALTER TABLE ONLY "finance"."bank_transfers"
 
 ALTER TABLE ONLY "finance"."budget_lines"
     ADD CONSTRAINT "budget_lines_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."budget_revisions"
+    ADD CONSTRAINT "budget_revisions_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."budget_revisions"
+    ADD CONSTRAINT "budget_revisions_unique_number" UNIQUE ("budget_id", "revision_number");
 
 
 
@@ -7732,6 +8894,16 @@ ALTER TABLE ONLY "finance"."depreciation_schedule"
 
 ALTER TABLE ONLY "finance"."depreciation_schedule"
     ADD CONSTRAINT "depreciation_schedule_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."dimensions"
+    ADD CONSTRAINT "dimensions_org_code_unique" UNIQUE ("organization_id", "type", "code");
+
+
+
+ALTER TABLE ONLY "finance"."dimensions"
+    ADD CONSTRAINT "dimensions_pkey" PRIMARY KEY ("id");
 
 
 
@@ -7782,6 +8954,11 @@ ALTER TABLE ONLY "finance"."fixed_assets"
 
 ALTER TABLE ONLY "finance"."fixed_assets"
     ADD CONSTRAINT "fixed_assets_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."fiscal_years"
+    ADD CONSTRAINT "fy_no_overlapping_ranges" EXCLUDE USING "gist" ("daterange"("start_date", "end_date", '[]'::"text") WITH &&);
 
 
 
@@ -7870,8 +9047,28 @@ ALTER TABLE ONLY "finance"."tax_adjustments"
 
 
 
+ALTER TABLE ONLY "finance"."tax_computations"
+    ADD CONSTRAINT "tax_computations_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_credits_and_withholding"
+    ADD CONSTRAINT "tax_credits_and_withholding_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
+    ADD CONSTRAINT "tax_payments_and_refunds_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "finance"."tax_reconciliations"
     ADD CONSTRAINT "tax_reconciliations_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_returns"
+    ADD CONSTRAINT "tax_returns_pkey" PRIMARY KEY ("id");
 
 
 
@@ -8002,6 +9199,11 @@ ALTER TABLE ONLY "public"."financial_accounts"
 
 ALTER TABLE ONLY "public"."incomes"
     ADD CONSTRAINT "incomes_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."invoices"
+    ADD CONSTRAINT "invoices_invoice_number_key" UNIQUE ("invoice_number");
 
 
 
@@ -8230,6 +9432,66 @@ CREATE INDEX "idx_security_events_user" ON "audit"."security_events" USING "btre
 
 
 
+CREATE INDEX "idx_approval_actions_step" ON "core"."approval_actions" USING "btree" ("approval_step_id");
+
+
+
+CREATE INDEX "idx_approval_limits_effective" ON "core"."approval_limits" USING "btree" ("effective_from", "effective_to");
+
+
+
+CREATE INDEX "idx_approval_limits_role" ON "core"."approval_limits" USING "btree" ("role_id", "transaction_type") WHERE ("role_id" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_approval_limits_user" ON "core"."approval_limits" USING "btree" ("user_id", "transaction_type") WHERE ("user_id" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_approval_requests_entity" ON "core"."approval_requests" USING "btree" ("entity_type", "entity_id");
+
+
+
+CREATE INDEX "idx_approval_requests_status" ON "core"."approval_requests" USING "btree" ("status");
+
+
+
+CREATE INDEX "idx_approval_steps_request" ON "core"."approval_steps" USING "btree" ("approval_request_id");
+
+
+
+CREATE INDEX "idx_budget_policies_org_active" ON "core"."budget_policies" USING "btree" ("organization_id", "is_active");
+
+
+
+CREATE INDEX "idx_delegations_effective" ON "core"."delegations" USING "btree" ("effective_from", "effective_to");
+
+
+
+CREATE INDEX "idx_delegations_from" ON "core"."delegations" USING "btree" ("from_user_id", "status");
+
+
+
+CREATE INDEX "idx_delegations_to" ON "core"."delegations" USING "btree" ("to_user_id", "status");
+
+
+
+CREATE INDEX "idx_employee_links_person" ON "core"."employee_links" USING "btree" ("shared_person_id");
+
+
+
+CREATE INDEX "idx_integration_events_org" ON "core"."integration_events" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_integration_events_status" ON "core"."integration_events" USING "btree" ("processing_status");
+
+
+
+CREATE INDEX "idx_integration_failures_event" ON "core"."integration_failures" USING "btree" ("integration_event_id");
+
+
+
 CREATE INDEX "idx_org_config_active" ON "core"."organization_config" USING "btree" ("active");
 
 
@@ -8242,11 +9504,35 @@ CREATE INDEX "idx_rp_role" ON "core"."role_permissions" USING "btree" ("role_id"
 
 
 
+CREATE INDEX "idx_shared_people_org" ON "core"."shared_people" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_upo_user" ON "core"."user_permission_overrides" USING "btree" ("user_id");
+
+
+
 CREATE INDEX "idx_ur_role" ON "core"."user_roles" USING "btree" ("role_id");
 
 
 
 CREATE INDEX "idx_ur_user" ON "core"."user_roles" USING "btree" ("user_id");
+
+
+
+CREATE UNIQUE INDEX "uq_org_active_policy" ON "core"."budget_policies" USING "btree" ("organization_id") WHERE ("is_active" = true);
+
+
+
+CREATE UNIQUE INDEX "uq_org_module_active" ON "core"."organization_modules" USING "btree" ("organization_id", "module_key") WHERE ("effective_to" IS NULL);
+
+
+
+CREATE UNIQUE INDEX "uq_shared_people_auth_user" ON "core"."shared_people" USING "btree" ("auth_user_id") WHERE ("auth_user_id" IS NOT NULL);
+
+
+
+CREATE UNIQUE INDEX "uq_upo_active_user_permission" ON "core"."user_permission_overrides" USING "btree" ("user_id", "permission_id") WHERE ("effective_to" IS NULL);
 
 
 
@@ -8286,6 +9572,10 @@ CREATE INDEX "idx_attachments_hash" ON "finance"."attachments" USING "btree" ("f
 
 
 
+CREATE INDEX "idx_attendance_snapshots_person" ON "finance"."attendance_period_snapshots" USING "btree" ("shared_person_id");
+
+
+
 CREATE INDEX "idx_bl_account" ON "finance"."budget_lines" USING "btree" ("account_id");
 
 
@@ -8318,6 +9608,10 @@ CREATE INDEX "idx_bt_to" ON "finance"."bank_transfers" USING "btree" ("to_accoun
 
 
 
+CREATE INDEX "idx_budget_revisions_budget" ON "finance"."budget_revisions" USING "btree" ("budget_id");
+
+
+
 CREATE INDEX "idx_coa_account_type" ON "finance"."chart_of_accounts" USING "btree" ("account_type");
 
 
@@ -8347,6 +9641,14 @@ CREATE INDEX "idx_depreciation_schedule_period" ON "finance"."depreciation_sched
 
 
 CREATE INDEX "idx_depreciation_schedule_status" ON "finance"."depreciation_schedule" USING "btree" ("status");
+
+
+
+CREATE INDEX "idx_dimensions_org" ON "finance"."dimensions" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_dimensions_parent" ON "finance"."dimensions" USING "btree" ("parent_id");
 
 
 
@@ -8475,6 +9777,90 @@ CREATE INDEX "idx_ta_category" ON "finance"."tax_adjustments" USING "btree" ("ad
 
 
 CREATE INDEX "idx_ta_recon" ON "finance"."tax_adjustments" USING "btree" ("tax_reconciliation_id");
+
+
+
+CREATE INDEX "idx_tax_comp_fy" ON "finance"."tax_computations" USING "btree" ("fiscal_year_id");
+
+
+
+CREATE INDEX "idx_tax_comp_org" ON "finance"."tax_computations" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_tax_comp_period" ON "finance"."tax_computations" USING "btree" ("period_id");
+
+
+
+CREATE INDEX "idx_tax_comp_status" ON "finance"."tax_computations" USING "btree" ("status");
+
+
+
+CREATE INDEX "idx_tax_cw_comp" ON "finance"."tax_credits_and_withholding" USING "btree" ("tax_computation_id");
+
+
+
+CREATE INDEX "idx_tax_cw_org" ON "finance"."tax_credits_and_withholding" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_tax_cw_period" ON "finance"."tax_credits_and_withholding" USING "btree" ("period_id");
+
+
+
+CREATE INDEX "idx_tax_cw_status" ON "finance"."tax_credits_and_withholding" USING "btree" ("status");
+
+
+
+CREATE INDEX "idx_tax_cw_type" ON "finance"."tax_credits_and_withholding" USING "btree" ("credit_type");
+
+
+
+CREATE INDEX "idx_tax_pay_comp" ON "finance"."tax_payments_and_refunds" USING "btree" ("tax_computation_id");
+
+
+
+CREATE INDEX "idx_tax_pay_date" ON "finance"."tax_payments_and_refunds" USING "btree" ("payment_date");
+
+
+
+CREATE INDEX "idx_tax_pay_org" ON "finance"."tax_payments_and_refunds" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_tax_pay_period" ON "finance"."tax_payments_and_refunds" USING "btree" ("period_id");
+
+
+
+CREATE INDEX "idx_tax_pay_return" ON "finance"."tax_payments_and_refunds" USING "btree" ("tax_return_id");
+
+
+
+CREATE INDEX "idx_tax_pay_status" ON "finance"."tax_payments_and_refunds" USING "btree" ("status");
+
+
+
+CREATE INDEX "idx_tax_ret_fy" ON "finance"."tax_returns" USING "btree" ("fiscal_year_id");
+
+
+
+CREATE INDEX "idx_tax_ret_org" ON "finance"."tax_returns" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_tax_ret_period" ON "finance"."tax_returns" USING "btree" ("period_id");
+
+
+
+CREATE INDEX "idx_tax_ret_recon" ON "finance"."tax_returns" USING "btree" ("tax_reconciliation_id");
+
+
+
+CREATE INDEX "idx_tax_ret_status" ON "finance"."tax_returns" USING "btree" ("status");
+
+
+
+CREATE INDEX "idx_tax_ret_type" ON "finance"."tax_returns" USING "btree" ("tax_type");
 
 
 
@@ -8670,6 +10056,10 @@ CREATE INDEX "idx_payroll_runs_status" ON "public"."payroll_runs" USING "btree" 
 
 
 
+CREATE INDEX "idx_profiles_department" ON "public"."profiles" USING "btree" ("department_id");
+
+
+
 CREATE INDEX "idx_profiles_role" ON "public"."profiles" USING "btree" ("role");
 
 
@@ -8706,7 +10096,7 @@ CREATE INDEX "idx_subscriptions_status" ON "public"."subscriptions" USING "btree
 
 
 
-CREATE OR REPLACE VIEW "public"."v_payroll_summary" AS
+CREATE OR REPLACE VIEW "public"."v_payroll_summary" WITH ("security_invoker"='true') AS
  SELECT "pr"."id" AS "run_id",
     "pr"."payroll_period",
     "pr"."status" AS "run_status",
@@ -8733,11 +10123,51 @@ CREATE OR REPLACE VIEW "public"."v_payroll_summary" AS
 
 
 
+CREATE OR REPLACE TRIGGER "ai_conversations_audit" AFTER INSERT OR DELETE OR UPDATE ON "ai"."ai_conversations" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "ai_document_extracti_audit" AFTER INSERT OR DELETE OR UPDATE ON "ai"."ai_document_extractions" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "ai_feedback_audit" AFTER INSERT OR DELETE OR UPDATE ON "ai"."ai_feedback" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "ai_messages_audit" AFTER INSERT OR DELETE OR UPDATE ON "ai"."ai_messages" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "ai_suggestions_audit" AFTER INSERT OR DELETE OR UPDATE ON "ai"."ai_suggestions" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "approval_limits_audit" AFTER INSERT OR DELETE OR UPDATE ON "core"."approval_limits" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "approval_limits_updated_at" BEFORE UPDATE ON "core"."approval_limits" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "delegations_audit" AFTER INSERT OR DELETE OR UPDATE ON "core"."delegations" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "delegations_updated_at" BEFORE UPDATE ON "core"."delegations" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "org_config_updated_at" BEFORE UPDATE ON "core"."organization_config" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
 
 
 
 CREATE OR REPLACE TRIGGER "organization_config_audit" AFTER INSERT OR DELETE OR UPDATE ON "core"."organization_config" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "organization_modules_updated_at" BEFORE UPDATE ON "core"."organization_modules" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
 
 
 
@@ -8765,6 +10195,42 @@ CREATE OR REPLACE TRIGGER "rp_updated_at" BEFORE UPDATE ON "core"."role_permissi
 
 
 
+CREATE OR REPLACE TRIGGER "shared_people_audit" AFTER INSERT OR DELETE OR UPDATE ON "core"."shared_people" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "shared_people_updated_at" BEFORE UPDATE ON "core"."shared_people" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "core"."approval_requests" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "core"."budget_policies" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "core"."employee_links" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "core"."integration_failures" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "core"."organizations" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "upo_audit" AFTER INSERT OR DELETE OR UPDATE ON "core"."user_permission_overrides" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "upo_updated_at" BEFORE UPDATE ON "core"."user_permission_overrides" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "ur_updated_at" BEFORE UPDATE ON "core"."user_roles" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
 
 
@@ -8781,19 +10247,23 @@ CREATE OR REPLACE TRIGGER "ap_updated_at" BEFORE UPDATE ON "finance"."accounting
 
 
 
+CREATE OR REPLACE TRIGGER "asset_categories_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."asset_categories" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "asset_verifications_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."asset_verifications" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "bank_statements_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."bank_statements" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
 CREATE OR REPLACE TRIGGER "bank_transfers_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."bank_transfers" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
 CREATE OR REPLACE TRIGGER "chart_of_accounts_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."chart_of_accounts" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
-
-
-
-CREATE OR REPLACE TRIGGER "chk_maker_checker" BEFORE UPDATE ON "finance"."journal_entries" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
-
-
-
-CREATE OR REPLACE TRIGGER "chk_maker_checker" BEFORE UPDATE ON "finance"."vendor_bills" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
 
 
 
@@ -8805,15 +10275,27 @@ CREATE OR REPLACE TRIGGER "credit_notes_audit" AFTER INSERT OR DELETE OR UPDATE 
 
 
 
+CREATE OR REPLACE TRIGGER "depreciation_schedul_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."depreciation_schedule" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
 CREATE OR REPLACE TRIGGER "distribution_lines_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."distribution_lines" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
-CREATE OR REPLACE TRIGGER "dl_uat" BEFORE UPDATE ON "finance"."distribution_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
-
-
-
 CREATE OR REPLACE TRIGGER "exchange_rates_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."exchange_rates" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "fee_computation_log_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."fee_computation_log" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "fee_rules_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."fee_rules" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "fee_tiers_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."fee_tiers" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
@@ -8822,6 +10304,10 @@ CREATE OR REPLACE TRIGGER "financial_accounts_audit" AFTER INSERT OR DELETE OR U
 
 
 CREATE OR REPLACE TRIGGER "fiscal_years_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."fiscal_years" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "fixed_assets_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."fixed_assets" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
@@ -8849,11 +10335,7 @@ CREATE OR REPLACE TRIGGER "ns_updated_at" BEFORE UPDATE ON "finance"."numbering_
 
 
 
-CREATE OR REPLACE TRIGGER "o_uat" BEFORE UPDATE ON "finance"."owners" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
-
-
-
-CREATE OR REPLACE TRIGGER "oh_uat" BEFORE UPDATE ON "finance"."ownership_history" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+CREATE OR REPLACE TRIGGER "numbering_sequences_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."numbering_sequences" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
@@ -8873,7 +10355,11 @@ CREATE OR REPLACE TRIGGER "payment_receipts_audit" AFTER INSERT OR DELETE OR UPD
 
 
 
-CREATE OR REPLACE TRIGGER "pd_uat" BEFORE UPDATE ON "finance"."profit_distributions" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+CREATE OR REPLACE TRIGGER "platforms_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."platforms" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "profit_distributions_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."profit_distributions" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
@@ -8881,11 +10367,7 @@ CREATE OR REPLACE TRIGGER "reserve_policies_audit" AFTER INSERT OR DELETE OR UPD
 
 
 
-CREATE OR REPLACE TRIGGER "rp_uat" BEFORE UPDATE ON "finance"."reserve_policies" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
-
-
-
-CREATE OR REPLACE TRIGGER "ta_uat" BEFORE UPDATE ON "finance"."tax_adjustments" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+CREATE OR REPLACE TRIGGER "statement_lines_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."statement_lines" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
@@ -8893,7 +10375,23 @@ CREATE OR REPLACE TRIGGER "tax_adjustments_audit" AFTER INSERT OR DELETE OR UPDA
 
 
 
+CREATE OR REPLACE TRIGGER "tax_computations_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."tax_computations" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "tax_credits_and_wh_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."tax_credits_and_withholding" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "tax_payments_ref_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."tax_payments_and_refunds" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
 CREATE OR REPLACE TRIGGER "tax_reconciliations_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."tax_reconciliations" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "tax_returns_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."tax_returns" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
@@ -8909,23 +10407,11 @@ CREATE OR REPLACE TRIGGER "taxpayer_profile_audit" AFTER INSERT OR DELETE OR UPD
 
 
 
-CREATE OR REPLACE TRIGGER "tp_uat" BEFORE UPDATE ON "finance"."taxpayer_profile" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
-
-
-
-CREATE OR REPLACE TRIGGER "tr_uat" BEFORE UPDATE ON "finance"."tax_reconciliations" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_alloc_bill_status" AFTER INSERT OR DELETE OR UPDATE ON "finance"."vendor_payment_allocations" FOR EACH ROW EXECUTE FUNCTION "finance"."auto_update_bill_status"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_alloc_status_update" AFTER INSERT OR DELETE OR UPDATE ON "finance"."payment_allocations" FOR EACH ROW EXECUTE FUNCTION "finance"."auto_update_invoice_status"();
-
-
-
 CREATE OR REPLACE TRIGGER "trg_asset_categories_ts" BEFORE UPDATE ON "finance"."asset_categories" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_update_timestamp"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_asset_nbv" BEFORE INSERT OR UPDATE OF "accumulated_depreciation", "base_cost" ON "finance"."fixed_assets" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_update_asset_nbv"();
 
 
 
@@ -8937,7 +10423,19 @@ CREATE OR REPLACE TRIGGER "trg_asset_verifications_ts" BEFORE UPDATE ON "finance
 
 
 
+CREATE OR REPLACE TRIGGER "trg_auto_update_bill_status" AFTER INSERT OR DELETE OR UPDATE ON "finance"."vendor_payment_allocations" FOR EACH ROW EXECUTE FUNCTION "finance"."auto_update_bill_status"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_auto_update_invoice_status" AFTER INSERT OR DELETE OR UPDATE ON "finance"."payment_allocations" FOR EACH ROW EXECUTE FUNCTION "finance"."auto_update_invoice_status"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_bs_updated_at" BEFORE UPDATE ON "finance"."bank_statements" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_bs_sl_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_bt_dual_approval" BEFORE INSERT OR UPDATE OF "from_amount" ON "finance"."bank_transfers" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_set_dual_approval"();
 
 
 
@@ -8945,11 +10443,27 @@ CREATE OR REPLACE TRIGGER "trg_bt_updated_at" BEFORE UPDATE ON "finance"."bank_t
 
 
 
+CREATE CONSTRAINT TRIGGER "trg_check_journal_balance" AFTER INSERT OR DELETE OR UPDATE ON "finance"."journal_lines" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION "finance"."check_journal_balance"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_depreciation_schedule_ts" BEFORE UPDATE ON "finance"."depreciation_schedule" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_update_timestamp"();
 
 
 
+CREATE OR REPLACE TRIGGER "trg_enforce_postable_account" BEFORE INSERT OR UPDATE OF "account_id" ON "finance"."journal_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_postable_account"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_fa_single_default" BEFORE INSERT OR UPDATE OF "is_default" ON "finance"."financial_accounts" FOR EACH ROW WHEN (("new"."is_default" IS TRUE)) EXECUTE FUNCTION "finance"."fn_enforce_single_default_fa"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_fa_updated_at" BEFORE UPDATE ON "finance"."financial_accounts" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_fa_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_fa_validate_ledger" BEFORE INSERT OR UPDATE OF "linked_ledger_account_id" ON "finance"."financial_accounts" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_validate_fa_ledger"();
 
 
 
@@ -8965,7 +10479,11 @@ CREATE OR REPLACE TRIGGER "trg_gen_bt_number" BEFORE INSERT ON "finance"."bank_t
 
 
 
-CREATE OR REPLACE TRIGGER "trg_journal_balance" AFTER INSERT OR DELETE OR UPDATE ON "finance"."journal_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."check_journal_balance"();
+CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "finance"."journal_entries" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "finance"."vendor_bills" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
 
 
 
@@ -8973,11 +10491,15 @@ CREATE OR REPLACE TRIGGER "trg_prevent_closed_period" BEFORE UPDATE ON "finance"
 
 
 
+CREATE OR REPLACE TRIGGER "trg_prevent_closed_period_posting" BEFORE INSERT OR UPDATE ON "finance"."journal_entries" FOR EACH ROW EXECUTE FUNCTION "finance"."prevent_closed_period_posting"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_prevent_double_match" BEFORE INSERT OR UPDATE OF "matched_journal_line_id" ON "finance"."statement_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_prevent_double_match"();
 
 
 
-CREATE OR REPLACE TRIGGER "trg_prevent_posted_line_edit" BEFORE DELETE OR UPDATE ON "finance"."journal_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."prevent_posted_edit"();
+CREATE OR REPLACE TRIGGER "trg_prevent_posted_edit" BEFORE DELETE OR UPDATE ON "finance"."journal_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."prevent_posted_edit"();
 
 
 
@@ -8986,6 +10508,10 @@ CREATE OR REPLACE TRIGGER "trg_set_dual_approval" BEFORE INSERT OR UPDATE OF "fr
 
 
 CREATE OR REPLACE TRIGGER "trg_single_default_fa" BEFORE INSERT OR UPDATE OF "is_default" ON "finance"."financial_accounts" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_enforce_single_default_fa"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_sl_prevent_double_match" BEFORE INSERT OR UPDATE OF "matched_journal_line_id" ON "finance"."statement_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_prevent_double_match"();
 
 
 
@@ -9001,15 +10527,135 @@ CREATE OR REPLACE TRIGGER "trg_stmt_recon_status" AFTER INSERT OR DELETE OR UPDA
 
 
 
+CREATE OR REPLACE TRIGGER "trg_tax_updated_at" BEFORE UPDATE ON "finance"."tax_adjustments" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_tax_updated_at" BEFORE UPDATE ON "finance"."tax_computations" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_tax_updated_at" BEFORE UPDATE ON "finance"."tax_credits_and_withholding" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_tax_updated_at" BEFORE UPDATE ON "finance"."tax_payments_and_refunds" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_tax_updated_at" BEFORE UPDATE ON "finance"."tax_reconciliations" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_tax_updated_at" BEFORE UPDATE ON "finance"."tax_returns" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_tax_updated_at" BEFORE UPDATE ON "finance"."tax_rule_sets" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_tax_updated_at" BEFORE UPDATE ON "finance"."tax_slabs" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_tax_updated_at" BEFORE UPDATE ON "finance"."taxpayer_profile" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."asset_categories" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."asset_verification_lines" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."asset_verifications" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."credit_notes" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."depreciation_schedule" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."dimensions" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."distribution_lines" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."exchange_rates" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."fee_rules" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."fixed_assets" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."owners" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."ownership_history" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."payment_receipts" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."platforms" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."profit_distributions" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."reserve_policies" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."vendor_bill_lines" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."vendor_bills" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."vendor_payments" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."vendors" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_validate_fa_ledger" BEFORE INSERT OR UPDATE OF "linked_ledger_account_id" ON "finance"."financial_accounts" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_validate_fa_ledger"();
 
 
 
-CREATE OR REPLACE TRIGGER "trs_uat" BEFORE UPDATE ON "finance"."tax_rule_sets" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+CREATE OR REPLACE TRIGGER "trg_validate_ownership_percentage" BEFORE INSERT OR UPDATE ON "finance"."ownership_history" FOR EACH ROW EXECUTE FUNCTION "finance"."validate_ownership_percentage_total"();
 
 
 
-CREATE OR REPLACE TRIGGER "tsl_uat" BEFORE UPDATE ON "finance"."tax_slabs" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
+CREATE OR REPLACE TRIGGER "trg_validate_payment_allocation" BEFORE INSERT OR UPDATE ON "finance"."payment_allocations" FOR EACH ROW EXECUTE FUNCTION "finance"."validate_payment_allocation"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_validate_vendor_payment_allocation" BEFORE INSERT OR UPDATE ON "finance"."vendor_payment_allocations" FOR EACH ROW EXECUTE FUNCTION "finance"."validate_vendor_payment_allocation"();
 
 
 
@@ -9029,23 +10675,19 @@ CREATE OR REPLACE TRIGGER "vendor_payments_audit" AFTER INSERT OR DELETE OR UPDA
 
 
 
+CREATE OR REPLACE TRIGGER "vendors_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."vendors" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
 CREATE OR REPLACE TRIGGER "budgets_audit" AFTER INSERT OR DELETE OR UPDATE ON "public"."budgets" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
-CREATE OR REPLACE TRIGGER "chk_maker_checker" BEFORE UPDATE ON "public"."expenses" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
-
-
-
-CREATE OR REPLACE TRIGGER "chk_maker_checker" BEFORE UPDATE ON "public"."incomes" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
-
-
-
-CREATE OR REPLACE TRIGGER "chk_maker_checker" BEFORE UPDATE ON "public"."invoices" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
-
-
-
 CREATE OR REPLACE TRIGGER "clients_audit" AFTER INSERT OR DELETE OR UPDATE ON "public"."clients" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "contractors_audit" AFTER INSERT OR DELETE OR UPDATE ON "public"."contractors" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
@@ -9065,6 +10707,14 @@ CREATE OR REPLACE TRIGGER "invoices_audit" AFTER INSERT OR DELETE OR UPDATE ON "
 
 
 
+CREATE OR REPLACE TRIGGER "notifications_audit" AFTER INSERT OR DELETE OR UPDATE ON "public"."notifications" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "profiles_audit" AFTER INSERT OR DELETE OR UPDATE ON "public"."profiles" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
 CREATE OR REPLACE TRIGGER "projects_audit" AFTER INSERT OR DELETE OR UPDATE ON "public"."projects" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
@@ -9074,6 +10724,18 @@ CREATE OR REPLACE TRIGGER "trg_commissions_updated" BEFORE UPDATE ON "public"."c
 
 
 CREATE OR REPLACE TRIGGER "trg_contractors_updated" BEFORE UPDATE ON "public"."contractors" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "public"."expenses" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "public"."incomes" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "public"."invoices" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
 
 
 
@@ -9110,6 +10772,66 @@ CREATE OR REPLACE TRIGGER "trg_payroll_runs_updated" BEFORE UPDATE ON "public"."
 
 
 CREATE OR REPLACE TRIGGER "trg_subscriptions_updated" BEFORE UPDATE ON "public"."subscriptions" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_sync_invoice_client_name" BEFORE INSERT OR UPDATE OF "client_id" ON "public"."invoices" FOR EACH ROW EXECUTE FUNCTION "public"."sync_invoice_client_name"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."budgets" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."clients" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."commissions" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."contractors" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."numbering_sequences" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_advances" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_commissions" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_compensation" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_deductions" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_employees" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_lines" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_reimbursements" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_runs" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."subscriptions" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
 
 
 
@@ -9188,8 +10910,73 @@ ALTER TABLE ONLY "ai"."ai_user_cost_tracking"
 
 
 
+ALTER TABLE ONLY "core"."approval_actions"
+    ADD CONSTRAINT "approval_actions_approval_step_id_fkey" FOREIGN KEY ("approval_step_id") REFERENCES "core"."approval_steps"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."approval_limits"
+    ADD CONSTRAINT "approval_limits_role_id_fkey" FOREIGN KEY ("role_id") REFERENCES "core"."roles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."approval_limits"
+    ADD CONSTRAINT "approval_limits_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."approval_steps"
+    ADD CONSTRAINT "approval_steps_approval_request_id_fkey" FOREIGN KEY ("approval_request_id") REFERENCES "core"."approval_requests"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."approval_steps"
+    ADD CONSTRAINT "approval_steps_required_role_id_fkey" FOREIGN KEY ("required_role_id") REFERENCES "core"."roles"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "core"."budget_policies"
+    ADD CONSTRAINT "budget_policies_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "core"."budget_policies"
+    ADD CONSTRAINT "budget_policies_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."delegations"
+    ADD CONSTRAINT "delegations_from_user_id_fkey" FOREIGN KEY ("from_user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."delegations"
+    ADD CONSTRAINT "delegations_to_user_id_fkey" FOREIGN KEY ("to_user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."employee_links"
+    ADD CONSTRAINT "employee_links_shared_person_id_fkey" FOREIGN KEY ("shared_person_id") REFERENCES "core"."shared_people"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."integration_events"
+    ADD CONSTRAINT "integration_events_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."integration_failures"
+    ADD CONSTRAINT "integration_failures_integration_event_id_fkey" FOREIGN KEY ("integration_event_id") REFERENCES "core"."integration_events"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "core"."organization_config"
     ADD CONSTRAINT "organization_config_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "core"."organization_modules"
+    ADD CONSTRAINT "organization_modules_org_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
 
 
 
@@ -9215,6 +11002,26 @@ ALTER TABLE ONLY "core"."role_permissions"
 
 ALTER TABLE ONLY "core"."roles"
     ADD CONSTRAINT "roles_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "core"."shared_people"
+    ADD CONSTRAINT "shared_people_auth_user_fkey" FOREIGN KEY ("auth_user_id") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "core"."shared_people"
+    ADD CONSTRAINT "shared_people_org_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."user_permission_overrides"
+    ADD CONSTRAINT "user_permission_overrides_permission_id_fkey" FOREIGN KEY ("permission_id") REFERENCES "core"."permissions"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."user_permission_overrides"
+    ADD CONSTRAINT "user_permission_overrides_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
@@ -9298,6 +11105,11 @@ ALTER TABLE ONLY "finance"."attachments"
 
 
 
+ALTER TABLE ONLY "finance"."attendance_period_snapshots"
+    ADD CONSTRAINT "attendance_period_snapshots_shared_person_id_fkey" FOREIGN KEY ("shared_person_id") REFERENCES "core"."shared_people"("id") ON DELETE RESTRICT;
+
+
+
 ALTER TABLE ONLY "finance"."bank_statements"
     ADD CONSTRAINT "bank_statements_financial_account_id_fkey" FOREIGN KEY ("financial_account_id") REFERENCES "finance"."financial_accounts"("id") ON DELETE CASCADE;
 
@@ -9363,6 +11175,11 @@ ALTER TABLE ONLY "finance"."budget_lines"
 
 
 
+ALTER TABLE ONLY "finance"."budget_revisions"
+    ADD CONSTRAINT "budget_revisions_budget_id_fkey" FOREIGN KEY ("budget_id") REFERENCES "public"."budgets"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "finance"."chart_of_accounts"
     ADD CONSTRAINT "chart_of_accounts_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
 
@@ -9405,6 +11222,16 @@ ALTER TABLE ONLY "finance"."depreciation_schedule"
 
 ALTER TABLE ONLY "finance"."depreciation_schedule"
     ADD CONSTRAINT "depreciation_schedule_period_id_fkey" FOREIGN KEY ("period_id") REFERENCES "finance"."accounting_periods"("id");
+
+
+
+ALTER TABLE ONLY "finance"."dimensions"
+    ADD CONSTRAINT "dimensions_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."dimensions"
+    ADD CONSTRAINT "dimensions_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "finance"."dimensions"("id") ON DELETE SET NULL;
 
 
 
@@ -9713,6 +11540,91 @@ ALTER TABLE ONLY "finance"."tax_adjustments"
 
 
 
+ALTER TABLE ONLY "finance"."tax_computations"
+    ADD CONSTRAINT "tax_computations_fiscal_year_id_fkey" FOREIGN KEY ("fiscal_year_id") REFERENCES "finance"."fiscal_years"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_computations"
+    ADD CONSTRAINT "tax_computations_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organization_config"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_computations"
+    ADD CONSTRAINT "tax_computations_period_id_fkey" FOREIGN KEY ("period_id") REFERENCES "finance"."accounting_periods"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_computations"
+    ADD CONSTRAINT "tax_computations_tax_return_id_fkey" FOREIGN KEY ("tax_return_id") REFERENCES "finance"."tax_returns"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_computations"
+    ADD CONSTRAINT "tax_computations_tax_rule_set_id_fkey" FOREIGN KEY ("tax_rule_set_id") REFERENCES "finance"."tax_rule_sets"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_credits_and_withholding"
+    ADD CONSTRAINT "tax_credits_and_withholding_fiscal_year_id_fkey" FOREIGN KEY ("fiscal_year_id") REFERENCES "finance"."fiscal_years"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_credits_and_withholding"
+    ADD CONSTRAINT "tax_credits_and_withholding_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organization_config"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_credits_and_withholding"
+    ADD CONSTRAINT "tax_credits_and_withholding_period_id_fkey" FOREIGN KEY ("period_id") REFERENCES "finance"."accounting_periods"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_credits_and_withholding"
+    ADD CONSTRAINT "tax_credits_and_withholding_tax_computation_id_fkey" FOREIGN KEY ("tax_computation_id") REFERENCES "finance"."tax_computations"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_credits_and_withholding"
+    ADD CONSTRAINT "tax_credits_and_withholding_tax_return_id_fkey" FOREIGN KEY ("tax_return_id") REFERENCES "finance"."tax_returns"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
+    ADD CONSTRAINT "tax_payments_and_refunds_financial_account_id_fkey" FOREIGN KEY ("financial_account_id") REFERENCES "finance"."financial_accounts"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
+    ADD CONSTRAINT "tax_payments_and_refunds_fiscal_year_id_fkey" FOREIGN KEY ("fiscal_year_id") REFERENCES "finance"."fiscal_years"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
+    ADD CONSTRAINT "tax_payments_and_refunds_journal_entry_id_fkey" FOREIGN KEY ("journal_entry_id") REFERENCES "finance"."journal_entries"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
+    ADD CONSTRAINT "tax_payments_and_refunds_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organization_config"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
+    ADD CONSTRAINT "tax_payments_and_refunds_period_id_fkey" FOREIGN KEY ("period_id") REFERENCES "finance"."accounting_periods"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
+    ADD CONSTRAINT "tax_payments_and_refunds_tax_computation_id_fkey" FOREIGN KEY ("tax_computation_id") REFERENCES "finance"."tax_computations"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
+    ADD CONSTRAINT "tax_payments_and_refunds_tax_return_id_fkey" FOREIGN KEY ("tax_return_id") REFERENCES "finance"."tax_returns"("id");
+
+
+
 ALTER TABLE ONLY "finance"."tax_reconciliations"
     ADD CONSTRAINT "tax_reconciliations_accountant_approved_by_fkey" FOREIGN KEY ("accountant_approved_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
 
@@ -9725,6 +11637,31 @@ ALTER TABLE ONLY "finance"."tax_reconciliations"
 
 ALTER TABLE ONLY "finance"."tax_reconciliations"
     ADD CONSTRAINT "tax_reconciliations_tax_rule_set_id_fkey" FOREIGN KEY ("tax_rule_set_id") REFERENCES "finance"."tax_rule_sets"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_returns"
+    ADD CONSTRAINT "tax_returns_fiscal_year_id_fkey" FOREIGN KEY ("fiscal_year_id") REFERENCES "finance"."fiscal_years"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_returns"
+    ADD CONSTRAINT "tax_returns_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organization_config"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_returns"
+    ADD CONSTRAINT "tax_returns_period_id_fkey" FOREIGN KEY ("period_id") REFERENCES "finance"."accounting_periods"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_returns"
+    ADD CONSTRAINT "tax_returns_tax_reconciliation_id_fkey" FOREIGN KEY ("tax_reconciliation_id") REFERENCES "finance"."tax_reconciliations"("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_returns"
+    ADD CONSTRAINT "tax_returns_tax_rule_set_id_fkey" FOREIGN KEY ("tax_rule_set_id") REFERENCES "finance"."tax_rule_sets"("id");
 
 
 
@@ -10084,6 +12021,16 @@ ALTER TABLE ONLY "public"."payroll_runs"
 
 
 ALTER TABLE ONLY "public"."profiles"
+    ADD CONSTRAINT "profiles_department_id_fkey" FOREIGN KEY ("department_id") REFERENCES "finance"."dimensions"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."profiles"
+    ADD CONSTRAINT "profiles_manager_id_fkey" FOREIGN KEY ("manager_id") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."profiles"
     ADD CONSTRAINT "profiles_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
@@ -10170,6 +12117,26 @@ CREATE POLICY "authenticated_read_prompts" ON "ai"."ai_prompt_versions" FOR SELE
 
 
 
+CREATE POLICY "delete_own_conversations" ON "ai"."ai_conversations" FOR DELETE USING (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "read_ai_conversations" ON "ai"."ai_conversations" FOR SELECT USING ((("user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
+   FROM ("core"."user_roles" "ur"
+     JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
+  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'Admin'::"text"])) AND ("ur"."effective_from" <= "now"()) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= "now"())))))));
+
+
+
+CREATE POLICY "read_ai_messages" ON "ai"."ai_messages" FOR SELECT USING ((("conversation_id" IN ( SELECT "ai_conversations"."id"
+   FROM "ai"."ai_conversations"
+  WHERE ("ai_conversations"."user_id" = "auth"."uid"()))) OR (EXISTS ( SELECT 1
+   FROM ("core"."user_roles" "ur"
+     JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
+  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'Admin'::"text"])) AND ("ur"."effective_from" <= "now"()) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= "now"())))))));
+
+
+
 CREATE POLICY "read_ai_query_audit" ON "ai"."ai_query_audit" FOR SELECT USING ((("user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
    FROM ("core"."user_roles" "ur"
      JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
@@ -10184,7 +12151,7 @@ CREATE POLICY "read_ai_tool_calls" ON "ai"."ai_tool_calls" FOR SELECT USING ((("
 
 
 
-CREATE POLICY "users_own_conversations" ON "ai"."ai_conversations" USING (("user_id" = "auth"."uid"()));
+CREATE POLICY "update_own_conversations" ON "ai"."ai_conversations" FOR UPDATE USING (("user_id" = "auth"."uid"()));
 
 
 
@@ -10200,13 +12167,17 @@ CREATE POLICY "users_own_feedback" ON "ai"."ai_feedback" USING (("user_id" = "au
 
 
 
-CREATE POLICY "users_own_messages" ON "ai"."ai_messages" USING (("conversation_id" IN ( SELECT "ai_conversations"."id"
+CREATE POLICY "users_own_suggestions" ON "ai"."ai_suggestions" USING (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "write_own_conversations" ON "ai"."ai_conversations" FOR INSERT WITH CHECK (("user_id" = "auth"."uid"()));
+
+
+
+CREATE POLICY "write_own_messages" ON "ai"."ai_messages" FOR INSERT WITH CHECK (("conversation_id" IN ( SELECT "ai_conversations"."id"
    FROM "ai"."ai_conversations"
   WHERE ("ai_conversations"."user_id" = "auth"."uid"()))));
-
-
-
-CREATE POLICY "users_own_suggestions" ON "ai"."ai_suggestions" USING (("user_id" = "auth"."uid"()));
 
 
 
@@ -10354,6 +12325,79 @@ CREATE POLICY "Users can read their org" ON "core"."organizations" FOR SELECT US
 
 
 
+ALTER TABLE "core"."approval_actions" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "core"."approval_limits" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "approval_limits_manage" ON "core"."approval_limits" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")) WITH CHECK ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
+
+
+
+CREATE POLICY "approval_limits_select_own" ON "core"."approval_limits" FOR SELECT USING ((("user_id" = "auth"."uid"()) OR "core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")));
+
+
+
+ALTER TABLE "core"."approval_requests" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "core"."approval_steps" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "core"."budget_policies" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "budget_policies_org_isolation" ON "core"."budget_policies" USING (("organization_id" = ( SELECT "budget_policies"."organization_id"
+   FROM "core"."user_roles"
+  WHERE (("user_roles"."user_id" = "auth"."uid"()) AND ("user_roles"."is_active" = true))
+ LIMIT 1)));
+
+
+
+ALTER TABLE "core"."delegations" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "delegations_create_own" ON "core"."delegations" FOR INSERT WITH CHECK ((("from_user_id" = "auth"."uid"()) OR "core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")));
+
+
+
+CREATE POLICY "delegations_manage" ON "core"."delegations" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")) WITH CHECK ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
+
+
+
+CREATE POLICY "delegations_select_own" ON "core"."delegations" FOR SELECT USING ((("from_user_id" = "auth"."uid"()) OR ("to_user_id" = "auth"."uid"()) OR "core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")));
+
+
+
+ALTER TABLE "core"."employee_links" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "core"."idempotency_keys" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "idempotency_keys_read_finance" ON "core"."idempotency_keys" FOR SELECT TO "authenticated" USING ("core"."is_finance_head"());
+
+
+
+CREATE POLICY "idempotency_keys_service_all" ON "core"."idempotency_keys" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+ALTER TABLE "core"."integration_events" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "core"."integration_failures" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "integration_failures_read_finance" ON "core"."integration_failures" FOR SELECT TO "authenticated" USING ("core"."is_finance_head"());
+
+
+
+CREATE POLICY "integration_failures_service_all" ON "core"."integration_failures" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
 CREATE POLICY "org_config_insert" ON "core"."organization_config" FOR INSERT WITH CHECK ("core"."is_ceo_or_admin"());
 
 
@@ -10366,7 +12410,18 @@ CREATE POLICY "org_config_update" ON "core"."organization_config" FOR UPDATE USI
 
 
 
+CREATE POLICY "org_modules_manage" ON "core"."organization_modules" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text")) WITH CHECK ("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text"));
+
+
+
+CREATE POLICY "org_modules_select" ON "core"."organization_modules" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+
+
+
 ALTER TABLE "core"."organization_config" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "core"."organization_modules" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "core"."organizations" ENABLE ROW LEVEL SECURITY;
@@ -10405,12 +12460,34 @@ CREATE POLICY "rp_select" ON "core"."role_permissions" FOR SELECT USING ("core".
 
 
 
+ALTER TABLE "core"."shared_people" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "shared_people_manage" ON "core"."shared_people" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")) WITH CHECK ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
+
+
+
+CREATE POLICY "shared_people_select_self" ON "core"."shared_people" FOR SELECT USING ((("auth_user_id" = "auth"."uid"()) OR "core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")));
+
+
+
+CREATE POLICY "upo_manage" ON "core"."user_permission_overrides" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")) WITH CHECK ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
+
+
+
+CREATE POLICY "upo_select_own" ON "core"."user_permission_overrides" FOR SELECT USING ((("user_id" = "auth"."uid"()) OR "core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")));
+
+
+
 CREATE POLICY "ur_manage" ON "core"."user_roles" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
 
 
 
 CREATE POLICY "ur_select" ON "core"."user_roles" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
 
+
+
+ALTER TABLE "core"."user_permission_overrides" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "core"."user_roles" ENABLE ROW LEVEL SECURITY;
@@ -10511,6 +12588,9 @@ CREATE POLICY "att_select" ON "finance"."attachments" FOR SELECT USING (("auth".
 ALTER TABLE "finance"."attachments" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "finance"."attendance_period_snapshots" ENABLE ROW LEVEL SECURITY;
+
+
 CREATE POLICY "authenticated_read_tiers" ON "finance"."fee_tiers" FOR SELECT TO "authenticated" USING (true);
 
 
@@ -10560,6 +12640,9 @@ CREATE POLICY "bt_update" ON "finance"."bank_transfers" FOR UPDATE USING (("auth
 ALTER TABLE "finance"."budget_lines" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "finance"."budget_revisions" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "finance"."chart_of_accounts" ENABLE ROW LEVEL SECURITY;
 
 
@@ -10605,6 +12688,9 @@ CREATE POLICY "depreciation_schedule_update" ON "finance"."depreciation_schedule
 
 
 
+ALTER TABLE "finance"."dimensions" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "finance"."distribution_lines" ENABLE ROW LEVEL SECURITY;
 
 
@@ -10615,19 +12701,19 @@ CREATE POLICY "dl_all" ON "finance"."distribution_lines" USING (("auth"."uid"() 
 ALTER TABLE "finance"."exchange_rates" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "fa_delete" ON "finance"."financial_accounts" FOR DELETE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "fa_delete" ON "finance"."financial_accounts" FOR DELETE USING ("core"."is_finance_head"());
 
 
 
-CREATE POLICY "fa_insert" ON "finance"."financial_accounts" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "fa_insert" ON "finance"."financial_accounts" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "fa_select" ON "finance"."financial_accounts" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "fa_select" ON "finance"."financial_accounts" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
 
 
 
-CREATE POLICY "fa_update" ON "finance"."financial_accounts" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "fa_update" ON "finance"."financial_accounts" FOR UPDATE USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
@@ -10649,27 +12735,27 @@ ALTER TABLE "finance"."fiscal_years" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."fixed_assets" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "fixed_assets_delete" ON "finance"."fixed_assets" FOR DELETE USING ((("auth"."uid"() = "created_by") AND (("status")::"text" = 'pending_capitalization'::"text")));
+CREATE POLICY "fixed_assets_delete" ON "finance"."fixed_assets" FOR DELETE USING ((("auth"."uid"() = "created_by") AND (("status")::"text" = 'pending_capitalization'::"text") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "fixed_assets_insert" ON "finance"."fixed_assets" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "fixed_assets_insert" ON "finance"."fixed_assets" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "fixed_assets_select" ON "finance"."fixed_assets" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "fixed_assets_select" ON "finance"."fixed_assets" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
 
 
 
-CREATE POLICY "fixed_assets_update" ON "finance"."fixed_assets" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "fixed_assets_update" ON "finance"."fixed_assets" FOR UPDATE USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "fx_insert" ON "finance"."exchange_rates" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "fx_insert" ON "finance"."exchange_rates" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "fx_select" ON "finance"."exchange_rates" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "fx_select" ON "finance"."exchange_rates" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
 
 
 
@@ -10685,19 +12771,19 @@ CREATE POLICY "fy_update" ON "finance"."fiscal_years" FOR UPDATE USING ("core"."
 
 
 
-CREATE POLICY "je_delete" ON "finance"."journal_entries" FOR DELETE USING ((("auth"."uid"() = "created_by") AND ("status" = 'DRAFT'::"text")));
+CREATE POLICY "je_delete" ON "finance"."journal_entries" FOR DELETE USING (("core"."is_finance_head"() AND ("status" = 'DRAFT'::"text")));
 
 
 
-CREATE POLICY "je_insert" ON "finance"."journal_entries" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "je_insert" ON "finance"."journal_entries" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "je_select_own" ON "finance"."journal_entries" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "je_select" ON "finance"."journal_entries" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
 
 
 
-CREATE POLICY "je_update" ON "finance"."journal_entries" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "je_update" ON "finance"."journal_entries" FOR UPDATE USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND ("status" = 'DRAFT'::"text")));
 
 
 
@@ -10767,11 +12853,11 @@ ALTER TABLE "finance"."owners" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."ownership_history" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "pa_insert" ON "finance"."payment_allocations" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "pa_insert" ON "finance"."payment_allocations" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "pa_select" ON "finance"."payment_allocations" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "pa_select" ON "finance"."payment_allocations" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
 
 
 
@@ -10848,7 +12934,131 @@ CREATE POLICY "ta_update" ON "finance"."tax_adjustments" FOR UPDATE USING (("aut
 ALTER TABLE "finance"."tax_adjustments" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "tax_comp_delete" ON "finance"."tax_computations" FOR DELETE TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_comp_insert" ON "finance"."tax_computations" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_comp_select" ON "finance"."tax_computations" FOR SELECT TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_comp_service" ON "finance"."tax_computations" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "tax_comp_update" ON "finance"."tax_computations" FOR UPDATE TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+ALTER TABLE "finance"."tax_computations" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "finance"."tax_credits_and_withholding" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "tax_cw_delete" ON "finance"."tax_credits_and_withholding" FOR DELETE TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_cw_insert" ON "finance"."tax_credits_and_withholding" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_cw_select" ON "finance"."tax_credits_and_withholding" FOR SELECT TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_cw_service" ON "finance"."tax_credits_and_withholding" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "tax_cw_update" ON "finance"."tax_credits_and_withholding" FOR UPDATE TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_pay_delete" ON "finance"."tax_payments_and_refunds" FOR DELETE TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_pay_insert" ON "finance"."tax_payments_and_refunds" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_pay_select" ON "finance"."tax_payments_and_refunds" FOR SELECT TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_pay_service" ON "finance"."tax_payments_and_refunds" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "tax_pay_update" ON "finance"."tax_payments_and_refunds" FOR UPDATE TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+ALTER TABLE "finance"."tax_payments_and_refunds" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "finance"."tax_reconciliations" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "tax_ret_delete" ON "finance"."tax_returns" FOR DELETE TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_ret_insert" ON "finance"."tax_returns" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_ret_select" ON "finance"."tax_returns" FOR SELECT TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+CREATE POLICY "tax_ret_service" ON "finance"."tax_returns" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "tax_ret_update" ON "finance"."tax_returns" FOR UPDATE TO "authenticated" USING (("organization_id" = ( SELECT "organization_config"."id"
+   FROM "core"."organization_config"
+ LIMIT 1)));
+
+
+
+ALTER TABLE "finance"."tax_returns" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "finance"."tax_rule_sets" ENABLE ROW LEVEL SECURITY;
@@ -10860,11 +13070,11 @@ ALTER TABLE "finance"."tax_slabs" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."taxpayer_profile" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "tp_select" ON "finance"."taxpayer_profile" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "tp_select" ON "finance"."taxpayer_profile" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "tp_update" ON "finance"."taxpayer_profile" FOR UPDATE USING (("auth"."uid"() IS NOT NULL)) WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "tp_update" ON "finance"."taxpayer_profile" FOR UPDATE USING ("core"."is_finance_head"());
 
 
 
@@ -10880,15 +13090,15 @@ CREATE POLICY "tr_update" ON "finance"."tax_reconciliations" FOR UPDATE USING ((
 
 
 
-CREATE POLICY "trs_insert" ON "finance"."tax_rule_sets" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "trs_insert" ON "finance"."tax_rule_sets" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "trs_select" ON "finance"."tax_rule_sets" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "trs_select" ON "finance"."tax_rule_sets" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "trs_update" ON "finance"."tax_rule_sets" FOR UPDATE USING (("auth"."uid"() IS NOT NULL)) WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "trs_update" ON "finance"."tax_rule_sets" FOR UPDATE USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
@@ -10908,27 +13118,27 @@ CREATE POLICY "tsl_update" ON "finance"."tax_slabs" FOR UPDATE USING (("auth"."u
 
 
 
-CREATE POLICY "v_insert" ON "finance"."vendors" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "v_insert" ON "finance"."vendors" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "v_select" ON "finance"."vendors" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "v_select" ON "finance"."vendors" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('PROJECT_MANAGER'::"text") OR "core"."has_role"('VIEWER'::"text")));
 
 
 
-CREATE POLICY "v_update" ON "finance"."vendors" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "v_update" ON "finance"."vendors" FOR UPDATE USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "vb_insert" ON "finance"."vendor_bills" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "vb_insert" ON "finance"."vendor_bills" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "vb_select" ON "finance"."vendor_bills" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "vb_select" ON "finance"."vendor_bills" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('PROJECT_MANAGER'::"text") OR "core"."has_role"('VIEWER'::"text")));
 
 
 
-CREATE POLICY "vb_update" ON "finance"."vendor_bills" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "vb_update" ON "finance"."vendor_bills" FOR UPDATE USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
@@ -10971,15 +13181,11 @@ CREATE POLICY "vp_update" ON "finance"."vendor_payments" FOR UPDATE USING (("aut
 
 
 
-CREATE POLICY "vpa_insert" ON "finance"."vendor_payment_allocations" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "vpa_insert" ON "finance"."vendor_payment_allocations" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
-CREATE POLICY "vpa_select" ON "finance"."vendor_payment_allocations" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
-
-
-
-CREATE POLICY "Admin can delete any expense" ON "public"."expenses" FOR DELETE USING ("public"."is_admin"());
+CREATE POLICY "vpa_select" ON "finance"."vendor_payment_allocations" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
 
 
 
@@ -10991,19 +13197,11 @@ CREATE POLICY "Admin can delete income" ON "public"."incomes" FOR DELETE USING (
 
 
 
-CREATE POLICY "Admin can insert any expense" ON "public"."expenses" FOR INSERT WITH CHECK ("public"."is_admin"());
-
-
-
 CREATE POLICY "Admin can insert any income" ON "public"."incomes" FOR INSERT WITH CHECK ("public"."is_admin"());
 
 
 
 CREATE POLICY "Admin can insert income" ON "public"."incomes" FOR INSERT WITH CHECK ("public"."is_admin"());
-
-
-
-CREATE POLICY "Admin can manage budgets" ON "public"."budgets" USING ("public"."is_admin"());
 
 
 
@@ -11014,10 +13212,6 @@ CREATE POLICY "Admin can manage payments" ON "public"."payments" USING ("public"
 CREATE POLICY "Admin can read MFA status" ON "public"."user_mfa" FOR SELECT USING ((EXISTS ( SELECT 1
    FROM "public"."profiles" "p"
   WHERE (("p"."user_id" = "auth"."uid"()) AND ("p"."role" = ANY (ARRAY['CEO'::"text", 'Admin'::"text"]))))));
-
-
-
-CREATE POLICY "Admin can update any expense" ON "public"."expenses" FOR UPDATE USING ("public"."is_admin"());
 
 
 
@@ -11041,10 +13235,6 @@ CREATE POLICY "Admins can insert budget lines" ON "public"."budget_lines" FOR IN
 
 
 
-CREATE POLICY "Admins can manage financial accounts" ON "public"."financial_accounts" TO "authenticated" WITH CHECK (true);
-
-
-
 CREATE POLICY "Admins can manage tax returns" ON "public"."tax_returns" TO "authenticated" WITH CHECK (true);
 
 
@@ -11053,15 +13243,7 @@ CREATE POLICY "Admins can update budget lines" ON "public"."budget_lines" FOR UP
 
 
 
-CREATE POLICY "All authenticated users can view expenses" ON "public"."expenses" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
-
-
-
 CREATE POLICY "All authenticated users can view incomes" ON "public"."incomes" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
-
-
-
-CREATE POLICY "All users can view invoices" ON "public"."invoices" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
 
 
 
@@ -11069,15 +13251,7 @@ CREATE POLICY "All users can view projects" ON "public"."projects" FOR SELECT US
 
 
 
-CREATE POLICY "Anyone authenticated can view budgets" ON "public"."budgets" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
-
-
-
 CREATE POLICY "Anyone authenticated can view payments" ON "public"."payments" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
-
-
-
-CREATE POLICY "Anyone can view financial accounts" ON "public"."financial_accounts" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -11281,15 +13455,7 @@ CREATE POLICY "User can update own income" ON "public"."incomes" FOR UPDATE USIN
 
 
 
-CREATE POLICY "Users can delete own expense" ON "public"."expenses" FOR DELETE USING (("auth"."uid"() = "user_id"));
-
-
-
 CREATE POLICY "Users can delete own income" ON "public"."incomes" FOR DELETE USING (("auth"."uid"() = "user_id"));
-
-
-
-CREATE POLICY "Users can insert own expense" ON "public"."expenses" FOR INSERT WITH CHECK (("auth"."uid"() = "user_id"));
 
 
 
@@ -11297,15 +13463,7 @@ CREATE POLICY "Users can insert own income" ON "public"."incomes" FOR INSERT WIT
 
 
 
-CREATE POLICY "Users can manage own invoices" ON "public"."invoices" USING (("auth"."uid"() = "user_id"));
-
-
-
 CREATE POLICY "Users can manage own projects" ON "public"."projects" USING (("auth"."uid"() = "user_id"));
-
-
-
-CREATE POLICY "Users can update own expense" ON "public"."expenses" FOR UPDATE USING (("auth"."uid"() = "user_id"));
 
 
 
@@ -11325,10 +13483,6 @@ CREATE POLICY "Users see own MFA" ON "public"."user_mfa" USING (("auth"."uid"() 
 
 
 
-CREATE POLICY "Users with permission can manage budgets" ON "public"."budgets" USING (("auth"."uid"() = "user_id"));
-
-
-
 CREATE POLICY "Users with permission can manage payments" ON "public"."payments" USING (("auth"."uid"() = "user_id"));
 
 
@@ -11339,15 +13493,17 @@ ALTER TABLE "public"."budget_lines" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."budgets" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "budgets_insert" ON "public"."budgets" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "budgets_insert_scoped" ON "public"."budgets" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR ("user_id" = "auth"."uid"())));
 
 
 
-CREATE POLICY "budgets_select" ON "public"."budgets" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "budgets_select_scoped" ON "public"."budgets" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR ("user_id" = "auth"."uid"()) OR (("project_id" IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "public"."projects" "p"
+  WHERE (("p"."id" = "budgets"."project_id") AND ("p"."user_id" = "auth"."uid"())))))));
 
 
 
-CREATE POLICY "budgets_update" ON "public"."budgets" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "budgets_update_scoped" ON "public"."budgets" FOR UPDATE USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR (("user_id" = "auth"."uid"()) AND ("status" = 'DRAFT'::"text")))) WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR (("user_id" = "auth"."uid"()) AND ("status" = 'DRAFT'::"text"))));
 
 
 
@@ -11387,11 +13543,29 @@ CREATE POLICY "expenses_insert" ON "public"."expenses" FOR INSERT WITH CHECK (((
 
 
 
-CREATE POLICY "expenses_select" ON "public"."expenses" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "expenses_select_scoped" ON "public"."expenses" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR ("user_id" = "auth"."uid"()) OR (("project_id" IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "public"."projects" "p"
+  WHERE (("p"."id" = "expenses"."project_id") AND ("p"."user_id" = "auth"."uid"())))))));
 
 
 
 CREATE POLICY "expenses_update" ON "public"."expenses" FOR UPDATE USING ((("auth"."uid"() = "user_id") OR "public"."is_admin"()));
+
+
+
+CREATE POLICY "fa_pub_delete" ON "public"."financial_accounts" FOR DELETE USING ("core"."is_finance_head"());
+
+
+
+CREATE POLICY "fa_pub_insert" ON "public"."financial_accounts" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+
+
+
+CREATE POLICY "fa_pub_select" ON "public"."financial_accounts" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
+
+
+
+CREATE POLICY "fa_pub_update" ON "public"."financial_accounts" FOR UPDATE USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))) WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
 
 
 
@@ -11420,11 +13594,21 @@ CREATE POLICY "incomes_update" ON "public"."incomes" FOR UPDATE USING ((("auth".
 ALTER TABLE "public"."invoices" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "invoices_modify" ON "public"."invoices" USING ((("auth"."uid"() = "user_id") OR "public"."is_admin"()));
+CREATE POLICY "invoices_delete_scoped" ON "public"."invoices" FOR DELETE USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND ("journal_entry_id" IS NULL)));
 
 
 
-CREATE POLICY "invoices_select" ON "public"."invoices" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "invoices_insert_scoped" ON "public"."invoices" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR ("user_id" = "auth"."uid"())));
+
+
+
+CREATE POLICY "invoices_select_scoped" ON "public"."invoices" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR ("user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
+   FROM "public"."projects" "p"
+  WHERE (("p"."id" = "invoices"."project_id") AND ("p"."user_id" = "auth"."uid"()))))));
+
+
+
+CREATE POLICY "invoices_update_scoped" ON "public"."invoices" FOR UPDATE USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND ("journal_entry_id" IS NULL))) WITH CHECK ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND ("journal_entry_id" IS NULL)));
 
 
 
@@ -11543,6 +13727,10 @@ GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
 
 
+REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
+GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
+
+
 
 GRANT ALL ON FUNCTION "audit"."ai_audit_report"("p_start" timestamp with time zone, "p_end" timestamp with time zone, "p_user_id" "uuid", "p_tool" "text", "p_status" "text", "p_page" integer, "p_page_size" integer) TO "authenticated";
 
@@ -11572,154 +13760,10 @@ GRANT ALL ON FUNCTION "audit"."log_security_event"("p_user_id" "uuid", "p_user_e
 
 
 
+GRANT ALL ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") TO "authenticated";
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-GRANT ALL ON FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text", "p_full_name" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text", "p_full_name" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text", "p_full_name" "text") TO "service_role";
 
@@ -11731,26 +13775,22 @@ GRANT ALL ON FUNCTION "public"."ensure_profile_exists"("target_user_id" "uuid") 
 
 
 
-REVOKE ALL ON FUNCTION "public"."execute_ai_readonly_query"("query_string" "text") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."execute_ai_readonly_query"("query_string" "text") TO "anon";
-GRANT ALL ON FUNCTION "public"."execute_ai_readonly_query"("query_string" "text") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."execute_ai_readonly_query"("query_string" "text") TO "service_role";
+REVOKE ALL ON FUNCTION "public"."execute_ai_readonly_query"("query_string" "text", "p_org_id" "uuid", "p_user_id" "uuid", "p_enforce_user_scope" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."execute_ai_readonly_query"("query_string" "text", "p_org_id" "uuid", "p_user_id" "uuid", "p_enforce_user_scope" boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."execute_ai_readonly_query"("query_string" "text", "p_org_id" "uuid", "p_user_id" "uuid", "p_enforce_user_scope" boolean) TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."execute_sql_query"("query_string" "text") TO "anon";
-GRANT ALL ON FUNCTION "public"."execute_sql_query"("query_string" "text") TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."execute_sql_query"("query_string" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."execute_sql_query"("query_string" "text") TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."find_auth_user_by_email"("search_email" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."find_auth_user_by_email"("search_email" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."find_auth_user_by_email"("search_email" "text") TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."get_all_system_users"() TO "anon";
 GRANT ALL ON FUNCTION "public"."get_all_system_users"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_all_system_users"() TO "service_role";
 
@@ -11774,7 +13814,6 @@ GRANT ALL ON FUNCTION "public"."get_user_permissions"("p_user_id" "uuid") TO "se
 
 
 
-GRANT ALL ON FUNCTION "public"."get_user_roles_by_id"("p_target_user_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_user_roles_by_id"("p_target_user_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_user_roles_by_id"("p_target_user_id" "uuid") TO "service_role";
 
@@ -11807,6 +13846,12 @@ GRANT ALL ON FUNCTION "public"."payroll_update_timestamp"() TO "service_role";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "anon";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."sync_invoice_client_name"() TO "anon";
+GRANT ALL ON FUNCTION "public"."sync_invoice_client_name"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."sync_invoice_client_name"() TO "service_role";
 
 
 
@@ -11871,8 +13916,67 @@ GRANT ALL ON TABLE "audit"."security_events" TO "service_role";
 
 
 
+GRANT SELECT ON TABLE "audit"."v_unsafe_security_definer_functions" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."approval_actions" TO "authenticated";
+GRANT ALL ON TABLE "core"."approval_actions" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."approval_limits" TO "authenticated";
+GRANT ALL ON TABLE "core"."approval_limits" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."approval_requests" TO "authenticated";
+GRANT ALL ON TABLE "core"."approval_requests" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."approval_steps" TO "authenticated";
+GRANT ALL ON TABLE "core"."approval_steps" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."budget_policies" TO "authenticated";
+GRANT ALL ON TABLE "core"."budget_policies" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."delegations" TO "authenticated";
+GRANT ALL ON TABLE "core"."delegations" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."employee_links" TO "authenticated";
+GRANT ALL ON TABLE "core"."employee_links" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."idempotency_keys" TO "authenticated";
+GRANT ALL ON TABLE "core"."idempotency_keys" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."integration_events" TO "authenticated";
+GRANT ALL ON TABLE "core"."integration_events" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."integration_failures" TO "authenticated";
+GRANT ALL ON TABLE "core"."integration_failures" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "core"."organization_config" TO "authenticated";
 GRANT ALL ON TABLE "core"."organization_config" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."organization_modules" TO "authenticated";
+GRANT ALL ON TABLE "core"."organization_modules" TO "service_role";
 
 
 
@@ -11893,6 +13997,16 @@ GRANT ALL ON TABLE "core"."role_permissions" TO "service_role";
 
 GRANT ALL ON TABLE "core"."roles" TO "authenticated";
 GRANT ALL ON TABLE "core"."roles" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."shared_people" TO "authenticated";
+GRANT ALL ON TABLE "core"."shared_people" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."user_permission_overrides" TO "authenticated";
+GRANT ALL ON TABLE "core"."user_permission_overrides" TO "service_role";
 
 
 
@@ -11943,6 +14057,11 @@ GRANT ALL ON TABLE "finance"."attachments" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "finance"."attendance_period_snapshots" TO "authenticated";
+GRANT ALL ON TABLE "finance"."attendance_period_snapshots" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "finance"."bank_statements" TO "authenticated";
 GRANT ALL ON TABLE "finance"."bank_statements" TO "service_role";
 
@@ -11955,6 +14074,11 @@ GRANT ALL ON TABLE "finance"."bank_transfers" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."budget_lines" TO "authenticated";
 GRANT ALL ON TABLE "finance"."budget_lines" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."budget_revisions" TO "authenticated";
+GRANT ALL ON TABLE "finance"."budget_revisions" TO "service_role";
 
 
 
@@ -11971,6 +14095,11 @@ GRANT ALL ON TABLE "finance"."credit_notes" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."depreciation_schedule" TO "authenticated";
 GRANT ALL ON TABLE "finance"."depreciation_schedule" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."dimensions" TO "authenticated";
+GRANT ALL ON TABLE "finance"."dimensions" TO "service_role";
 
 
 
@@ -12095,8 +14224,28 @@ GRANT ALL ON TABLE "finance"."tax_adjustments" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "finance"."tax_computations" TO "authenticated";
+GRANT ALL ON TABLE "finance"."tax_computations" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."tax_credits_and_withholding" TO "authenticated";
+GRANT ALL ON TABLE "finance"."tax_credits_and_withholding" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."tax_payments_and_refunds" TO "authenticated";
+GRANT ALL ON TABLE "finance"."tax_payments_and_refunds" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "finance"."tax_reconciliations" TO "authenticated";
 GRANT ALL ON TABLE "finance"."tax_reconciliations" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."tax_returns" TO "authenticated";
+GRANT ALL ON TABLE "finance"."tax_returns" TO "service_role";
 
 
 
@@ -12592,35 +14741,4 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
