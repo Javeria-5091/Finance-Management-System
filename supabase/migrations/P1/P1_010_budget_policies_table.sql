@@ -19,12 +19,13 @@ CREATE TABLE IF NOT EXISTS core.budget_policies (
   is_active BOOLEAN NOT NULL DEFAULT true,
   created_by UUID REFERENCES auth.users(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-  -- Ensure one active policy per organization
-  CONSTRAINT uq_org_active_policy UNIQUE (organization_id, is_active)
-    WHERE (is_active = true)
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- FIX: Ensure one active policy per organization using a Partial Unique Index
+CREATE UNIQUE INDEX IF NOT EXISTS uq_org_active_policy 
+  ON core.budget_policies (organization_id) 
+  WHERE (is_active = true);
 
 -- RLS: Organization-level isolation
 ALTER TABLE core.budget_policies ENABLE ROW LEVEL SECURITY;

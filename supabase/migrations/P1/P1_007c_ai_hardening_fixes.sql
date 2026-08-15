@@ -97,7 +97,7 @@ CREATE POLICY read_ai_conversations ON ai.ai_conversations
       JOIN core.roles r ON r.id = ur.role_id
       WHERE ur.user_id = auth.uid()
         AND r.name IN ('CEO', 'FINANCE_HEAD', 'AUDITOR', 'Admin')
-        AND ur.valid_from <= now() AND (ur.valid_to IS NULL OR ur.valid_to >= now())
+        AND ur.effective_from <= now() AND (ur.effective_to IS NULL OR ur.effective_to >= now())
     )
   );
 
@@ -124,7 +124,7 @@ CREATE POLICY read_ai_messages ON ai.ai_messages
       JOIN core.roles r ON r.id = ur.role_id
       WHERE ur.user_id = auth.uid()
         AND r.name IN ('CEO', 'FINANCE_HEAD', 'AUDITOR', 'Admin')
-        AND ur.valid_from <= now() AND (ur.valid_to IS NULL OR ur.valid_to >= now())
+        AND ur.effective_from <= now() AND (ur.effective_to IS NULL OR ur.effective_to >= now())
     )
   );
 
