@@ -3286,6 +3286,32 @@ COMMENT ON FUNCTION "finance"."snapshot_tax_rule_set"() IS 'Auto-populates tax_c
 
 
 
+CREATE OR REPLACE FUNCTION "finance"."sync_budget_line_committed_amount"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+DECLARE
+  v_budget_line_id uuid;
+  v_total numeric(18,2);
+BEGIN
+  v_budget_line_id := COALESCE(NEW.budget_line_id, OLD.budget_line_id);
+
+  SELECT COALESCE(SUM(amount), 0) INTO v_total
+  FROM finance.budget_commitments
+  WHERE budget_line_id = v_budget_line_id
+    AND status = 'OPEN';
+
+  UPDATE finance.budget_lines
+  SET committed_amount = v_total
+  WHERE id = v_budget_line_id;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."sync_budget_line_committed_amount"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text" DEFAULT NULL::"text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
@@ -6069,6 +6095,36 @@ CREATE TABLE IF NOT EXISTS "finance"."bank_transfers" (
 ALTER TABLE "finance"."bank_transfers" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "finance"."budget_commitments" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "budget_line_id" "uuid" NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "source_type" "text" NOT NULL,
+    "source_reference" "text",
+    "amount" numeric(18,2) NOT NULL,
+    "base_amount" numeric(18,2) NOT NULL,
+    "status" "text" DEFAULT 'OPEN'::"text" NOT NULL,
+    "description" "text",
+    "created_by" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "released_by" "uuid",
+    "released_at" timestamp with time zone,
+    "release_reason" "text",
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "budget_commitments_amount_check" CHECK (("amount" > (0)::numeric)),
+    CONSTRAINT "budget_commitments_release_requires_reason" CHECK ((("status" = 'OPEN'::"text") OR ("release_reason" IS NOT NULL))),
+    CONSTRAINT "budget_commitments_source_type_check" CHECK (("source_type" = ANY (ARRAY['PURCHASE_REQUEST'::"text", 'VENDOR_BILL'::"text", 'MANUAL'::"text"]))),
+    CONSTRAINT "budget_commitments_status_check" CHECK (("status" = ANY (ARRAY['OPEN'::"text", 'RELEASED'::"text", 'CANCELLED'::"text"])))
+);
+
+
+ALTER TABLE "finance"."budget_commitments" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "finance"."budget_commitments" IS 'Encumbrance ledger giving the "Committed" figure required by spec §5.4/§2.1/§13.2 a real database source. budget_lines.committed_amount is a trigger-maintained sum of OPEN rows here, kept in sync automatically. Added in Migration 036.';
+
+
+
 CREATE TABLE IF NOT EXISTS "finance"."budget_lines" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "budget_id" "uuid" NOT NULL,
@@ -6077,7 +6133,8 @@ CREATE TABLE IF NOT EXISTS "finance"."budget_lines" (
     "budgeted_amount" numeric(18,2) DEFAULT 0 NOT NULL,
     "description" "text",
     "created_at" timestamp with time zone DEFAULT "now"(),
-    "organization_id" "uuid"
+    "organization_id" "uuid",
+    "committed_amount" numeric(18,2) DEFAULT 0 NOT NULL
 );
 
 
@@ -6213,7 +6270,7 @@ ALTER VIEW "finance"."coa_tree" OWNER TO "postgres";
 CREATE TABLE IF NOT EXISTS "finance"."credit_notes" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "credit_note_number" "text",
-    "invoice_id" "uuid" NOT NULL,
+    "invoice_id" "uuid",
     "reason" "text" NOT NULL,
     "amount" numeric(18,2) NOT NULL,
     "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
@@ -6230,12 +6287,23 @@ CREATE TABLE IF NOT EXISTS "finance"."credit_notes" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
+    "vendor_bill_id" "uuid",
+    "credit_note_type" "text" GENERATED ALWAYS AS (
+CASE
+    WHEN ("invoice_id" IS NOT NULL) THEN 'AR'::"text"
+    ELSE 'AP'::"text"
+END) STORED,
     CONSTRAINT "credit_notes_amount_check" CHECK (("amount" > (0)::numeric)),
+    CONSTRAINT "credit_notes_exactly_one_source" CHECK (((("invoice_id" IS NOT NULL) AND ("vendor_bill_id" IS NULL)) OR (("invoice_id" IS NULL) AND ("vendor_bill_id" IS NOT NULL)))),
     CONSTRAINT "credit_notes_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text"])))
 );
 
 
 ALTER TABLE "finance"."credit_notes" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "finance"."credit_notes" IS 'Credit notes against either a client invoice (AR, invoice_id set) or a vendor bill (AP, vendor_bill_id set) -- see credit_notes_exactly_one_source. Extended for AP support in Migration 035 (spec §5.7 / §2.1 / §12.3).';
+
 
 
 CREATE TABLE IF NOT EXISTS "finance"."depreciation_schedule" (
@@ -6324,12 +6392,16 @@ CREATE TABLE IF NOT EXISTS "finance"."exchange_rates" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
-    "organization_id" "uuid",
+    "organization_id" "uuid" NOT NULL,
     CONSTRAINT "exchange_rates_rate_type_check" CHECK (("rate_type" = ANY (ARRAY['PLATFORM'::"text", 'BANK'::"text", 'MANUAL'::"text", 'PAYMENT_CHANNEL'::"text"])))
 );
 
 
 ALTER TABLE "finance"."exchange_rates" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "finance"."exchange_rates"."organization_id" IS 'Migration 040: now NOT NULL. Every manual exchange rate must belong to exactly one organization; a NULL value previously made the row invisible to the tenant boundary entirely (it satisfied neither side of core.same_org(), which fails closed, but also was never actually checked by the old fx_select/fx_insert policies).';
+
 
 
 CREATE TABLE IF NOT EXISTS "finance"."fee_computation_log" (
@@ -9647,6 +9719,11 @@ ALTER TABLE ONLY "finance"."bank_transfers"
 
 
 
+ALTER TABLE ONLY "finance"."budget_commitments"
+    ADD CONSTRAINT "budget_commitments_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "finance"."budget_lines"
     ADD CONSTRAINT "budget_lines_pkey" PRIMARY KEY ("id");
 
@@ -9758,7 +9835,7 @@ ALTER TABLE ONLY "finance"."fixed_assets"
 
 
 ALTER TABLE ONLY "finance"."fiscal_years"
-    ADD CONSTRAINT "fy_no_overlapping_ranges" EXCLUDE USING "gist" ("daterange"("start_date", "end_date", '[]'::"text") WITH &&);
+    ADD CONSTRAINT "fy_no_overlapping_ranges" EXCLUDE USING "gist" ("organization_id" WITH =, "daterange"("start_date", "end_date", '[]'::"text") WITH &&);
 
 
 
@@ -10427,6 +10504,14 @@ CREATE INDEX "idx_bt_to" ON "finance"."bank_transfers" USING "btree" ("to_accoun
 
 
 
+CREATE INDEX "idx_budget_commitments_budget_line" ON "finance"."budget_commitments" USING "btree" ("budget_line_id");
+
+
+
+CREATE INDEX "idx_budget_commitments_status" ON "finance"."budget_commitments" USING "btree" ("status");
+
+
+
 CREATE INDEX "idx_budget_revisions_budget" ON "finance"."budget_revisions" USING "btree" ("budget_id");
 
 
@@ -10468,6 +10553,10 @@ CREATE INDEX "idx_coa_organization_id" ON "finance"."chart_of_accounts" USING "b
 
 
 CREATE INDEX "idx_coa_parent_id" ON "finance"."chart_of_accounts" USING "btree" ("parent_id");
+
+
+
+CREATE INDEX "idx_credit_notes_vendor_bill_id" ON "finance"."credit_notes" USING "btree" ("vendor_bill_id");
 
 
 
@@ -11178,6 +11267,10 @@ CREATE OR REPLACE TRIGGER "bank_transfers_audit" AFTER INSERT OR DELETE OR UPDAT
 
 
 
+CREATE OR REPLACE TRIGGER "budget_commitments_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."budget_commitments" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
 CREATE OR REPLACE TRIGGER "chart_of_accounts_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."chart_of_accounts" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
@@ -11478,6 +11571,10 @@ CREATE OR REPLACE TRIGGER "trg_stmt_recon_status" AFTER INSERT OR DELETE OR UPDA
 
 
 
+CREATE OR REPLACE TRIGGER "trg_sync_budget_line_committed_amount" AFTER INSERT OR DELETE OR UPDATE ON "finance"."budget_commitments" FOR EACH ROW EXECUTE FUNCTION "finance"."sync_budget_line_committed_amount"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_tax_updated_at" BEFORE UPDATE ON "finance"."tax_adjustments" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_tax_updated_at"();
 
 
@@ -11523,6 +11620,10 @@ CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."asset_ver
 
 
 CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."asset_verifications" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."budget_commitments" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
 
 
 
@@ -12161,6 +12262,16 @@ ALTER TABLE ONLY "finance"."bank_transfers"
 
 
 
+ALTER TABLE ONLY "finance"."budget_commitments"
+    ADD CONSTRAINT "budget_commitments_budget_line_id_fkey" FOREIGN KEY ("budget_line_id") REFERENCES "finance"."budget_lines"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."budget_commitments"
+    ADD CONSTRAINT "budget_commitments_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE RESTRICT;
+
+
+
 ALTER TABLE ONLY "finance"."budget_lines"
     ADD CONSTRAINT "budget_lines_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "finance"."chart_of_accounts"("id");
 
@@ -12218,6 +12329,11 @@ ALTER TABLE ONLY "finance"."credit_notes"
 
 ALTER TABLE ONLY "finance"."credit_notes"
     ADD CONSTRAINT "credit_notes_invoice_id_fkey" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."credit_notes"
+    ADD CONSTRAINT "credit_notes_vendor_bill_id_fkey" FOREIGN KEY ("vendor_bill_id") REFERENCES "finance"."vendor_bills"("id");
 
 
 
@@ -13265,10 +13381,6 @@ CREATE POLICY "write_own_messages" ON "ai"."ai_messages" FOR INSERT WITH CHECK (
 ALTER TABLE "audit"."audit_log" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "audit_log_insert" ON "audit"."audit_log" FOR INSERT TO "authenticated" WITH CHECK ((("auth"."uid"() = "user_id") OR ("auth"."uid"() = "changed_by")));
-
-
-
 CREATE POLICY "audit_log_no_delete" ON "audit"."audit_log" FOR DELETE TO "authenticated" USING (false);
 
 
@@ -13368,7 +13480,7 @@ CREATE POLICY "export_events_service_all" ON "audit"."export_events" TO "service
 
 
 
-CREATE POLICY "sec_events_insert" ON "audit"."security_events" FOR INSERT TO "authenticated" WITH CHECK (true);
+CREATE POLICY "sec_events_insert" ON "audit"."security_events" FOR INSERT TO "authenticated" WITH CHECK ((("user_id" IS NULL) OR ("auth"."uid"() = "user_id")));
 
 
 
@@ -13755,6 +13867,18 @@ ALTER TABLE "finance"."bank_statements" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."bank_transfers" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "bc_insert" ON "finance"."budget_commitments" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+CREATE POLICY "bc_select" ON "finance"."budget_commitments" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+CREATE POLICY "bc_update" ON "finance"."budget_commitments" FOR UPDATE USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id"))) WITH CHECK ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id")));
+
+
+
 CREATE POLICY "bl_insert" ON "finance"."budget_lines" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
 
 
@@ -13789,6 +13913,9 @@ CREATE POLICY "bt_select" ON "finance"."bank_transfers" FOR SELECT USING (("auth
 
 CREATE POLICY "bt_update_restricted" ON "finance"."bank_transfers" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
 
+
+
+ALTER TABLE "finance"."budget_commitments" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "finance"."budget_lines" ENABLE ROW LEVEL SECURITY;
@@ -13972,11 +14099,19 @@ CREATE POLICY "fixed_assets_update" ON "finance"."fixed_assets" FOR UPDATE USING
 
 
 
-CREATE POLICY "fx_insert" ON "finance"."exchange_rates" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "fx_insert" ON "finance"."exchange_rates" FOR INSERT WITH CHECK ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "fx_select" ON "finance"."exchange_rates" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
+COMMENT ON POLICY "fx_insert" ON "finance"."exchange_rates" IS 'Migration 040: added core.same_org(organization_id) tenant check. Previously this policy had no organization boundary at all, letting any Finance Head/Accountant in ANY organization insert exchange rates against another organization''s organization_id (Compliance Audit Rev 2, CRITICAL-1).';
+
+
+
+CREATE POLICY "fx_select" ON "finance"."exchange_rates" FOR SELECT USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")) AND "core"."same_org"("organization_id")));
+
+
+
+COMMENT ON POLICY "fx_select" ON "finance"."exchange_rates" IS 'Migration 040: added core.same_org(organization_id) tenant check. Previously this policy had no organization boundary at all, letting any Finance Head/Accountant/Viewer in ANY organization read every other organization''s manual FX rates (Compliance Audit Rev 2, CRITICAL-1).';
 
 
 
@@ -14989,6 +15124,8 @@ ALTER TABLE "public"."subscriptions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."user_mfa" ENABLE ROW LEVEL SECURITY;
 
 
+
+
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
 
 
@@ -15236,7 +15373,6 @@ GRANT ALL ON FUNCTION "reporting"."get_statement_of_changes_in_equity"("p_period
 
 
 
-
 GRANT SELECT,INSERT ON TABLE "audit"."audit_log" TO "authenticated";
 GRANT ALL ON TABLE "audit"."audit_log" TO "service_role";
 
@@ -15410,6 +15546,11 @@ GRANT ALL ON TABLE "finance"."bank_statements" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."bank_transfers" TO "authenticated";
 GRANT ALL ON TABLE "finance"."bank_transfers" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."budget_commitments" TO "authenticated";
+GRANT ALL ON TABLE "finance"."budget_commitments" TO "service_role";
 
 
 
@@ -16043,7 +16184,6 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "ai_readonly_role
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
-
 
 
 
