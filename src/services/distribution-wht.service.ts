@@ -174,9 +174,16 @@ export async function postDistributionWithWHT(
   const { distribution_id, organization_id, period_id, declared_by, description, withholding_override } = input;
 
   // 1. Fetch distribution with lines
+  // BUG FIX (verified against schema): finance.distributions does not
+  // exist — the real table created by
+  // phase_7_tax_equity/024_ownership_reserves.sql is
+  // finance.profit_distributions. Querying the non-existent name meant
+  // this call always failed at runtime with a PostgREST
+  // "relation does not exist" error, so profit distribution posting was
+  // completely broken end-to-end.
   const distribution = getData(
     await supabase
-      .from('finance.distributions')
+      .from('finance.profit_distributions')
       .select('*, distribution_lines(*)')
       .eq('id', distribution_id)
       .eq('organization_id', organization_id)
@@ -189,6 +196,34 @@ export async function postDistributionWithWHT(
 
   if (distribution.status !== 'APPROVED') {
     return { error: `Only APPROVED distributions can be posted. Current: ${distribution.status}`, status: 400 };
+  }
+
+  // BUG-024 FIX (High): verify the fiscal year this distribution's profit
+  // was calculated from is not still fully OPEN. Spec 5.13/6.2: distributable
+  // profit is only meaningful "after approved expenses, liabilities, fees,
+  // taxes/withholding, and period-close adjustments" and "the monthly close
+  // remains the authoritative distribution basis" — an OPEN fiscal year has
+  // had no period-close adjustments applied yet, so a distribution declared
+  // against it is not yet on a reliable profit figure. SOFT_CLOSED and
+  // HARD_CLOSED are both accepted (spec's month-end close workflow runs
+  // ahead of full fiscal-year hard-close).
+  if (distribution.fiscal_year_id) {
+    const fiscalYear = getData(
+      await supabase
+        .from('finance.fiscal_years')
+        .select('id, status, name')
+        .eq('id', distribution.fiscal_year_id)
+        .single()
+    );
+    if (!fiscalYear) {
+      return { error: 'Fiscal year referenced by this distribution was not found', status: 400 };
+    }
+    if (fiscalYear.status === 'OPEN') {
+      return {
+        error: `Cannot post distribution: fiscal year "${fiscalYear.name}" is still OPEN. Distributions require at least a soft close of the relevant period/fiscal year so the profit figure reflects approved close adjustments.`,
+        status: 400,
+      };
+    }
   }
 
   // 2. Check WHT config

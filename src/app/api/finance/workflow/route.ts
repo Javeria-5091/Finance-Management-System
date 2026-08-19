@@ -73,16 +73,24 @@ const MODULES: Record<string, {
       reopen:  { from: ['REJECTED'], perm: 'INVOICE_UPDATE' },
     },
   },
+  // BUG-025 FIX (High): this module previously used the EXPENSE_* / APPROVE_EXPENSE
+  // permission codes for vendor bill transitions. PermissionContext.tsx defines
+  // (and seeds every role's fallback permissions with) dedicated
+  // VENDOR_BILL_UPDATE / APPROVE_VENDOR_BILL codes for exactly this module — using
+  // EXPENSE_* instead meant a user granted only expense permissions (but not
+  // vendor-bill permissions) could submit/verify/approve/reverse vendor bills, and
+  // a user granted only vendor-bill permissions could not, contradicting whatever
+  // scoped access an admin configured for either resource.
   vendor_bill: {
-    table: 'vendor_bills', permPrefix: 'EXPENSE', amountField: 'total_amount', creatorField: 'created_by',
+    table: 'vendor_bills', permPrefix: 'VENDOR_BILL', amountField: 'total_amount', creatorField: 'created_by',
     periodDateField: 'bill_date',
     transitions: {
-      submit:  { from: ['DRAFT'], perm: 'EXPENSE_UPDATE' },
-      verify:  { from: ['SUBMITTED'], perm: 'APPROVE_EXPENSE' },
-      approve: { from: ['SUBMITTED', 'VERIFIED'], perm: 'APPROVE_EXPENSE' },
-      reject:  { from: ['SUBMITTED', 'VERIFIED'], perm: 'EXPENSE_UPDATE' },
-      reverse: { from: ['POSTED'], perm: 'EXPENSE_UPDATE' },
-      cancel:  { from: ['DRAFT', 'SUBMITTED', 'VERIFIED', 'APPROVED'], perm: 'EXPENSE_UPDATE' },
+      submit:  { from: ['DRAFT'], perm: 'VENDOR_BILL_UPDATE' },
+      verify:  { from: ['SUBMITTED'], perm: 'APPROVE_VENDOR_BILL' },
+      approve: { from: ['SUBMITTED', 'VERIFIED'], perm: 'APPROVE_VENDOR_BILL' },
+      reject:  { from: ['SUBMITTED', 'VERIFIED'], perm: 'VENDOR_BILL_UPDATE' },
+      reverse: { from: ['POSTED'], perm: 'VENDOR_BILL_UPDATE' },
+      cancel:  { from: ['DRAFT', 'SUBMITTED', 'VERIFIED', 'APPROVED'], perm: 'VENDOR_BILL_UPDATE' },
     },
   },
   journal_entry: {

@@ -25,6 +25,13 @@ function getData<T = any>(res: any): T | null {
 // BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
 //   with single atomic RPC call using correct signature.
 //
+// TABLE NAME FIX (verified against schema): all three .from('finance.distributions')
+// calls below were querying a table that does not exist — the real table is
+// finance.profit_distributions (phase_7_tax_equity/024_ownership_reserves.sql).
+// This made every operation in this route fail at runtime. Corrected to
+// finance.profit_distributions throughout (see also distribution-wht.service.ts,
+// which had the same wrong name).
+//
 // PERMISSION FIX (BUG-010): This route previously called requirePermission()
 // with 'PROFIT_DISTRIBUTION_UPDATE' / 'PROFIT_DISTRIBUTION_READ' — codes that
 // were never seeded anywhere in core.permissions. That meant requirePermission()
@@ -58,7 +65,7 @@ export async function POST(req: NextRequest) {
     // 1. Fetch the distribution
     const distribution = getData(
       await supabase
-        .from('finance.distributions')
+        .from('finance.profit_distributions')
         .select('*, distribution_lines(*)')
         .eq('id', distribution_id)
         .eq('organization_id', orgId)
@@ -177,7 +184,7 @@ export async function POST(req: NextRequest) {
  
     // 7. Update distribution status to POSTED
     const { error: statusErr } = await supabase
-      .from('finance.distributions')
+      .from('finance.profit_distributions')
       .update({
         status: 'POSTED',
         posted_at: new Date().toISOString(),
@@ -296,7 +303,7 @@ export async function GET(req: NextRequest) {
  
     const distribution = getData(
       await supabase
-        .from('finance.distributions')
+        .from('finance.profit_distributions')
         .select('*, distribution_lines(*)')
         .eq('id', distributionId)
         .eq('organization_id', orgId)

@@ -1,4 +1,4 @@
-/ =============================================================================
+// =============================================================================
 // API AUTH MIDDLEWARE — Server-side authentication + permission check for all API routes
 // =============================================================================
 
@@ -518,5 +518,3 @@ export async function recordAiUsage(
     console.error('recordAiUsage unexpected error:', err.message);
   }
 }
-FILE 2 — src/app/api/admin/users/route.ts
-typescript
