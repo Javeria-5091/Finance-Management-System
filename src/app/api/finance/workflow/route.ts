@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthUser, checkApprovalLimit } from '@/lib/api-auth';
+import { getAuthUser, checkApprovalLimitAsync } from '@/lib/api-auth';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { workflowActionSchema, validateBody } from '@/lib/validations';
@@ -230,9 +230,18 @@ export async function POST(req: NextRequest) {
     }
  
     // Amount limit
+    // BUG-014 FIX: now resolved from the configurable core.approval_limits
+    // table (per-user override, then per-role limit for this
+    // transaction_type), falling back to the hardcoded defaults only if
+    // nothing is configured. `config.permPrefix` (EXPENSE / INCOME /
+    // INVOICE / VENDOR_BILL / JOURNAL / BUDGET) is used as the
+    // transaction_type key, matching the module groupings already used for
+    // permission codes in this same file.
     if (action === 'approve') {
       const amount = Number(record[config.amountField]) || 0;
-      const limitCheck = checkApprovalLimit(auth.role, amount);
+      const limitCheck = await checkApprovalLimitAsync(
+        supabase, auth.orgId, auth.userId, auth.role, config.permPrefix, amount
+      );
       if (!limitCheck.allowed) return NextResponse.json({ error: limitCheck.reason }, { status: 403 });
     }
 
@@ -268,7 +277,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Concurrent modification detected. Record was modified by another user. Please refresh and try again.' }, { status: 409 });
     }
  
-        //  FIX: Use RPC for audit log (correct columns, server-side IP, role snapshot, hash)
+    // FIX: Use RPC for audit log (correct columns, server-side IP, role snapshot, hash)
     try {
       await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,

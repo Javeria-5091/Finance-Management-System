@@ -206,6 +206,106 @@ export function enforceMakerChecker(creatorId: string, approverId: string): bool
 // which should already deny AUDITOR the APPROVE_* permission in the first
 // place — but an approval-limit table that still granted 500k was a real
 // bypass if that permission check were ever misconfigured.)
+// BUG-014 FIX (High): approval limits were hardcoded in this file rather
+// than read from the configurable core.approval_limits table that Spec 7.3
+// / 10.1 requires ("Approval limits are hardcoded in both the API layer and
+// the frontend rather than fetched from the configurable approval_limits
+// table, making limit changes require code deployment"). core.approval_limits
+// already exists (role_id/user_id, transaction_type, currency, max_amount,
+// scope, effective_from/effective_to — see P1_013_core_permission_backbone.sql)
+// but nothing queried it. This adds a DB-backed async version.
+//
+// checkApprovalLimitAsync() is the new source of truth: it looks up
+// core.approval_limits for (1) a user-specific override for this
+// transaction_type/currency, else (2) the calling role's limit for this
+// transaction_type/currency, both filtered to rows whose effective date
+// range covers today. The hardcoded synchronous checkApprovalLimit() below
+// is kept ONLY as the final fallback when no row is configured for a role
+// at all (e.g. a fresh install before an admin has configured limits),
+// so behavior does not regress to "deny everything" the moment this ships
+// — but as soon as an admin configures core.approval_limits for a role,
+// that configured value takes over with no code deployment, per spec.
+export async function checkApprovalLimitAsync(
+  supabase: any,
+  orgId: string | null,
+  userId: string,
+  userRole: string,
+  transactionType: string,
+  amount: number,
+  currency: string = 'PKR'
+): Promise<{ allowed: boolean; reason: string }> {
+  const today = new Date().toISOString().split('T')[0];
+
+  try {
+    // 1. User-specific override, if any (Spec 7.2: per-user limit
+    // independent of role).
+    const { data: userLimit } = await supabase
+      .schema('core')
+      .from('approval_limits')
+      .select('max_amount')
+      .eq('user_id', userId)
+      .eq('transaction_type', transactionType)
+      .eq('currency', currency)
+      .lte('effective_from', today)
+      .or(`effective_to.is.null,effective_to.gte.${today}`)
+      .order('effective_from', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (userLimit && userLimit.max_amount !== null) {
+      const limit = Number(userLimit.max_amount);
+      if (amount <= limit) return { allowed: true, reason: '' };
+      return {
+        allowed: false,
+        reason: `Amount ${currency} ${amount.toLocaleString()} exceeds your configured approval limit of ${currency} ${limit.toLocaleString()}. Requires ${getNextApproverRole(userRole)} approval.`,
+      };
+    }
+
+    // 2. Role-based limit (resolve role name -> core.roles.id first).
+    const { data: role } = await supabase
+      .schema('core')
+      .from('roles')
+      .select('id')
+      .eq('name', userRole)
+      .maybeSingle();
+
+    if (role?.id) {
+      const { data: roleLimit } = await supabase
+        .schema('core')
+        .from('approval_limits')
+        .select('max_amount')
+        .eq('role_id', role.id)
+        .is('user_id', null)
+        .eq('transaction_type', transactionType)
+        .eq('currency', currency)
+        .lte('effective_from', today)
+        .or(`effective_to.is.null,effective_to.gte.${today}`)
+        .order('effective_from', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (roleLimit && roleLimit.max_amount !== null) {
+        const limit = Number(roleLimit.max_amount);
+        if (amount <= limit) return { allowed: true, reason: '' };
+        return {
+          allowed: false,
+          reason: `Amount ${currency} ${amount.toLocaleString()} exceeds the configured ${userRole} approval limit of ${currency} ${limit.toLocaleString()}. Requires ${getNextApproverRole(userRole)} approval.`,
+        };
+      }
+    }
+  } catch (err: any) {
+    // If the config lookup itself fails (e.g. transient DB error), fall
+    // through to the hardcoded default below rather than either silently
+    // allowing an unlimited approval or hard-failing the request.
+    console.error('checkApprovalLimitAsync: config lookup failed, using hardcoded fallback:', err.message);
+  }
+
+  // 3. No configured row found for this role/transaction type/currency —
+  // fall back to the hardcoded defaults so the system is still usable
+  // before an admin has populated core.approval_limits.
+  return checkApprovalLimit(userRole, amount);
+}
+
 export function checkApprovalLimit(userRole: string, amount: number): { allowed: boolean; reason: string } {
   const LIMITS: Record<string, number> = {
     CEO: Infinity,
@@ -302,7 +402,7 @@ function walkAstNode(node: any, rangeVars: any[], funcCalls: string[]): void {
 export async function isSqlSafe(sql: string): Promise<{ safe: boolean; reason: string }> {
   let parsed: any;
   try {
-    // ✅ FIX: use parse(), not parseQuery() — see import comment above.
+    // FIX: use parse(), not parseQuery() — see import comment above.
     parsed = await parse(sql);
   } catch {
     return { safe: false, reason: 'Query failed to parse as valid SQL.' };
@@ -351,7 +451,7 @@ export async function isSqlSafe(sql: string): Promise<{ safe: boolean; reason: s
 }
 
 // ---------- Spec 9.5: Inject Scope Programmatically ----------
-// ⚠️ MERGE NOTE: one source version removed this block entirely, claiming it
+// MERGE NOTE: one source version removed this block entirely, claiming it
 // was dead code and that scope-wrapping had fully moved into a DB function
 // (execute_ai_readonly_query, per P1_006_ai_function.sql v2). That may be
 // true going forward — but it was kept here because we don't know whether
@@ -406,7 +506,7 @@ export async function checkAiDailyLimit(
 ): Promise<{ allowed: boolean; reason: string }> {
   try {
     const today = new Date().toISOString().split('T')[0];
-    // ✅ FIX: ai_user_cost_tracking lives in the 'ai' schema.
+    // FIX: ai_user_cost_tracking lives in the 'ai' schema.
     // .from('ai.ai_user_cost_tracking') is invalid supabase-js syntax — must use
     // .schema('ai').from('ai_user_cost_tracking').
     const { data: existing, error } = await supabase

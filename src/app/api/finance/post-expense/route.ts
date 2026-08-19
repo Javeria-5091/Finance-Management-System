@@ -130,6 +130,7 @@ export async function POST(req: NextRequest) {
     }
  
     // 3. Open period
+    let auditLogFailed = false;
     const period = getData(await supabase
       .from('finance.accounting_periods')
       .select('id')
@@ -141,19 +142,65 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
     }
  
-    // 4. Find expense account (FIXED: escape LIKE wildcards)
+    // 4. Find expense account (BUG-013 FIX, High: deterministic account
+    // resolution). Root cause: `expense.category` is free text (no FK to
+    // chart_of_accounts — Spec 10.5 calls for "Foreign keys, not free text"
+    // but the current schema has no category→account mapping table, so a
+    // full FK-based fix would need a schema change + expense-form change
+    // out of scope for this minimal remediation). Within that constraint,
+    // the previous implementation had two real problems this fixes:
+    //   1. `.ilike('name', '%category%').limit(1).single()` — a broad
+    //      substring match with NO ORDER BY. If two accounts both contain
+    //      the substring (e.g. "Travel" matches "Travel Expenses" AND
+    //      "Travel & Entertainment"), Postgres may return either one in
+    //      arbitrary/index order, so which GL account a given expense
+    //      category posts to could vary nondeterministically between
+    //      requests — a real financial-correctness risk.
+    //   2. On no match, it silently fell back to "any active
+    //      OPERATING_EXPENSE account", which could mispost an expense to a
+    //      completely unrelated account with no signal to the user.
+    // Fix: try an exact (case-insensitive) name match first — deterministic
+    // for the common case of a well-maintained COA. If that's ambiguous or
+    // absent, fall back to substring match ordered by `code` (deterministic,
+    // not query-plan-dependent) and surface a warning in the response so the
+    // caller can see the category wasn't a clean match rather than silently
+    // guessing.
     let expenseAccountId: string | null = null;
+    let accountResolutionWarning: string | null = null;
     if (expense.category) {
       const escapedCategory = expense.category.replace(/[%_]/g, '\\$&');
-      const matched = getData(await supabase
+
+      const exactMatches = (await supabase
         .from('finance.chart_of_accounts')
         .select('id, code, name')
         .eq('account_type', 'OPERATING_EXPENSE')
         .eq('is_active', true)
-        .ilike('name', `%${escapedCategory}%`)
-        .limit(1)
-        .single());
-      expenseAccountId = matched?.id || null;
+        .ilike('name', escapedCategory) // exact match, case-insensitive, no wildcards
+        .order('code', { ascending: true })).data ?? [];
+
+      if (exactMatches.length === 1) {
+        expenseAccountId = exactMatches[0].id;
+      } else if (exactMatches.length > 1) {
+        expenseAccountId = exactMatches[0].id;
+        accountResolutionWarning = `Category "${expense.category}" exactly matched ${exactMatches.length} active expense accounts (${exactMatches.map((a: any) => a.code).join(', ')}); posted to ${exactMatches[0].code} deterministically (lowest code). Consider renaming duplicate accounts.`;
+      } else {
+        const substringMatches = (await supabase
+          .from('finance.chart_of_accounts')
+          .select('id, code, name')
+          .eq('account_type', 'OPERATING_EXPENSE')
+          .eq('is_active', true)
+          .ilike('name', `%${escapedCategory}%`)
+          .order('code', { ascending: true })).data ?? [];
+
+        if (substringMatches.length >= 1) {
+          expenseAccountId = substringMatches[0].id;
+          if (substringMatches.length > 1) {
+            accountResolutionWarning = `Category "${expense.category}" did not exactly match any account name; partially matched ${substringMatches.length} accounts (${substringMatches.map((a: any) => a.code).join(', ')}), posted to ${substringMatches[0].code} deterministically (lowest code). Consider adding an exact-named account for this category.`;
+          } else {
+            accountResolutionWarning = `Category "${expense.category}" did not exactly match any account name; posted to closest partial match ${substringMatches[0].code} (${substringMatches[0].name}).`;
+          }
+        }
+      }
     }
  
     if (!expenseAccountId) {
@@ -162,9 +209,13 @@ export async function POST(req: NextRequest) {
         .select('id, code, name')
         .eq('account_type', 'OPERATING_EXPENSE')
         .eq('is_active', true)
+        .order('code', { ascending: true })
         .limit(1)
-        .single());
+        .maybeSingle());
       expenseAccountId = opex?.id || null;
+      if (opex) {
+        accountResolutionWarning = `No expense account matched category "${expense.category || '(none)'}"; posted to default expense account ${opex.code} (${opex.name}). Please verify or correct the category.`;
+      }
     }
  
     // 5. Payable / Liability account
@@ -256,9 +307,9 @@ export async function POST(req: NextRequest) {
       // GL entry exists but expense status not updated — manual reconciliation needed
     }
  
-        //  FIX: Use RPC for correct audit columns
+    // FIX: Use RPC for correct audit columns
     try {
-await       supabase.schema('audit').rpc('log_action', {
+      await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'EXPENSE_POSTED',
         p_entity_type: 'expense',
@@ -278,7 +329,18 @@ await       supabase.schema('audit').rpc('log_action', {
         p_related_journal_id: journal.id,
       });
     } catch (auditErr: any) {
+      // BUG-023 FIX (partial — audit-failure visibility): a failed audit
+      // write for a P0 financial posting must not just vanish into a
+      // server log that nobody watches (Spec 8.1: "every action... must be
+      // attributable"). We deliberately do NOT fail/roll back the posting
+      // here — the GL entry is already correctly posted and reverting a
+      // successful financial posting because a *logging* call failed would
+      // be worse (Spec: posted entries are immutable; a synthetic rollback
+      // here would itself need a reversal entry). Instead the failure is
+      // surfaced to the caller via `audit_log_warning` below so it is at
+      // least visible to the user/ops rather than silently swallowed.
       console.error('Audit log failed for expense post:', auditErr);
+      auditLogFailed = true;
     }
  
     return NextResponse.json({
@@ -287,6 +349,8 @@ await       supabase.schema('audit').rpc('log_action', {
       reference,
       message: `Posted ${reference}`,
       budget_check: budgetCheck.blocked ? { overridden: true } : { warning: budgetCheck.warning, checks: budgetCheck.checks.length },
+      account_resolution_warning: accountResolutionWarning,
+      audit_log_warning: auditLogFailed ? 'Posting succeeded but the audit log entry failed to write. Please notify an administrator.' : undefined,
     });
  
   } catch (err: any) {
