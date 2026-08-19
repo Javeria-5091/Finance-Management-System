@@ -29,6 +29,15 @@ import { z } from 'zod';
 
 const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
 
+// SECURITY FIX (BUG-004, CRITICAL — SQL injection): tax_year is a
+// client-supplied string. It must never be interpolated into a SQL string
+// without being validated against a strict allowlist pattern first. Real
+// tax-year labels used elsewhere in this system look like "2025-2026" or
+// "2026" (see finance.tax_reconciliations.tax_year) — this pattern is
+// deliberately narrow (digits/hyphen only) so no SQL metacharacter (quote,
+// semicolon, comment, etc.) can ever reach the query string below.
+const TAX_YEAR_PATTERN = /^[0-9]{4}(-[0-9]{4})?$/;
+
 const TaxAssistantRequestSchema = z.object({
   action: z.enum([
     'explain_adjustments',
@@ -68,19 +77,50 @@ export async function POST(req: Request) {
 
     const { action, tax_year, question } = parsed.data;
 
+    // SECURITY FIX (BUG-004, CRITICAL): reject any tax_year that doesn't
+    // match the strict allowlist pattern before it can be used anywhere,
+    // including inside a SQL string.
+    if (tax_year && !TAX_YEAR_PATTERN.test(tax_year)) {
+      return NextResponse.json({ error: 'Invalid tax_year format.' }, { status: 400 });
+    }
+
     // 3. Fetch tax computation data (read-only)
     let taxData = '';
 
     if (tax_year) {
-      const { data: taxSummary } = await supabase.rpc('execute_ai_readonly_query', {
-        query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
-          SELECT * FROM reporting.v_tax_computation_summary
-          WHERE organization_id = '${orgId}'
-          AND tax_year = '${tax_year}'
-        ) t`,
+      // SECURITY FIX (BUG-004, CRITICAL — SQL injection):
+      // The previous version built the ENTIRE wrapped/scoped query
+      // (including `organization_id = '${orgId}'`) as a single hand-built
+      // string and passed only `{ query_string }` to
+      // execute_ai_readonly_query() — an overload that no longer exists
+      // (P1_006b_ai_function.sql dropped the single-argument version), and
+      // which additionally interpolated the client-supplied `tax_year`
+      // directly into SQL with no escaping, a SQL injection vector.
+      //
+      // The correct, already-established pattern in this codebase (see
+      // src/app/api/chat/route.ts) is to pass ONLY the inner SELECT as
+      // `query_string`, and let the database function itself apply the
+      // organization scope via a typed `uuid` parameter (`p_org_id`) using
+      // `format(...,%L)` — which cannot be bypassed by string content. We
+      // now follow that same pattern here. `tax_year` is embedded in the
+      // inner SELECT, but only after being validated against
+      // TAX_YEAR_PATTERN above, so no SQL metacharacter can reach it.
+      // `p_enforce_user_scope: false` because
+      // reporting.v_tax_computation_summary is an organization-level view
+      // with no user_id column (per-user filtering would fail closed with
+      // an "undefined_column" error from the DB function otherwise).
+      const innerQuery = `SELECT * FROM reporting.v_tax_computation_summary WHERE tax_year = '${tax_year}'`;
+
+      const { data: taxSummary, error: taxErr } = await supabase.rpc('execute_ai_readonly_query', {
+        query_string: innerQuery,
+        p_org_id: orgId,
+        p_user_id: user.id,
+        p_enforce_user_scope: false,
       });
 
-      if (taxSummary && Array.isArray(taxSummary) && taxSummary.length > 0) {
+      if (taxErr) {
+        console.error('Tax Assistant: tax summary query failed:', taxErr.message);
+      } else if (taxSummary && Array.isArray(taxSummary) && taxSummary.length > 0) {
         taxData = JSON.stringify(taxSummary, null, 2);
       }
     }

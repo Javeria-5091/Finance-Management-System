@@ -1,15 +1,12 @@
-// =============================================================================
+/ =============================================================================
 // API AUTH MIDDLEWARE — Server-side authentication + permission check for all API routes
 // =============================================================================
-// ⚠️ MERGED FILE — combined from two parallel AI-generated versions of this
-// module so that route files depending on EITHER version keep working.
-// See inline notes for what was kept/reconciled and why.
 
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-// ✅ FIX: the published libpg-query package exports "parse" (and "parseSync"),
+// FIX: the published libpg-query package exports "parse" (and "parseSync"),
 // NOT "parseQuery". Importing parseQuery caused
 // "Module '\"libpg-query\"' has no exported member 'parseQuery'".
 import { parse } from 'libpg-query';
@@ -148,8 +145,16 @@ export async function requirePermission(requiredPerm: string): Promise<AuthResul
   const auth = await getAuthUser();
   if (auth instanceof NextResponse) return auth; // 401
 
-  // CEO and Admin have all permissions
-  if (auth.role === 'CEO' || auth.role === 'Admin') return auth;
+  // ─── SECURITY FIX (BUG-002 / Spec Appendix A) ───
+  // Only CEO has an unconditional permission bypass. Technical Admin ("Admin")
+  // is NOT a finance role — per Appendix A it has "None" for finance-data
+  // resources and only "Read security" for audit logs. Admin must go through
+  // the same permission-table lookup as every other non-CEO role below, so
+  // that its actual rights are whatever is granted (config-driven) rather
+  // than hardcoded full access. Previously `auth.role === 'Admin'` was
+  // treated identically to CEO here, letting a technical administrator
+  // create/approve/post financial transactions with no configured permission.
+  if (auth.role === 'CEO') return auth;
 
   // Check against permission table via RPC
   try {
@@ -191,14 +196,20 @@ export function enforceMakerChecker(creatorId: string, approverId: string): bool
 }
 
 // ---------- Approval amount limit check ----------
-// NOTE (merge fix): AUDITOR limit (500000) was present in one source version
-// and missing in the other — kept here since AUDITOR also exists in
-// APPROVAL_ROLES above, so dropping it would silently give auditors a 0 limit.
+// SECURITY FIX (BUG-009 / Spec Appendix A): AUDITOR must have "No create,
+// edit, approve, or post" authority — it is a read-only role. The previous
+// AUDITOR: 500000 entry granted auditors a real approval limit, letting them
+// approve transactions up to that amount. AUDITOR is intentionally absent
+// from this table now, so it falls through to the `?? 0` default below and
+// no amount can be approved by an auditor. (This is defense-in-depth on top
+// of the permission-table check in requirePermission()/workflow route,
+// which should already deny AUDITOR the APPROVE_* permission in the first
+// place — but an approval-limit table that still granted 500k was a real
+// bypass if that permission check were ever misconfigured.)
 export function checkApprovalLimit(userRole: string, amount: number): { allowed: boolean; reason: string } {
   const LIMITS: Record<string, number> = {
     CEO: Infinity,
     FINANCE_HEAD: 500000,
-    AUDITOR: 500000,
     ACCOUNTANT: 100000,
     HOD: 100000,
     PROJECT_MANAGER: 25000,
@@ -507,3 +518,5 @@ export async function recordAiUsage(
     console.error('recordAiUsage unexpected error:', err.message);
   }
 }
+FILE 2 — src/app/api/admin/users/route.ts
+typescript

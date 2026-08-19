@@ -7,6 +7,20 @@ import { cookies } from 'next/headers';
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
+
+// ─── SECURITY FIX (PostgREST filter injection): sanitize any value that is
+// interpolated into a `.or()`/`.ilike()` filter string. Supabase's PostgREST
+// filter syntax uses `,` to separate conditions and `%`/`_` as ILIKE
+// wildcards; an unescaped `,` in the search term lets an attacker inject
+// additional filter clauses (e.g. `,role.eq.CEO`), and unescaped `%`/`_`
+// change the match semantics. We strip characters that have special meaning
+// in the PostgREST filter grammar and escape ILIKE wildcards.
+function sanitizeIlikeTerm(raw: string): string {
+  return raw
+    .replace(/[,()]/g, '') // PostgREST filter-syntax separators/grouping
+    .replace(/[%_]/g, (c) => `\\${c}`) // escape ILIKE wildcards
+    .slice(0, 100);
+}
  
 // ─── GET: List all users with roles and permissions ───
 export async function GET(req: NextRequest) {
@@ -15,6 +29,13 @@ export async function GET(req: NextRequest) {
   const { supabase } = await getAuthSupabase(req);
  
   try {
+    // SECURITY FIX (BUG-003, CRITICAL): admin/users must scope every request
+    // to the requesting admin's own organization. Without this, an admin of
+    // Organization A could list users belonging to any other organization.
+    if (!auth.orgId) {
+      return NextResponse.json({ error: 'Organization context missing.' }, { status: 400 });
+    }
+
     const { searchParams } = new URL(req.url);
     const page = parseInt(searchParams.get('page') || '1');
     const pageSize = parseInt(searchParams.get('pageSize') || '20');
@@ -24,10 +45,15 @@ export async function GET(req: NextRequest) {
  
     let query = supabase
       .from('profiles')
-      .select('*, user_roles(role, is_active, effective_from, effective_to)', { count: 'exact' });
+      .select('*, user_roles(role, is_active, effective_from, effective_to)', { count: 'exact' })
+      .eq('organization_id', auth.orgId);
  
     if (search) {
-      query = query.or(`email.ilike.%${search}%,full_name.ilike.%${search}%`);
+      // SECURITY FIX: sanitize before interpolating into the PostgREST filter.
+      const safeSearch = sanitizeIlikeTerm(search);
+      if (safeSearch) {
+        query = query.or(`email.ilike.%${safeSearch}%,full_name.ilike.%${safeSearch}%`);
+      }
     }
     if (roleFilter) {
       query = query.eq('role', roleFilter);
@@ -65,8 +91,18 @@ export async function POST(req: NextRequest) {
   const { supabase } = await getAuthSupabase(req);
  
   try {
+    if (!auth.orgId) {
+      return NextResponse.json({ error: 'Organization context missing.' }, { status: 400 });
+    }
+
     const body = await req.json();
-    const { action, userId, email, fullName, role, organizationId, effectiveFrom, effectiveTo } = body;
+    const { action, userId, email, fullName, role, effectiveFrom, effectiveTo } = body;
+    // SECURITY FIX: organizationId is intentionally NOT read from the request
+    // body for user creation/role assignment. An admin (even CEO) must only
+    // ever create users and roles within their own organization — accepting
+    // a client-supplied organizationId let a caller place a new user into an
+    // arbitrary organization. New users are always created in auth.orgId.
+    const organizationId = auth.orgId;
  
     // ─── Action: Invite/Create User ───
     if (action === 'invite') {
@@ -74,11 +110,15 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'email is required' }, { status: 400 });
       }
  
-      // Check if user already exists
+      // Check if user already exists (scoped to this organization — SECURITY FIX:
+      // previously matched by email alone across all organizations, which could
+      // leak whether an email is registered in a different org and would block
+      // a legitimate invite in this org for a user who already exists elsewhere).
       const existing = getData(await supabase
         .from('profiles')
         .select('id, email')
         .eq('email', email)
+        .eq('organization_id', organizationId)
         .maybeSingle());
  
       if (existing) {
@@ -95,7 +135,7 @@ export async function POST(req: NextRequest) {
           email,
           full_name: fullName || null,
           role: role || 'EMPLOYEE',
-          organization_id: organizationId || auth.orgId,
+          organization_id: organizationId,
           is_active: true,
           created_by: auth.userId,
         })
@@ -153,6 +193,19 @@ export async function POST(req: NextRequest) {
     if (action === 'assign_role') {
       if (!userId || !role) {
         return NextResponse.json({ error: 'userId and role are required' }, { status: 400 });
+      }
+
+      // SECURITY FIX: verify the target user belongs to the admin's own
+      // organization before modifying their role. Without this check an
+      // admin from Organization A could assign roles to a user in
+      // Organization B by guessing/enumerating a userId.
+      const targetProfile = getData(await supabase
+        .from('profiles')
+        .select('id, organization_id')
+        .eq('id', userId)
+        .maybeSingle());
+      if (!targetProfile || targetProfile.organization_id !== organizationId) {
+        return NextResponse.json({ error: 'User not found in your organization' }, { status: 404 });
       }
  
       // Deactivate existing active roles
@@ -220,6 +273,18 @@ export async function POST(req: NextRequest) {
       if (!userId || !email) {
         return NextResponse.json({ error: 'userId and email are required' }, { status: 400 });
       }
+
+      // SECURITY FIX: same cross-org check as assign_role — an admin must
+      // not be able to trigger a password reset for a user outside their
+      // own organization.
+      const targetProfile = getData(await supabase
+        .from('profiles')
+        .select('id, organization_id')
+        .eq('id', userId)
+        .maybeSingle());
+      if (!targetProfile || targetProfile.organization_id !== organizationId) {
+        return NextResponse.json({ error: 'User not found in your organization' }, { status: 404 });
+      }
  
       // Log the password reset request
       try {
@@ -258,22 +323,42 @@ export async function PATCH(req: NextRequest) {
   const { supabase } = await getAuthSupabase(req);
  
   try {
+    if (!auth.orgId) {
+      return NextResponse.json({ error: 'Organization context missing.' }, { status: 400 });
+    }
+
     const body = await req.json();
-    const { userId, fullName, isActive, organizationId } = body;
+    const { userId, fullName, isActive } = body;
+    // SECURITY FIX (BUG-011, HIGH): organizationId is no longer accepted from
+    // the request body. Allowing a client-supplied organizationId let a
+    // caller move a user into a different organization entirely, and
+    // combined with the missing ownership check below, let an admin from
+    // Organization A modify a user belonging to Organization B.
  
     if (!userId) {
       return NextResponse.json({ error: 'userId is required' }, { status: 400 });
+    }
+
+    // SECURITY FIX (BUG-011): verify the target user belongs to the
+    // requesting admin's organization before allowing any update.
+    const targetProfile = getData(await supabase
+      .from('profiles')
+      .select('id, organization_id')
+      .eq('id', userId)
+      .maybeSingle());
+    if (!targetProfile || targetProfile.organization_id !== auth.orgId) {
+      return NextResponse.json({ error: 'User not found in your organization' }, { status: 404 });
     }
  
     const updates: Record<string, any> = {};
     if (fullName !== undefined) updates.full_name = fullName;
     if (isActive !== undefined) updates.is_active = isActive;
-    if (organizationId !== undefined) updates.organization_id = organizationId;
  
     const { data: updated, error } = await supabase
       .from('profiles')
       .update(updates)
       .eq('id', userId)
+      .eq('organization_id', auth.orgId)
       .select()
       .single();
  
@@ -307,4 +392,3 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
- 

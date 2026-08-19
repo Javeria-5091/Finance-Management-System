@@ -27,12 +27,20 @@ function db() {
 }
  
 // P0 ADDED: budget module with approval workflow
+// BUG-008 FIX: `periodDateField` (and optionally `periodIdField`) let this
+// route resolve the accounting period a record's transition affects, so
+// period-lock can be enforced generically across modules (see
+// assertPeriodOpenForTransition below). `budget` intentionally has no
+// period field — budgets are not GL postings and are not subject to
+// accounting period lock in the specification.
 const MODULES: Record<string, {
   table: string; permPrefix: string; amountField: string; creatorField: string;
+  periodIdField?: string; periodDateField?: string;
   transitions: Record<string, { from: string[]; perm: string }>;
 }> = {
   expense: {
     table: 'expenses', permPrefix: 'EXPENSE', amountField: 'amount', creatorField: 'created_by',
+    periodIdField: 'period_id', periodDateField: 'expense_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'EXPENSE_UPDATE' },
       verify:  { from: ['SUBMITTED'], perm: 'APPROVE_EXPENSE' },
@@ -44,6 +52,7 @@ const MODULES: Record<string, {
   },
   income: {
     table: 'incomes', permPrefix: 'INCOME', amountField: 'amount', creatorField: 'created_by',
+    periodIdField: 'period_id', periodDateField: 'income_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'INCOME_UPDATE' },
       verify:  { from: ['SUBMITTED'], perm: 'APPROVE_INCOME' },
@@ -55,6 +64,7 @@ const MODULES: Record<string, {
   },
   invoice: {
     table: 'invoices', permPrefix: 'INVOICE', amountField: 'total_amount', creatorField: 'created_by',
+    periodIdField: 'period_id', periodDateField: 'issue_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'INVOICE_UPDATE' },
       approve: { from: ['SUBMITTED'], perm: 'APPROVE_INVOICE' },
@@ -65,6 +75,7 @@ const MODULES: Record<string, {
   },
   vendor_bill: {
     table: 'vendor_bills', permPrefix: 'EXPENSE', amountField: 'total_amount', creatorField: 'created_by',
+    periodDateField: 'bill_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'EXPENSE_UPDATE' },
       verify:  { from: ['SUBMITTED'], perm: 'APPROVE_EXPENSE' },
@@ -76,6 +87,7 @@ const MODULES: Record<string, {
   },
   journal_entry: {
     table: 'finance.journal_entries', permPrefix: 'JOURNAL', amountField: 'total_debit', creatorField: 'created_by',
+    periodIdField: 'period_id', periodDateField: 'transaction_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'JOURNAL_UPDATE' },
       verify:  { from: ['SUBMITTED'], perm: 'APPROVE_JOURNAL' },
@@ -96,6 +108,69 @@ const MODULES: Record<string, {
     },
   },
 };
+
+// BUG-008 FIX (period-lock enforcement, CRITICAL/HIGH): Spec 4.3 requires
+// "Closed periods reject new or changed postings" and Spec 15.4 blocks
+// production if approval limits/period locks "can be bypassed". Previously
+// this route enforced NOTHING about accounting period status — a record
+// could be approved (queuing it for GL posting) or reversed (which changes
+// its status directly, with no separate posting-route check at all) even
+// while its accounting period was SOFT_CLOSED or HARD_CLOSED.
+//
+// The dedicated post-* routes (post-expense, post-income, post-invoice,
+// post-vendor-bill) already require *some* OPEN period to exist for the org
+// before they will post — but they run strictly after this workflow route
+// has already moved the record to APPROVED, and the 'reverse' transition
+// changes financial status directly through this route with no posting
+// step at all. This adds the missing period check at the workflow layer,
+// resolving the specific period that governs the record (by its
+// period_id if the table has one, else by looking up the period that
+// contains its transaction date) and rejecting the transition if that
+// period is not OPEN.
+async function assertPeriodOpenForTransition(
+  supabase: ReturnType<typeof db>,
+  config: (typeof MODULES)[string],
+  record: Record<string, any>,
+  orgId: string | null,
+  action: string
+): Promise<{ error: string } | null> {
+  // Only postings/reversals are period-sensitive; submit/verify/reject/
+  // reopen/cancel do not touch the ledger.
+  if (action !== 'approve' && action !== 'reverse') return null;
+  if (!config.periodDateField && !config.periodIdField) return null;
+  if (!orgId) return { error: 'Organization ID not found' };
+
+  let period: { id: string; status: string } | null = null;
+
+  if (config.periodIdField && record[config.periodIdField]) {
+    const { data } = await supabase
+      .from('finance.accounting_periods')
+      .select('id, status')
+      .eq('id', record[config.periodIdField])
+      .eq('organization_id', orgId)
+      .maybeSingle();
+    period = data ?? null;
+  } else if (config.periodDateField && record[config.periodDateField]) {
+    const { data } = await supabase
+      .from('finance.accounting_periods')
+      .select('id, status')
+      .eq('organization_id', orgId)
+      .lte('start_date', record[config.periodDateField])
+      .gte('end_date', record[config.periodDateField])
+      .maybeSingle();
+    period = data ?? null;
+  }
+
+  if (!period) {
+    return { error: 'No accounting period found for this transaction date. Cannot approve/reverse.' };
+  }
+  if (period.status !== 'OPEN') {
+    return {
+      error: `Accounting period is ${period.status}. Closed periods cannot receive new or changed postings.`,
+    };
+  }
+  return null;
+}
  
 export async function POST(req: NextRequest) {
   const supabase = db();
@@ -116,8 +191,12 @@ export async function POST(req: NextRequest) {
     const transition = config.transitions[action];
     if (!transition) return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
  
-    // CEO bypasses all
-    if (auth.role !== 'CEO' && auth.role !== 'Admin') {
+    // SECURITY FIX (BUG-002, CRITICAL): only CEO bypasses the permission
+    // check. Technical Admin ("Admin") previously bypassed it too, which
+    // contradicts Spec Appendix A (Technical Admin = "None" for finance
+    // data) and let a technical administrator submit/verify/approve/post
+    // financial transactions with no configured permission.
+    if (auth.role !== 'CEO') {
       const { data: perms } = await supabase.rpc('get_my_permissions');
       let hasPerm = false;
       if (perms) {
@@ -148,6 +227,11 @@ export async function POST(req: NextRequest) {
       const limitCheck = checkApprovalLimit(auth.role, amount);
       if (!limitCheck.allowed) return NextResponse.json({ error: limitCheck.reason }, { status: 403 });
     }
+
+    // BUG-008 FIX: period-lock check for approve/reverse (see
+    // assertPeriodOpenForTransition doc comment above).
+    const periodCheck = await assertPeriodOpenForTransition(supabase, config, record, auth.orgId, action);
+    if (periodCheck) return NextResponse.json({ error: periodCheck.error }, { status: 400 });
  
     const updateData: Record<string, any> = {};
     const now = new Date().toISOString();
@@ -200,4 +284,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message || 'Internal server error' }, { status: 500 });
   }
 }
-
