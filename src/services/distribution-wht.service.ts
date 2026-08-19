@@ -221,7 +221,7 @@ export async function postDistributionWithWHT(
   const totalNet = linesWithWHT.reduce((sum, l) => sum + l.net_amount, 0);
 
   // Validate balanced: totalGross must equal totalNet + totalWHT
-  if (Math.abs(totalGross - (totalNet + totalWHT)) > 0.02) {
+  if (Math.abs(totalGross - (totalNet + totalWHT)) > 0.01) {
     return {
       error: `Withholding calculation imbalance: Gross ${totalGross} != Net ${totalNet} + WHT ${totalWHT}`,
       status: 500,
@@ -302,7 +302,7 @@ export async function postDistributionWithWHT(
   // Validate balanced entry
   const totalDebit = journalLines.reduce((sum, l) => sum + Number(l.debit_amount), 0);
   const totalCredit = journalLines.reduce((sum, l) => sum + Number(l.credit_amount), 0);
-  if (Math.abs(totalDebit - totalCredit) > 0.02) {
+  if (Math.abs(totalDebit - totalCredit) > 0.01) {
     return {
       error: `Journal entry does not balance. Debit: ${totalDebit}, Credit: ${totalCredit}`,
       status: 500,

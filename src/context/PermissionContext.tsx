@@ -21,7 +21,7 @@ export type PermCode =
   | "BANK_READ" | "BANK_CREATE" | "BANK_UPDATE" | "BANK_RECONCILE" | "BANK_TRANSFER"
   | "COA_READ" | "COA_CREATE" | "COA_UPDATE" | "COA_DELETE"
   | "JOURNAL_READ" | "JOURNAL_CREATE" | "JOURNAL_UPDATE" | "JOURNAL_DELETE"
-  | "PERIOD_READ" | "PERIOD_MANAGE"
+  | "PERIOD_READ" | "PERIOD_MANAGE" | "PERIOD_CLOSE" | "PERIOD_REOPEN"
   | "TAX_READ" | "TAX_MANAGE"
   | "EQUITY_READ" | "EQUITY_MANAGE"
   | "BUDGET_READ" | "BUDGET_CREATE" | "BUDGET_UPDATE"
@@ -65,7 +65,7 @@ const VALID_PERM_CODES: PermCode[] = [
   "BANK_READ", "BANK_CREATE", "BANK_UPDATE", "BANK_RECONCILE", "BANK_TRANSFER",
   "COA_READ", "COA_CREATE", "COA_UPDATE", "COA_DELETE",
   "JOURNAL_READ", "JOURNAL_CREATE", "JOURNAL_UPDATE", "JOURNAL_DELETE",
-  "PERIOD_READ", "PERIOD_MANAGE",
+  "PERIOD_READ", "PERIOD_MANAGE", "PERIOD_CLOSE", "PERIOD_REOPEN",
   "TAX_READ", "TAX_MANAGE",
   "EQUITY_READ", "EQUITY_MANAGE",
   "BUDGET_READ", "BUDGET_CREATE", "BUDGET_UPDATE",
@@ -112,7 +112,7 @@ const FALLBACK_PERMISSIONS: Record<string, PermCode[]> = {
     "BANK_READ", "BANK_CREATE", "BANK_UPDATE", "BANK_RECONCILE", "BANK_TRANSFER",
     "COA_READ", "COA_CREATE", "COA_UPDATE", "COA_DELETE",
     "JOURNAL_READ", "JOURNAL_CREATE", "JOURNAL_UPDATE", "JOURNAL_DELETE",
-    "PERIOD_READ", "PERIOD_MANAGE",
+    "PERIOD_READ", "PERIOD_MANAGE", "PERIOD_CLOSE", "PERIOD_REOPEN",
     "TAX_READ", "TAX_MANAGE",
     "EQUITY_READ", "EQUITY_MANAGE",
     "BUDGET_READ", "BUDGET_CREATE", "BUDGET_UPDATE",
@@ -154,7 +154,7 @@ const FALLBACK_PERMISSIONS: Record<string, PermCode[]> = {
     "BANK_READ", "BANK_CREATE", "BANK_UPDATE", "BANK_RECONCILE", "BANK_TRANSFER",
     "COA_READ", "COA_CREATE", "COA_UPDATE", "COA_DELETE",
     "JOURNAL_READ", "JOURNAL_CREATE", "JOURNAL_UPDATE", "JOURNAL_DELETE",
-    "PERIOD_READ", "PERIOD_MANAGE",
+    "PERIOD_READ", "PERIOD_MANAGE", "PERIOD_CLOSE", "PERIOD_REOPEN",
     "TAX_READ", "TAX_MANAGE",
     "EQUITY_READ", "EQUITY_MANAGE",
     "BUDGET_READ", "BUDGET_CREATE", "BUDGET_UPDATE",
@@ -192,7 +192,7 @@ const FALLBACK_PERMISSIONS: Record<string, PermCode[]> = {
     "BANK_READ", "BANK_CREATE", "BANK_UPDATE", "BANK_RECONCILE", "BANK_TRANSFER",
     "COA_READ", "COA_CREATE", "COA_UPDATE", "COA_DELETE",
     "JOURNAL_READ", "JOURNAL_CREATE", "JOURNAL_UPDATE", "JOURNAL_DELETE",
-    "PERIOD_READ", "PERIOD_MANAGE",
+    "PERIOD_READ", "PERIOD_MANAGE", "PERIOD_CLOSE", "PERIOD_REOPEN",
     "TAX_READ", "TAX_MANAGE",
     "EQUITY_READ", "EQUITY_MANAGE",
     "BUDGET_READ", "BUDGET_CREATE", "BUDGET_UPDATE",
@@ -256,6 +256,58 @@ const FALLBACK_PERMISSIONS: Record<string, PermCode[]> = {
     "SUBSCRIPTION_READ",
     'CONTRACTOR_READ', 
     'COMMISSION_READ',
+  ],
+  // ★★★ FIX (BUG-020): HOD was missing entirely — if the DB permission
+  // lookup failed, any user assigned this role received an EMPTY
+  // permission set (locked out of everything), not just reduced access.
+  // Scoped per spec Appendix A "HOD" column: department-scoped read plus
+  // expense/budget approval within configured limits. No bank, journal,
+  // payroll, owner, or period-close access.
+  HOD: [
+    "EXPENSE_READ", "EXPENSE_CREATE",
+    "APPROVE_EXPENSE",
+    "INVOICE_READ",
+    "VENDOR_BILL_READ",
+    "BUDGET_READ",
+    "APPROVE_BUDGET",
+    "PROJECT_READ",
+    "REPORT_READ",
+    "SUBSCRIPTION_READ",
+    "CONTRACTOR_READ",
+    "COMMISSION_READ",
+  ],
+  // ★★★ FIX (BUG-020): AUDITOR was missing entirely — same lockout risk
+  // as HOD above. Scoped per spec Appendix A "Auditor" column: read-only
+  // across finance, no create/edit/approve/post rights anywhere (spec
+  // 7.1: "No create, edit, approve, or post").
+  AUDITOR: [
+    "INCOME_READ",
+    "EXPENSE_READ",
+    "INVOICE_READ",
+    "PAYMENT_RECEIPT_READ",
+    "CREDIT_NOTE_READ",
+    "VENDOR_READ",
+    "VENDOR_BILL_READ",
+    "VENDOR_PAYMENT_READ",
+    "BANK_READ",
+    "COA_READ",
+    "JOURNAL_READ",
+    "PERIOD_READ",
+    "TAX_READ",
+    "EQUITY_READ",
+    "BUDGET_READ",
+    "PROJECT_READ",
+    "REPORT_READ",
+    "SETTINGS_READ",
+    "ADMIN_AUDIT",
+    "CLIENT_READ",
+    "GL_READ",
+    "FIXED_ASSET_READ", "FIXED_ASSET_DEPR_READ",
+    "FIXED_ASSET_VERIFY_READ", "FIXED_ASSET_CATEGORY_READ",
+    "PAYROLL_READ",
+    "SUBSCRIPTION_READ",
+    "CONTRACTOR_READ",
+    "COMMISSION_READ",
   ],
   TECHNICAL_ADMIN: [
     "SETTINGS_READ",

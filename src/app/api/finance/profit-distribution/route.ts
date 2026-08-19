@@ -24,9 +24,18 @@ function getData<T = any>(res: any): T | null {
 //
 // BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
 //   with single atomic RPC call using correct signature.
+//
+// PERMISSION FIX (BUG-010): This route previously called requirePermission()
+// with 'PROFIT_DISTRIBUTION_UPDATE' / 'PROFIT_DISTRIBUTION_READ' — codes that
+// were never seeded anywhere in core.permissions. That meant requirePermission()
+// always fell through to the deny branch for every non-CEO role, silently
+// locking out Finance Head/Accountant regardless of their actual configured
+// rights. Distributions are an equity action per spec Appendix A ("Reserve/
+// distributions" row), so this now uses the seeded EQUITY_MANAGE / EQUITY_READ
+// codes instead.
  
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('PROFIT_DISTRIBUTION_UPDATE');
+  const auth = await requirePermission('EQUITY_MANAGE');
   if (auth instanceof NextResponse) return auth;
   // H3 FIX: Enforce MFA for financial posting
   const mfaCheck = await enforceMFA(auth);
@@ -268,7 +277,7 @@ export async function POST(req: NextRequest) {
 // Allows CEO/Finance to preview WHT before posting
  
 export async function GET(req: NextRequest) {
-  const auth = await requirePermission('PROFIT_DISTRIBUTION_READ');
+  const auth = await requirePermission('EQUITY_READ');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
  
@@ -329,7 +338,7 @@ export async function GET(req: NextRequest) {
       },
       journal_preview: {
         description: `DR Retained Earnings ${totalGross} | CR Dividend Payable ${totalNet} | CR WHT Payable ${totalWHT}`,
-        balanced: Math.abs(totalGross - (totalNet + totalWHT)) < 0.02,
+        balanced: Math.abs(totalGross - (totalNet + totalWHT)) < 0.01,
       },
     });
   } catch (err: any) {

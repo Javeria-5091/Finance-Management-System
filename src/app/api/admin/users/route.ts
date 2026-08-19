@@ -24,7 +24,7 @@ function sanitizeIlikeTerm(raw: string): string {
  
 // ─── GET: List all users with roles and permissions ───
 export async function GET(req: NextRequest) {
-  const auth = await requirePermission('ADMIN_USER_MANAGE');
+  const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
  
@@ -86,7 +86,7 @@ export async function GET(req: NextRequest) {
  
 // ─── POST: Create a new user or update user role ───
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('ADMIN_USER_MANAGE');
+  const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
  
@@ -318,7 +318,7 @@ export async function POST(req: NextRequest) {
  
 // ─── PATCH: Update user profile or toggle active status ───
 export async function PATCH(req: NextRequest) {
-  const auth = await requirePermission('ADMIN_USER_MANAGE');
+  const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
  

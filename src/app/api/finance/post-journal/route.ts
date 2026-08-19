@@ -28,6 +28,11 @@ function getData<T = any>(res: any): T | null {
 //   NOTE: A cleaner long-term fix would be to create a separate DB function:
 //     finance.post_existing_journal(p_journal_id UUID, p_posted_by UUID)
 //   that only handles the GL posting step for an already-created journal.
+//
+//   BUG-006 VERIFICATION: re-checked this pass — the RPC call (step 8) runs and
+//   is checked for success BEFORE the old draft journal/lines are deleted (further
+//   down). This is already the safe create-then-delete order, not delete-then-create.
+//   No change made here.
  
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('APPROVE_JOURNAL');
@@ -97,7 +102,7 @@ export async function POST(req: NextRequest) {
     const totalDebit = journalLines.reduce((sum: number, l: any) => sum + (Number(l.debit_amount) || 0), 0);
     const totalCredit = journalLines.reduce((sum: number, l: any) => sum + (Number(l.credit_amount) || 0), 0);
  
-    if (Math.abs(totalDebit - totalCredit) > 0.02) {
+    if (Math.abs(totalDebit - totalCredit) > 0.01) {
       return NextResponse.json({
         error: `Journal entry is unbalanced. Debit: ${totalDebit}, Credit: ${totalCredit}`,
         total_debit: totalDebit,
@@ -270,4 +275,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
- 

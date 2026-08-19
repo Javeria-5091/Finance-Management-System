@@ -14,9 +14,23 @@ function getData<T = any>(res: any): T | null {
 // Spec 4.1 FIX: Retained Earnings is CREDITED for profit (not DEBITED)
 // BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
 //   with single atomic RPC call using correct signature.
+//
+// PERMISSION FIX (BUG-010): 'YEAR_END_CLOSE' / 'YEAR_END_CLOSE_READ' were never
+// seeded in core.permissions, so requirePermission() always denied non-CEO
+// roles here. Spec §7.3 groups "Period reopen" under Finance Head + CEO and
+// the seeded catalog has PERIOD_CLOSE / PERIOD_READ — used here instead.
+//
+// KNOWN REMAINING ISSUE (BUG-026, not fixed in this pass): the closing entry
+// below is posted to `periods[periods.length - 1].id` (the last period of the
+// fiscal year), but this route requires every period to already be
+// HARD_CLOSED before it will proceed. Posting to an already-hard-closed
+// period will be rejected by the period-lock trigger. This needs a proper
+// "closing period" concept (e.g. a dedicated adjustment period, or a
+// closing-entry exception to the period-lock trigger) rather than a one-line
+// fix, so it is intentionally left for a follow-up pass.
  
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('YEAR_END_CLOSE');
+  const auth = await requirePermission('PERIOD_CLOSE');
   if (auth instanceof NextResponse) return auth;
   // H3 FIX: Enforce MFA for financial posting
   const mfaCheck = await enforceMFA(auth);
@@ -107,7 +121,7 @@ export async function POST(req: NextRequest) {
     const netIncome = totalRevenue - totalExpenses; // positive = profit, negative = loss
  
     // If zero profit/loss, nothing to close
-    if (Math.abs(netIncome) < 0.02) {
+    if (Math.abs(netIncome) < 0.01) {
       return NextResponse.json({
         success: true,
         message: 'Net income is zero. No closing entry required.',
@@ -184,7 +198,7 @@ export async function POST(req: NextRequest) {
     // Balance check
     const totalDebit = rpcLines.reduce((s: number, l: any) => s + (Number(l.debit_amount) || 0), 0);
     const totalCredit = rpcLines.reduce((s: number, l: any) => s + (Number(l.credit_amount) || 0), 0);
-    if (Math.abs(totalDebit - totalCredit) > 0.02) {
+    if (Math.abs(totalDebit - totalCredit) > 0.01) {
       return NextResponse.json({
         error: `Closing entry is unbalanced! Debit: ${totalDebit}, Credit: ${totalCredit}`,
         total_debit: totalDebit,
@@ -194,7 +208,7 @@ export async function POST(req: NextRequest) {
  
     // ── 7. Get reference number ──
     const { data: refData } = await supabase.rpc('get_next_number', {
-      p_type: 'YEAR_END_CLOSE',
+      p_type: 'PERIOD_CLOSE',
     });
     const reference = refData || `YEC-${fiscal_year_id.slice(0, 8)}`;
  
@@ -207,7 +221,7 @@ export async function POST(req: NextRequest) {
       p_lines: JSON.stringify(rpcLines),
       p_currency: 'PKR',
       p_exchange_rate: 1,
-      p_source_type: 'YEAR_END_CLOSE',
+      p_source_type: 'PERIOD_CLOSE',
       p_source_id: fiscal_year_id,
     });
  
@@ -287,7 +301,7 @@ export async function POST(req: NextRequest) {
       retained_earnings_side: netIncome >= 0 ? 'CREDIT' : 'DEBIT',
       total_debit: totalDebit,
       total_credit: totalCredit,
-      balanced: Math.abs(totalDebit - totalCredit) < 0.02,
+      balanced: Math.abs(totalDebit - totalCredit) < 0.01,
       message: `Year-end close completed: ${netIncome >= 0 ? 'Profit' : 'Loss'} of PKR ${Math.abs(netIncome).toLocaleString()} transferred to Retained Earnings`,
     });
   } catch (err: any) {
@@ -298,7 +312,7 @@ export async function POST(req: NextRequest) {
 // ─── GET: Year-End Close Preview ────────────────────────────────────────────────
  
 export async function GET(req: NextRequest) {
-  const auth = await requirePermission('YEAR_END_CLOSE_READ');
+  const auth = await requirePermission('PERIOD_READ');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
  
@@ -356,5 +370,3 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
- 
-

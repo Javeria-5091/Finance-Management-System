@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
         totalCredit += Math.abs(Number(row.credit_amount) || 0);
       }
  
-      if (Math.abs(totalDebit - totalCredit) > 0.02) {
+      if (Math.abs(totalDebit - totalCredit) > 0.01) {
         return NextResponse.json({ error: `Opening balances must balance. Total Debit: ${totalDebit.toFixed(2)}, Total Credit: ${totalCredit.toFixed(2)}, Difference: ${(totalDebit - totalCredit).toFixed(2)}` }, { status: 400 });
       }
  
@@ -172,7 +172,7 @@ export async function POST(req: NextRequest) {
         totalCredit += c;
         validated.push({ ...row, valid: !!(row.account_code && (d > 0 || c > 0)) });
       }
-      const balanced = Math.abs(totalDebit - totalCredit) < 0.02;
+      const balanced = Math.abs(totalDebit - totalCredit) < 0.01;
       return NextResponse.json({ rows: validated, total_debit: totalDebit, total_credit: totalCredit, balanced, difference: totalDebit - totalCredit });
     }
  

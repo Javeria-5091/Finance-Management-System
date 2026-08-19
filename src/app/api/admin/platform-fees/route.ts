@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
  
 // ─── POST: Create, update, or toggle platform fee rules ───
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('SETTINGS_UPDATE');
+  const auth = await requirePermission('SETTINGS_MANAGE');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
  
@@ -171,4 +171,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
