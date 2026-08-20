@@ -3,17 +3,17 @@ import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
 import { paymentReceiptSchema, validateBody, sanitizeSearch } from '@/lib/validations';
- 
+
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
- 
+
 // ─── GET: List payment receipts ───
 export async function GET(req: NextRequest) {
   const auth = await requirePermission('INVOICE_READ');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
- 
+
   try {
     const { searchParams } = new URL(req.url);
     const page = parseInt(searchParams.get('page') || '1');
@@ -21,12 +21,12 @@ export async function GET(req: NextRequest) {
     const search = searchParams.get('search') || '';
     const clientId = searchParams.get('client_id') || '';
     const status = searchParams.get('status') || '';
- 
+
     let query = supabase
       .from('payment_receipts')
       .select('*, client:clients(id, name, client_code), allocations:payment_allocations(id, invoice_id, amount)', { count: 'exact' })
       .eq('organization_id', auth.orgId);
- 
+
     if (search) {
       const safeSearch = sanitizeSearch(search);
       query = query.or(`receipt_number.ilike.%${safeSearch}%,reference.ilike.%${safeSearch}%`);
@@ -37,24 +37,24 @@ export async function GET(req: NextRequest) {
     if (status) {
       query = query.eq('status', status);
     }
- 
+
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
- 
+
     const { data, error, count } = await query
       .order('received_date', { ascending: false })
       .range(from, to);
- 
+
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
- 
+
     return NextResponse.json({ data, total: count || 0, page, pageSize });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
- 
+
 // ─── POST: Record a payment receipt and auto-post to GL ───
 // Spec: Payment received → DR Bank/Cash/Wallet, CR Accounts Receivable
 // BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
   const mfaCheck = await enforceMFA(auth);
   if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
- 
+
   try {
     const rawBody = await req.json();
     const validation = validateBody(paymentReceiptSchema, rawBody);
@@ -76,9 +76,9 @@ export async function POST(req: NextRequest) {
       received_date, payment_method, reference,
       financial_account_id, notes, allocations,
     } = validation.data;
- 
+
     const paymentAmount = Number(amount);
- 
+
     // Validate client exists
     const client = getData(await supabase
       .from('clients')
@@ -86,26 +86,26 @@ export async function POST(req: NextRequest) {
       .eq('id', client_id)
       .eq('organization_id', auth.orgId)
       .single());
- 
+
     if (!client) {
       return NextResponse.json({ error: 'Client not found' }, { status: 404 });
     }
- 
+
     // Validate financial account exists
     const finAccount = getData(await supabase
       .from('finance.financial_accounts')
       .select('id, name, account_type, currency')
       .eq('id', financial_account_id)
       .single());
- 
+
     if (!finAccount) {
       return NextResponse.json({ error: 'Financial account not found' }, { status: 404 });
     }
- 
+
     // Generate receipt number
     const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'PMT-RC' });
     const receiptNumber = numData || `PMT-RC-${Date.now().toString().slice(-6)}`;
- 
+
     // Get open period
     const period = getData(await supabase
       .from('finance.accounting_periods')
@@ -114,22 +114,27 @@ export async function POST(req: NextRequest) {
       .order('start_date', { ascending: false })
       .limit(1)
       .single());
- 
+
     if (!period) {
       return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
     }
- 
+
     // Get receivable account
+    // BUG-014 FIX: `.like('code', '12%').limit(1).single()` with no
+    // ORDER BY could non-deterministically resolve to the 1200
+    // PARENT/SUMMARY account instead of the real 1210 "Client Receivables"
+    // control account. Resolve by exact seeded code instead.
     const receivableAccount = getData(await supabase
       .from('finance.chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'ASSET')
       .eq('is_active', true)
-      .like('code', '12%')
-      .limit(1)
-      .single());
- 
-    // Get bank/cash account from COA mapped to this financial account
+      .eq('code', '1210')
+      .maybeSingle());
+
+    // Get bank/cash account from COA mapped to this financial account.
+    // This primary lookup was already deterministic (FK by
+    // finAccount.coa_account_id) -- left unchanged.
     const bankCoaAccount = getData(await supabase
       .from('finance.chart_of_accounts')
       .select('id, code, name')
@@ -137,22 +142,32 @@ export async function POST(req: NextRequest) {
       .eq('is_active', true)
       .eq('id', finAccount.coa_account_id || '')
       .maybeSingle());
- 
-    const debitAccountId = bankCoaAccount?.id || getData(await supabase
+
+    // BUG-014 FIX: this fallback (used only when the financial account has
+    // no coa_account_id configured) previously did an unordered fuzzy
+    // ILIKE match, which could resolve to a different bank/cash sub-account
+    // than intended and would silently pick a different one on a re-run if
+    // row order ever changed. If no FK mapping exists, fall back to the
+    // deterministic default cash/bank control account (code 1110, "Bank
+    // Account - PKR") rather than guessing from the financial account's
+    // display name; .order('code') on the name-based attempt keeps it
+    // deterministic if that path is ever reached first.
+    const fallbackBankAccount = getData(await supabase
       .from('finance.chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'ASSET')
       .eq('is_active', true)
-      .ilike('name', `%${finAccount.name || 'bank'}%`)
-      .limit(1)
-      .maybeSingle())?.id;
- 
+      .eq('code', '1110')
+      .maybeSingle());
+
+    const debitAccountId = bankCoaAccount?.id || fallbackBankAccount?.id;
+
     if (!receivableAccount || !debitAccountId) {
       return NextResponse.json({
-        error: 'Required COA accounts not found. Need ASSET (Receivable) and ASSET (Bank/Cash) accounts.',
+        error: 'Required COA accounts not found. Need Accounts Receivable (code 1210) and a Bank/Cash account (either mapped via financial_accounts.coa_account_id, or the default code 1110 "Bank Account - PKR").',
       }, { status: 400 });
     }
- 
+
     // Process allocations if provided
     let totalAllocated = 0;
     const allocationRecords: any[] = [];
@@ -164,11 +179,11 @@ export async function POST(req: NextRequest) {
           .eq('id', alloc.invoice_id)
           .eq('organization_id', auth.orgId)
           .single());
- 
+
         if (!invoice) {
           return NextResponse.json({ error: `Invoice ${alloc.invoice_id} not found` }, { status: 404 });
         }
- 
+
         const allocAmount = Number(alloc.amount);
         const outstanding = Number(invoice.total_amount) - Number(invoice.amount_paid || 0);
         if (allocAmount <= 0 || allocAmount > outstanding) {
@@ -176,7 +191,7 @@ export async function POST(req: NextRequest) {
             error: `Allocation amount ${allocAmount} exceeds outstanding balance ${outstanding} for invoice ${invoice.invoice_number}`,
           }, { status: 400 });
         }
- 
+
         totalAllocated += allocAmount;
         allocationRecords.push({
           invoice_id: alloc.invoice_id,
@@ -184,13 +199,13 @@ export async function POST(req: NextRequest) {
         });
       }
     }
- 
+
     if (totalAllocated > paymentAmount) {
       return NextResponse.json({
         error: `Total allocations (${totalAllocated}) exceed payment amount (${paymentAmount})`,
       }, { status: 400 });
     }
- 
+
     // BUG-001 FIX: Build journal lines for RPC (no manual header/line inserts)
     // Payment Receipt: DR Bank/Cash, CR Receivable
     const rpcLines = [
@@ -207,9 +222,9 @@ export async function POST(req: NextRequest) {
         description: `Receivable reduced: Payment from ${client.name} - ${receiptNumber}`,
       },
     ];
- 
+
     // BUG-001 FIX: Single atomic RPC call with CORRECT signature
-    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: `Payment Receipt: ${receiptNumber} from ${client.name}`,
       p_transaction_date: received_date || new Date().toISOString().split('T')[0],
       p_period_id: period.id,
@@ -219,11 +234,11 @@ export async function POST(req: NextRequest) {
       p_source_type: 'PAYMENT_RECEIPT',
       p_source_id: receiptNumber,
     });
- 
+
     if (postErr || !journalId) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
- 
+
     // Fetch the created journal to get reference
     const journal = getData(await supabase
       .from('finance.journal_entries')
@@ -235,7 +250,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
     }
     const glReference = journal.reference || `JE-PMTR-${journalId}`;
- 
+
     // Create payment receipt record
     const { data: receipt, error: receiptErr } = await supabase
       .from('payment_receipts')
@@ -259,11 +274,11 @@ export async function POST(req: NextRequest) {
       })
       .select()
       .single();
- 
+
     if (receiptErr) {
       console.error('Payment receipt creation failed:', receiptErr.message);
     }
- 
+
     // Create allocation records and update invoice amounts
     if (allocationRecords.length > 0 && receipt) {
       for (const alloc of allocationRecords) {
@@ -275,19 +290,19 @@ export async function POST(req: NextRequest) {
           allocated_by: auth.userId,
           organization_id: auth.orgId,
         });
- 
+
         // Update invoice amount_paid
         const invoice = getData(await supabase
           .from('invoices')
           .select('id, total_amount, amount_paid')
           .eq('id', alloc.invoice_id)
           .single());
- 
+
         if (invoice) {
           const newPaid = Number(invoice.amount_paid || 0) + alloc.amount;
           const total = Number(invoice.total_amount);
           const newStatus = newPaid >= total ? 'PAID' : 'PARTIALLY_PAID';
- 
+
           await supabase.from('invoices').update({
             amount_paid: newPaid,
             status: newStatus,
@@ -296,7 +311,10 @@ export async function POST(req: NextRequest) {
         }
       }
     }
- 
+
+    // BUG-023 FIX: surface a failed audit write instead of only
+    // console-logging it (Spec 8.1).
+    let auditLogFailed = false;
     try {
       await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
@@ -319,9 +337,10 @@ export async function POST(req: NextRequest) {
         p_related_journal_id: journal.id,
       });
     } catch (auditErr: any) {
-      console.error('Audit log failed:', auditErr);
+      console.error('Audit log failed for payment receipt:', auditErr);
+      auditLogFailed = true;
     }
- 
+
     return NextResponse.json({
       success: true,
       receipt,
@@ -329,6 +348,7 @@ export async function POST(req: NextRequest) {
       glReference,
       allocations: allocationRecords.length,
       message: `Payment receipt ${receiptNumber} recorded and posted to GL`,
+      audit_log_warning: auditLogFailed ? 'Payment recorded but the audit log entry failed to write. Please notify an administrator.' : undefined,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
