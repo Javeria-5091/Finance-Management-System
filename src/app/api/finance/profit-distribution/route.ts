@@ -153,7 +153,7 @@ export async function POST(req: NextRequest) {
  
     // 6. BUG-001 FIX: Single atomic RPC call with CORRECT signature
     //    (replaces: manual header insert + manual lines insert + wrong RPC)
-    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: description || `Profit Distribution: ${distribution_id.slice(0, 8)}`,
       p_transaction_date: distribution_date || new Date().toISOString().split('T')[0],
       p_period_id: period.id,
@@ -223,6 +223,9 @@ export async function POST(req: NextRequest) {
     );
  
     // 10. Audit log
+    // BUG-023 FIX: surface a failed audit write instead of only
+    // console-logging it (Spec 8.1).
+    let auditLogFailed = false;
     try {
       await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,

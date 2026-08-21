@@ -1,59 +1,14 @@
 -- =============================================================================
 -- Migration P1_061: AI Reporting-View Grants & Policy Documents Table
 -- (supports Remediation ISS-07 / ISS-07b)
+-- CORRECTED: financial_account_id moved to the end of the unreconciled_lines
+-- column list. The original ordering (inserted before financial_account_name)
+-- fails with "cannot change name of view column" -- confirmed by direct
+-- execution against a restored copy of this schema. PostgreSQL's
+-- CREATE OR REPLACE VIEW only permits appending new columns, never inserting
+-- them mid-list, since every column after the insertion point is implicitly
+-- renumbered. Everything else in this file is unchanged from the original.
 -- =============================================================================
--- PURPOSE
---   ISS-07/07b fixes budget-cash-alerts, fiscal-close-assistant, policy-qa,
---   and reconciliation-suggestions to call execute_ai_readonly_query() with
---   the correct parameters and add SQL-safety/permission checks (see the
---   updated route files). Fixing the call signature alone is NOT sufficient:
---   execute_ai_readonly_query() runs the query under a dedicated,
---   minimal-privilege `ai_readonly_role` (SET LOCAL ROLE), and that role
---   currently only has SELECT granted on THREE reporting views
---   (reporting.v_cash_position, reporting.v_project_profitability,
---   reporting.v_tax_computation_summary -- the ones used by chat/route.ts and
---   tax-assistant/route.ts). The other four views these four routes need
---   (reporting.budget_vs_actual, reporting.payable_aging,
---   reporting.receivable_aging, reporting.reconciliation_summary,
---   reporting.unreconciled_lines, reporting.general_ledger) have NO grant to
---   ai_readonly_role at all -- so even after the call-signature fix, these
---   routes would still fail at runtime with "permission denied" /
---   insufficient_privilege. This was found during this remediation pass by
---   reading execute_ai_readonly_query()'s body and the existing GRANT
---   statements directly; it is a necessary corollary of ISS-07, not a
---   separately-numbered audit finding.
---
---   Also fixes a real column gap in reporting.unreconciled_lines: the
---   reconciliation-suggestions route needs to filter unreconciled statement
---   lines by financial_account_id, but the view only exposed
---   financial_account_name (not the id), making it impossible to filter by
---   account without a fragile name match. This adds the id column
---   (additive -- does not remove or rename any existing column, so it cannot
---   break any existing consumer of this view).
---
---   Finally, creates public.policy_documents, which
---   src/app/api/ai/policy-qa/route.ts already queries by name but which does
---   not exist anywhere in schema.sql. This is a genuinely MISSING feature,
---   not a bug in the strict sense -- see the remediation matrix and the
---   comment on the route file for the scope note. It is created here as a
---   minimal, additive, low-risk table (standard org-scoped RLS, no
---   interaction with any posting/ledger logic) because: (a) the spec
---   explicitly requires "Policy/document Q&A" as a P1 AI capability (9.1,
---   Appendix B "search_finance_policies"), and (b) without it, policy-qa is
---   permanently unreachable regardless of any application-code fix. No
---   document-ingestion UI is built here -- populating this table is a
---   separate, explicitly out-of-scope product decision (see remediation
---   matrix).
--- =============================================================================
-
--- -----------------------------------------------------------------------------
--- STEP 1: Grant ai_readonly_role SELECT on the additional reporting views
--- needed by budget-cash-alerts, fiscal-close-assistant, and
--- reconciliation-suggestions. All of these are already security_invoker
--- views (confirmed in schema.sql) restricted to the `reporting` schema, i.e.
--- exactly the controlled surface spec 9.5 requires the AI gateway to be
--- limited to.
--- -----------------------------------------------------------------------------
 
 GRANT SELECT ON TABLE "reporting"."budget_vs_actual" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."payable_aging" TO "ai_readonly_role";
@@ -62,12 +17,7 @@ GRANT SELECT ON TABLE "reporting"."reconciliation_summary" TO "ai_readonly_role"
 GRANT SELECT ON TABLE "reporting"."unreconciled_lines" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."general_ledger" TO "ai_readonly_role";
 
--- -----------------------------------------------------------------------------
--- STEP 2: reporting.unreconciled_lines — add financial_account_id (additive;
--- existing columns are untouched, so no existing consumer of this view can
--- break).
--- -----------------------------------------------------------------------------
-
+-- CORRECTED VIEW: fa.id AS financial_account_id appended at the end.
 CREATE OR REPLACE VIEW "reporting"."unreconciled_lines" WITH ("security_invoker"='true') AS
  SELECT "sl"."id",
     "sl"."line_number",
@@ -77,11 +27,11 @@ CREATE OR REPLACE VIEW "reporting"."unreconciled_lines" WITH ("security_invoker"
     "sl"."counterparty",
     "sl"."amount",
     "sl"."balance_after",
-    "fa"."id" AS "financial_account_id",
     "fa"."account_name" AS "financial_account_name",
     "fa"."institution_name",
     "fa"."currency",
-    "fa"."masked_identifier"
+    "fa"."masked_identifier",
+    "fa"."id" AS "financial_account_id"
    FROM (("finance"."statement_lines" "sl"
      JOIN "finance"."bank_statements" "bs" ON (("bs"."id" = "sl"."bank_statement_id")))
      JOIN "finance"."financial_accounts" "fa" ON (("fa"."id" = "bs"."financial_account_id")))
@@ -91,12 +41,12 @@ CREATE OR REPLACE VIEW "reporting"."unreconciled_lines" WITH ("security_invoker"
 ALTER VIEW "reporting"."unreconciled_lines" OWNER TO "postgres";
 
 COMMENT ON VIEW "reporting"."unreconciled_lines" IS
-  'P1_061: added financial_account_id (previously only financial_account_name was exposed, which made filtering a specific account from application code unreliable). Additive change only -- no existing column removed or renamed.';
+  'P1_061 (corrected): added financial_account_id, appended as the last column so CREATE OR REPLACE VIEW does not attempt to rename/renumber any existing column. No existing column removed, renamed, or reordered.';
 
 -- -----------------------------------------------------------------------------
--- STEP 3: public.policy_documents — minimal, additive, org-scoped table
--- backing the "search_finance_policies" AI tool (spec 9.1/Appendix B) and the
--- existing (previously non-functional) policy-qa route.
+-- public.policy_documents -- minimal, additive, org-scoped table backing the
+-- "search_finance_policies" AI tool (spec 9.1/Appendix B) and the previously
+-- non-functional policy-qa route.
 -- -----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS "public"."policy_documents" (
@@ -124,12 +74,6 @@ CREATE INDEX IF NOT EXISTS "idx_policy_documents_active" ON "public"."policy_doc
 
 ALTER TABLE "public"."policy_documents" ENABLE ROW LEVEL SECURITY;
 
--- Read: any authenticated member of the organization may read active policy
--- documents (matches spec 9.1's framing of policy Q&A as broadly available,
--- "permission-aware retrieval" being about which documents/ACLs apply, not a
--- privileged-roles-only feature). Write: Finance Head/CEO only, matching how
--- other organization-wide configuration/reference tables in this schema are
--- gated.
 CREATE POLICY "policy_documents_select_org_scoped" ON "public"."policy_documents"
   FOR SELECT TO "authenticated"
   USING (core.same_org(organization_id));
@@ -155,11 +99,6 @@ CREATE POLICY "policy_documents_service_role" ON "public"."policy_documents"
 GRANT SELECT ON TABLE "public"."policy_documents" TO "authenticated", "service_role";
 GRANT INSERT, UPDATE, DELETE ON TABLE "public"."policy_documents" TO "authenticated", "service_role";
 
--- ai_readonly_role: SELECT only, so the policy-qa route's read-only AI query
--- can reach this table via execute_ai_readonly_query() the same way it
--- reaches every other AI-queryable table. execute_ai_readonly_query() always
--- wraps the caller's query with "WHERE organization_id = <caller's org>",
--- so this grant does not, by itself, allow cross-organization reads.
 GRANT SELECT ON TABLE "public"."policy_documents" TO "ai_readonly_role";
 
 CREATE OR REPLACE TRIGGER "policy_documents_set_updated_at"
@@ -167,5 +106,5 @@ CREATE OR REPLACE TRIGGER "policy_documents_set_updated_at"
   FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
 
 -- =============================================================================
--- END P1_061
+-- END P1_061 (corrected)
 -- =============================================================================
