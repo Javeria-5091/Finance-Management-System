@@ -1052,21 +1052,28 @@ ALTER FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" 
 
 CREATE OR REPLACE FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
     AS $$
 DECLARE
   v_status TEXT;
   v_source_type TEXT;
+  v_org_id UUID;
 BEGIN
   IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
     RAISE EXCEPTION 'Only Finance Head or Accountant may approve and post a journal entry';
   END IF;
 
-  SELECT status, source_type INTO v_status, v_source_type
+  SELECT status, source_type, organization_id INTO v_status, v_source_type, v_org_id
   FROM finance.journal_entries WHERE id = p_journal_id FOR UPDATE;
 
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Journal entry % not found', p_journal_id;
+  END IF;
+
+  -- P1_060 SECURITY FIX (ISS-02, Critical): verify the journal entry belongs
+  -- to the caller's own organization before approving/posting it.
+  IF NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: journal entry % does not belong to your organization', p_journal_id;
   END IF;
 
   IF v_status <> 'DRAFT' THEN
@@ -1101,7 +1108,7 @@ $$;
 ALTER FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") IS 'Added migration 029. Completes the maker-checker approval + posting step for a MANUAL journal left in DRAFT by finance.post_journal_entry(). Enforces creator <> approver via trg_maker_checker.';
+COMMENT ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") IS 'P1_060 SECURITY FIX (ISS-02, Critical): added organization-match check (this function already had the correct Finance Head/Accountant role check from migration 029; only the organization-scoping was missing). Completes the maker-checker approval + posting step for a MANUAL journal left in DRAFT by finance.post_journal_entry(). Enforces creator <> approver via trg_maker_checker.';
 
 
 
@@ -1600,20 +1607,32 @@ CREATE OR REPLACE FUNCTION "finance"."enforce_maker_checker"() RETURNS "trigger"
 DECLARE
   v_creator_id UUID;
   v_approver_id UUID;
+  v_second_approver_id UUID;
   v_table TEXT;
   v_schema TEXT;
 BEGIN
   v_table := TG_TABLE_NAME;
   v_schema := TG_TABLE_SCHEMA;
-  
+
   -- Get creator and approver IDs based on table
   -- public.expenses, public.incomes, public.invoices use `user_id` as creator
   -- finance.vendor_bills, finance.journal_entries use `created_by` as creator
+  -- P1_060 (ISS-09, Medium): finance.bank_transfers and
+  -- finance.profit_distributions added -- both are spec-flagged (5.8, 5.13)
+  -- as requiring dual/maker-checker approval and were previously not wired
+  -- to this trigger at all.
   IF v_table IN ('expenses', 'incomes', 'invoices') THEN
     v_creator_id := COALESCE(OLD.user_id, NEW.user_id);
     v_approver_id := NEW.approved_by;
   ELSIF v_table IN ('vendor_bills', 'journal_entries') THEN
     v_creator_id := COALESCE(OLD.created_by, NEW.created_by);
+    v_approver_id := NEW.approved_by;
+  ELSIF v_table = 'bank_transfers' THEN
+    v_creator_id := COALESCE(OLD.created_by, NEW.created_by);
+    v_approver_id := NEW.approved_by;
+    v_second_approver_id := NEW.second_approved_by;
+  ELSIF v_table = 'profit_distributions' THEN
+    v_creator_id := COALESCE(OLD.declared_by, NEW.declared_by);
     v_approver_id := NEW.approved_by;
   ELSE
     RETURN NEW;
@@ -1621,8 +1640,21 @@ BEGIN
 
   -- Enforce: creator cannot be the approver
   IF v_approver_id IS NOT NULL AND v_creator_id IS NOT NULL AND v_approver_id = v_creator_id THEN
-    RAISE EXCEPTION 'MAKER_CHECKER_VIOLATION: Creator (user %) cannot approve their own record in %', 
+    RAISE EXCEPTION 'MAKER_CHECKER_VIOLATION: Creator (user %) cannot approve their own record in %',
       v_creator_id, v_table;
+  END IF;
+
+  -- P1_060 (ISS-09): bank_transfers additionally supports a documented
+  -- second/dual approver (second_approved_by). Enforce that the second
+  -- approver is distinct from both the creator and the first approver, so
+  -- "dual approval" cannot be satisfied by the same person twice.
+  IF v_table = 'bank_transfers' AND v_second_approver_id IS NOT NULL THEN
+    IF v_creator_id IS NOT NULL AND v_second_approver_id = v_creator_id THEN
+      RAISE EXCEPTION 'MAKER_CHECKER_VIOLATION: Creator (user %) cannot be the second approver on a bank transfer', v_creator_id;
+    END IF;
+    IF v_approver_id IS NOT NULL AND v_second_approver_id = v_approver_id THEN
+      RAISE EXCEPTION 'MAKER_CHECKER_VIOLATION: The first and second approver on a bank transfer must be different users (user %)', v_approver_id;
+    END IF;
   END IF;
 
   RETURN NEW;
@@ -1631,6 +1663,10 @@ $$;
 
 
 ALTER FUNCTION "finance"."enforce_maker_checker"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."enforce_maker_checker"() IS 'P1_060 SECURITY FIX (ISS-09, Medium): extended to cover finance.bank_transfers (including dual/second-approver distinctness) and finance.profit_distributions, both spec-flagged (5.8, 5.13) as requiring maker-checker/dual approval and previously not wired to this trigger at all. Original expenses/incomes/invoices/vendor_bills/journal_entries behavior is unchanged.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."enforce_postable_account"() RETURNS "trigger"
@@ -1665,6 +1701,48 @@ $$;
 
 
 ALTER FUNCTION "finance"."enforce_postable_account"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."enforce_transition_year_period_13"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE
+  v_is_transition boolean;
+  v_approved_by uuid;
+  v_approved_at timestamptz;
+BEGIN
+  IF NEW.period_number <> 13 THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT is_transition_year, transition_approved_by, transition_approved_at
+    INTO v_is_transition, v_approved_by, v_approved_at
+    FROM finance.fiscal_years
+   WHERE id = NEW.fiscal_year_id;
+
+  IF v_is_transition IS NOT TRUE THEN
+    RAISE EXCEPTION
+      'Period 13 is only allowed for a fiscal year explicitly flagged is_transition_year = true (fiscal_year_id %). Regular fiscal years are limited to 12 periods per spec Section 4.3.',
+      NEW.fiscal_year_id;
+  END IF;
+
+  IF v_approved_by IS NULL OR v_approved_at IS NULL THEN
+    RAISE EXCEPTION
+      'Period 13 requires the owning fiscal year to have recorded transition approval (transition_approved_by/transition_approved_at) per spec Section 4.3 ("explicitly approved one-time transition period"). fiscal_year_id %.',
+      NEW.fiscal_year_id;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."enforce_transition_year_period_13"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."enforce_transition_year_period_13"() IS 'BUG-027 fix: restricts accounting_periods.period_number = 13 to fiscal years explicitly flagged and approved as a transition year (finance.fiscal_years.is_transition_year/transition_approved_by/transition_approved_at), per spec Section 4.3.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason" "text") RETURNS "void"
@@ -2084,50 +2162,6 @@ END;
 
 
 ALTER FUNCTION "finance"."get_current_period"() OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "finance"."get_next_number"("p_type" "text") RETURNS "text"
-    LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ DECLARE
-    v_seq RECORD;
-    v_next_num INTEGER;
-    v_result TEXT;
-    v_fy_id UUID;
-BEGIN
-    SELECT id INTO v_fy_id 
-    FROM finance.fiscal_years 
-    WHERE status = 'OPEN' 
-    ORDER BY start_date DESC 
-    LIMIT 1;
-    
-    SELECT * INTO v_seq 
-    FROM finance.numbering_sequences 
-    WHERE sequence_type = p_type 
-      AND (fiscal_year_id = v_fy_id OR fiscal_year_id IS NULL)
-    ORDER BY fiscal_year_id DESC NULLS LAST
-    LIMIT 1
-    FOR UPDATE;
-    
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Numbering sequence not found for type: %', p_type;
-    END IF;
-    
-    v_next_num := v_seq.current_number + 1;
-    
-    UPDATE finance.numbering_sequences 
-    SET current_number = v_next_num 
-    WHERE id = v_seq.id;
-    
-    v_result := REPLACE(v_seq.format, '{PREFIX}', v_seq.prefix);
-    v_result := REPLACE(v_result, '{NUMBER}', LPAD(v_next_num::TEXT, v_seq.padding, '0'));
-    
-    RETURN v_result;
-END;
- $$;
-
-
-ALTER FUNCTION "finance"."get_next_number"("p_type" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."get_next_number"("p_type" "text", "p_organization_id" "uuid" DEFAULT "core"."current_user_org_id"()) RETURNS "text"
@@ -2552,7 +2586,7 @@ ALTER FUNCTION "finance"."post_distribution_payment"("p_line_id" "uuid", "p_peri
 
 CREATE OR REPLACE FUNCTION "finance"."post_invoice_ar"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
     AS $$
 DECLARE
     v_inv RECORD;
@@ -2562,8 +2596,19 @@ DECLARE
     v_rev_account UUID;
     v_tax_account UUID;
 BEGIN
+    -- ─── P1_060 SECURITY FIX (ISS-02, Critical) ───
+    IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+        RAISE EXCEPTION 'Insufficient privileges to post an invoice to the general ledger. Requires Finance Head, CEO, or Accountant.';
+    END IF;
+
     SELECT * INTO v_inv FROM public.invoices WHERE id = p_invoice_id;
     IF NOT FOUND THEN RAISE EXCEPTION 'Invoice not found'; END IF;
+
+    -- P1_060 SECURITY FIX: verify the invoice belongs to the caller's own
+    -- organization before posting anything to the ledger on its behalf.
+    IF NOT core.same_org(v_inv.organization_id) THEN
+        RAISE EXCEPTION 'Access denied: invoice % does not belong to your organization', p_invoice_id;
+    END IF;
 
     SELECT fiscal_year_id INTO v_fy_id FROM finance.accounting_periods WHERE id = p_period_id;
     IF v_fy_id IS NULL THEN RAISE EXCEPTION 'Invalid period'; END IF;
@@ -2621,28 +2666,46 @@ $$;
 ALTER FUNCTION "finance"."post_invoice_ar"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
 
 
+COMMENT ON FUNCTION "finance"."post_invoice_ar"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'P1_060 SECURITY FIX (ISS-02, Critical): added in-function role check (Finance Head/CEO/Accountant) and organization-match check against the invoice being posted. Previously contained only existence checks (IF NOT FOUND), no authorization of any kind.';
+
+
+
 CREATE OR REPLACE FUNCTION "finance"."post_journal_entry"("p_description" "text", "p_transaction_date" "date", "p_period_id" "uuid", "p_lines" "jsonb", "p_currency" "text" DEFAULT 'PKR'::"text", "p_exchange_rate" numeric DEFAULT 1.0000, "p_source_type" "text" DEFAULT 'MANUAL'::"text", "p_source_id" "uuid" DEFAULT NULL::"uuid", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_department_id" "uuid" DEFAULT NULL::"uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
     AS $$
 DECLARE
   v_journal_id UUID;
   v_ref TEXT;
   v_fiscal_year_id UUID;
+  v_period_org_id UUID;
   v_total_dr NUMERIC(18,2) := 0;
   v_total_cr NUMERIC(18,2) := 0;
   v_line_num INTEGER := 0;
   v_line JSONB;
   v_is_manual BOOLEAN;
 BEGIN
+  -- ─── P1_060 SECURITY FIX (ISS-02, Critical): in-function authorization ───
+  -- Defense-in-depth backstop matching approve_and_post_journal_entry's own
+  -- existing check. See migration header for why this is a role check and
+  -- not a single hard-coded permission code.
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to post journal entries. Requires Finance Head, CEO, or Accountant.';
+  END IF;
+
   v_is_manual := (COALESCE(p_source_type, 'MANUAL') = 'MANUAL');
 
-  -- 1. Get Fiscal Year from Period
-  SELECT fiscal_year_id INTO v_fiscal_year_id
+  -- 1. Get Fiscal Year + organization from Period, and verify the period
+  --    belongs to the caller's own organization (P1_060 SECURITY FIX).
+  SELECT fiscal_year_id, organization_id INTO v_fiscal_year_id, v_period_org_id
   FROM finance.accounting_periods WHERE id = p_period_id;
 
   IF v_fiscal_year_id IS NULL THEN
     RAISE EXCEPTION 'Invalid period_id: %', p_period_id;
+  END IF;
+
+  IF NOT core.same_org(v_period_org_id) THEN
+    RAISE EXCEPTION 'Access denied: accounting period % does not belong to your organization', p_period_id;
   END IF;
 
   -- 2. Validate & Calculate Totals.
@@ -2663,7 +2726,9 @@ BEGIN
     RAISE EXCEPTION 'Journal unbalanced: DR=% CR=%', v_total_dr, v_total_cr;
   END IF;
 
-  -- 3. Get Reference
+  -- 3. Get Reference (P1_059 already dropped the unscoped 1-arg overload, so
+  --    this now unambiguously resolves to the org-scoped version, defaulting
+  --    p_organization_id to core.current_user_org_id()).
   v_ref := finance.get_next_number('JOURNAL_ENTRY');
 
   -- 4. Insert Header.
@@ -2677,24 +2742,24 @@ BEGIN
       reference, description, status, transaction_date,
       period_id, fiscal_year_id, currency, exchange_rate, base_currency,
       total_debit, total_credit, source_type, source_id, project_id, department_id,
-      created_by
+      created_by, organization_id
     ) VALUES (
       v_ref, p_description, 'DRAFT', p_transaction_date,
       p_period_id, v_fiscal_year_id, p_currency, p_exchange_rate, 'PKR',
       v_total_dr, v_total_cr, p_source_type, p_source_id, p_project_id, p_department_id,
-      auth.uid()
+      auth.uid(), v_period_org_id
     ) RETURNING id INTO v_journal_id;
   ELSE
     INSERT INTO finance.journal_entries (
       reference, description, status, transaction_date, posting_date,
       period_id, fiscal_year_id, currency, exchange_rate, base_currency,
       total_debit, total_credit, source_type, source_id, project_id, department_id,
-      created_by, posted_by, posted_at
+      created_by, posted_by, posted_at, organization_id
     ) VALUES (
       v_ref, p_description, 'POSTED', p_transaction_date, CURRENT_DATE,
       p_period_id, v_fiscal_year_id, p_currency, p_exchange_rate, 'PKR',
       v_total_dr, v_total_cr, p_source_type, p_source_id, p_project_id, p_department_id,
-      auth.uid(), auth.uid(), NOW()
+      auth.uid(), auth.uid(), NOW(), v_period_org_id
     ) RETURNING id INTO v_journal_id;
   END IF;
 
@@ -2728,7 +2793,7 @@ $$;
 ALTER FUNCTION "finance"."post_journal_entry"("p_description" "text", "p_transaction_date" "date", "p_period_id" "uuid", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_source_type" "text", "p_source_id" "uuid", "p_project_id" "uuid", "p_department_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "finance"."post_journal_entry"("p_description" "text", "p_transaction_date" "date", "p_period_id" "uuid", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_source_type" "text", "p_source_id" "uuid", "p_project_id" "uuid", "p_department_id" "uuid") IS 'Fixed migration 029: MANUAL-source journals now insert as DRAFT (no self-approval); system-sourced journals post directly with approved_by left NULL to satisfy maker-checker. See audit Critical #4/#5.';
+COMMENT ON FUNCTION "finance"."post_journal_entry"("p_description" "text", "p_transaction_date" "date", "p_period_id" "uuid", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_source_type" "text", "p_source_id" "uuid", "p_project_id" "uuid", "p_department_id" "uuid") IS 'P1_060 SECURITY FIX (ISS-02, Critical): added in-function role check (Finance Head/CEO/Accountant) and organization-match check against p_period_id, so this SECURITY DEFINER function can no longer be used to post to another organization''s ledger or bypass authorization via a direct PostgREST RPC call. Also now populates journal_entries.organization_id (previously relied on the caller/trigger; explicit here for defense-in-depth). Previously fixed in migration 029 (MANUAL journals insert as DRAFT, not self-approved).';
 
 
 
@@ -2822,7 +2887,7 @@ ALTER FUNCTION "finance"."post_profit_distribution"("p_distribution_id" "uuid", 
 
 CREATE OR REPLACE FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
     AS $$
 DECLARE
     v_bill RECORD;
@@ -2834,8 +2899,19 @@ DECLARE
     v_total_debit NUMERIC(18,2) := 0;
     v_total_credit NUMERIC(18,2) := 0;
 BEGIN
+    -- ─── P1_060 SECURITY FIX (ISS-02, Critical) ───
+    IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+        RAISE EXCEPTION 'Insufficient privileges to post a vendor bill to the general ledger. Requires Finance Head, CEO, or Accountant.';
+    END IF;
+
     SELECT * INTO v_bill FROM finance.vendor_bills WHERE id = p_bill_id;
     IF NOT FOUND THEN RAISE EXCEPTION 'Bill not found'; END IF;
+
+    -- P1_060 SECURITY FIX: verify the bill belongs to the caller's own organization.
+    IF NOT core.same_org(v_bill.organization_id) THEN
+        RAISE EXCEPTION 'Access denied: vendor bill % does not belong to your organization', p_bill_id;
+    END IF;
+
     IF v_bill.status != 'APPROVED' THEN
         RAISE EXCEPTION 'Bill must be APPROVED before posting, current: %', v_bill.status;
     END IF;
@@ -2901,6 +2977,10 @@ $$;
 
 
 ALTER FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'P1_060 SECURITY FIX (ISS-02, Critical): added in-function role check (Finance Head/CEO/Accountant) and organization-match check against the vendor bill being posted. Previously contained no authorization of any kind.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_vendor_payment"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
@@ -3180,6 +3260,31 @@ $$;
 ALTER FUNCTION "finance"."prevent_used_financial_account_deletion"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."prevent_used_fiscal_year_deletion"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+DECLARE
+  v_period_count INTEGER;
+BEGIN
+  SELECT COUNT(*) INTO v_period_count
+  FROM finance.accounting_periods
+  WHERE fiscal_year_id = OLD.id;
+
+  IF v_period_count > 0 THEN
+    RAISE EXCEPTION
+      'Cannot delete fiscal year "%": it has % accounting period(s). Periods (and any journals posted to them) must never be silently cascade-deleted. Hard-close or archive the fiscal year instead of deleting it.',
+      OLD.name, v_period_count
+      USING ERRCODE = 'foreign_key_violation';
+  END IF;
+
+  RETURN OLD;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."prevent_used_fiscal_year_deletion"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."reset_sequence"("p_type" "text", "p_fy_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
@@ -3430,6 +3535,184 @@ $$;
 
 
 ALTER FUNCTION "finance"."validate_vendor_payment_allocation"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."balance_sheet"() RETURNS json
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'finance', 'core'
+    AS $$
+DECLARE
+  v_org_id UUID := core.current_user_org_id();
+  v_as_of DATE := CURRENT_DATE;
+  v_result JSON;
+BEGIN
+  IF v_org_id IS NULL THEN
+    RETURN json_build_object('assets', '[]'::json, 'liabilities', '[]'::json, 'equity', '[]'::json);
+  END IF;
+
+  WITH lines AS (
+    SELECT
+      coa.account_type,
+      coa.code,
+      coa.name AS account_name,
+      CASE
+        WHEN coa.normal_balance = 'DEBIT'
+          THEN COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)
+        ELSE COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)
+      END AS total
+    FROM finance.chart_of_accounts coa
+    LEFT JOIN finance.journal_lines jl ON jl.account_id = coa.id
+    LEFT JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+      AND je.status = 'POSTED' AND je.organization_id = v_org_id
+    LEFT JOIN finance.accounting_periods ap ON ap.id = je.period_id AND ap.end_date <= v_as_of
+    WHERE coa.organization_id = v_org_id
+      AND coa.is_active = true
+      AND coa.account_type IN ('ASSET', 'LIABILITY', 'EQUITY')
+    GROUP BY coa.id, coa.account_type, coa.code, coa.name, coa.normal_balance
+    HAVING CASE
+      WHEN coa.normal_balance = 'DEBIT'
+        THEN COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)
+      ELSE COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)
+    END != 0
+  )
+  SELECT json_build_object(
+    'assets', COALESCE((SELECT json_agg(json_build_object('code', code, 'account_name', account_name, 'account_type', account_type, 'total', total) ORDER BY code) FROM lines WHERE account_type = 'ASSET'), '[]'::json),
+    'liabilities', COALESCE((SELECT json_agg(json_build_object('code', code, 'account_name', account_name, 'account_type', account_type, 'total', total) ORDER BY code) FROM lines WHERE account_type = 'LIABILITY'), '[]'::json),
+    'equity', COALESCE((SELECT json_agg(json_build_object('code', code, 'account_name', account_name, 'account_type', account_type, 'total', total) ORDER BY code) FROM lines WHERE account_type = 'EQUITY'), '[]'::json)
+  ) INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."balance_sheet"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."balance_sheet"() IS 'Org-scoped Balance Sheet as-of CURRENT_DATE for the calling user''s organization only. Fixes BUG-001 (see public.profit_and_loss comment for full context).';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."cash_flow"("p_start" "date" DEFAULT NULL::"date", "p_end" "date" DEFAULT NULL::"date") RETURNS json
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'finance', 'core'
+    AS $$
+DECLARE
+  v_org_id UUID := core.current_user_org_id();
+  v_start DATE := COALESCE(p_start, date_trunc('year', CURRENT_DATE)::date);
+  v_end DATE := COALESCE(p_end, CURRENT_DATE);
+  v_cash_balance NUMERIC;
+  v_result JSON;
+BEGIN
+  IF v_org_id IS NULL THEN
+    RETURN json_build_object('operating', '[]'::json, 'investing', '[]'::json, 'financing', '[]'::json, 'cash_balance', 0);
+  END IF;
+
+  -- Cash & bank sub-accounts are seeded as code 11xx under the "Cash and
+  -- Bank" (1100) parent -- see phase_1_foundation/002_chart_of_accounts.sql.
+  -- Receivables (12xx) are deliberately excluded by this LIKE pattern.
+  SELECT COALESCE(SUM(
+    CASE WHEN coa.normal_balance = 'DEBIT'
+      THEN COALESCE(jl.base_debit, 0) - COALESCE(jl.base_credit, 0)
+      ELSE COALESCE(jl.base_credit, 0) - COALESCE(jl.base_debit, 0)
+    END
+  ), 0)
+  INTO v_cash_balance
+  FROM finance.chart_of_accounts coa
+  LEFT JOIN finance.journal_lines jl ON jl.account_id = coa.id
+  LEFT JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+    AND je.status = 'POSTED' AND je.organization_id = v_org_id
+  LEFT JOIN finance.accounting_periods ap ON ap.id = je.period_id AND ap.end_date <= v_end
+  WHERE coa.organization_id = v_org_id
+    AND coa.account_type = 'ASSET'
+    AND coa.code LIKE '11%';
+
+  WITH operating AS (
+    SELECT
+      coa.name AS account_name,
+      coa.account_type,
+      SUM(CASE WHEN coa.normal_balance = 'CREDIT' THEN jl.base_credit ELSE -jl.base_debit END) AS total
+    FROM finance.journal_lines jl
+    JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+      AND je.status = 'POSTED' AND je.organization_id = v_org_id
+    JOIN finance.accounting_periods ap ON ap.id = je.period_id
+    JOIN finance.chart_of_accounts coa ON coa.id = jl.account_id AND coa.organization_id = v_org_id
+    WHERE ap.start_date >= v_start AND ap.end_date <= v_end
+      AND coa.account_type IN ('REVENUE', 'COST_OF_SALES', 'OPERATING_EXPENSE')
+    GROUP BY coa.name, coa.account_type
+    HAVING SUM(CASE WHEN coa.normal_balance = 'CREDIT' THEN jl.base_credit ELSE -jl.base_debit END) != 0
+
+    UNION ALL
+
+    SELECT
+      'Change in ' || coa.name AS account_name,
+      coa.account_type,
+      -1 * (COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)) AS total
+    FROM finance.journal_lines jl
+    JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+      AND je.status = 'POSTED' AND je.organization_id = v_org_id
+    JOIN finance.accounting_periods ap ON ap.id = je.period_id
+    JOIN finance.chart_of_accounts coa ON coa.id = jl.account_id AND coa.organization_id = v_org_id
+    WHERE ap.start_date >= v_start AND ap.end_date <= v_end
+      AND coa.account_type IN ('ASSET', 'LIABILITY')
+      AND coa.code NOT LIKE '11%'   -- cash/bank movements are the plug, not a working-capital line
+      AND coa.code NOT LIKE '15%'   -- fixed assets are investing, not operating
+    GROUP BY coa.name, coa.account_type
+    HAVING (COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)) != 0
+  ),
+  investing AS (
+    SELECT
+      coa.name AS account_name,
+      coa.account_type,
+      -1 * (COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)) AS total
+    FROM finance.journal_lines jl
+    JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+      AND je.status = 'POSTED' AND je.organization_id = v_org_id
+    JOIN finance.accounting_periods ap ON ap.id = je.period_id
+    JOIN finance.chart_of_accounts coa ON coa.id = jl.account_id AND coa.organization_id = v_org_id
+    WHERE ap.start_date >= v_start AND ap.end_date <= v_end
+      AND coa.account_type = 'ASSET' AND coa.code LIKE '15%'
+    GROUP BY coa.name, coa.account_type
+    HAVING (COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)) != 0
+  ),
+  financing AS (
+    SELECT
+      coa.name AS account_name,
+      coa.account_type,
+      CASE WHEN coa.normal_balance = 'CREDIT'
+        THEN COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)
+        ELSE -1 * (COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0))
+      END AS total
+    FROM finance.journal_lines jl
+    JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+      AND je.status = 'POSTED' AND je.organization_id = v_org_id
+    JOIN finance.accounting_periods ap ON ap.id = je.period_id
+    JOIN finance.chart_of_accounts coa ON coa.id = jl.account_id AND coa.organization_id = v_org_id
+    WHERE ap.start_date >= v_start AND ap.end_date <= v_end
+      AND coa.account_type = 'EQUITY'
+    GROUP BY coa.name, coa.account_type, coa.normal_balance
+    HAVING CASE WHEN coa.normal_balance = 'CREDIT'
+      THEN COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)
+      ELSE -1 * (COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0))
+    END != 0
+  )
+  SELECT json_build_object(
+    'operating', COALESCE((SELECT json_agg(json_build_object('account_name', account_name, 'account_type', account_type, 'total', total) ORDER BY account_name) FROM operating), '[]'::json),
+    'investing', COALESCE((SELECT json_agg(json_build_object('account_name', account_name, 'account_type', account_type, 'total', total) ORDER BY account_name) FROM investing), '[]'::json),
+    'financing', COALESCE((SELECT json_agg(json_build_object('account_name', account_name, 'account_type', account_type, 'total', total) ORDER BY account_name) FROM financing), '[]'::json),
+    'cash_balance', v_cash_balance
+  ) INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") IS 'Org-scoped indirect-method Cash Flow for the calling user''s organization only. cash_balance is the as-of-p_end balance of code 11xx (cash/bank) accounts. Fixes BUG-001 (see public.profit_and_loss comment for full context).';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text" DEFAULT 'User'::"text", "p_full_name" "text" DEFAULT ''::"text") RETURNS json
@@ -3785,21 +4068,19 @@ ALTER FUNCTION "public"."handle_new_user"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."is_admin"() RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public', 'public'
-    AS $$ 
-DECLARE
-    user_role TEXT;
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
+    AS $$
 BEGIN
-    SELECT role INTO user_role 
-    FROM public.profiles 
-    WHERE user_id = auth.uid();
-    
-    RETURN COALESCE(user_role, 'User') = 'Admin';
+    RETURN core.is_finance_head();
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "public"."is_admin"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."is_admin"() IS 'Redefined by P1_059 (Remediation ISS-03, High). Previously read public.profiles.role = ''Admin'', a value profiles_role_check never permits, so this function was always false. Now delegates to core.is_finance_head() (CEO or FINANCE_HEAD), the correct organization-aware elevated role used throughout core/finance. Callers still need their own core.same_org(...) check for the row in question -- this function alone does not know which organization a given row belongs to. See P1_059 STEP 13 for the profiles/user_mfa/payments policies that were rewritten to add that check explicitly.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."payroll_generate_employee_code"() RETURNS character varying
@@ -3930,6 +4211,74 @@ $$;
 
 
 ALTER FUNCTION "public"."prevent_posted_payroll_run_edit"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."profit_and_loss"("p_start" "date" DEFAULT NULL::"date", "p_end" "date" DEFAULT NULL::"date") RETURNS json
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'finance', 'core'
+    AS $$
+DECLARE
+  v_org_id UUID := core.current_user_org_id();
+  v_start DATE := COALESCE(p_start, date_trunc('year', CURRENT_DATE)::date);
+  v_end DATE := COALESCE(p_end, CURRENT_DATE);
+  v_result JSON;
+BEGIN
+  IF v_org_id IS NULL THEN
+    RETURN json_build_object(
+      'revenue', '[]'::json, 'cost_of_sales', '[]'::json,
+      'operating_expenses', '[]'::json, 'other_income', '[]'::json,
+      'other_expenses', '[]'::json
+    );
+  END IF;
+
+  WITH lines AS (
+    SELECT
+      coa.account_type,
+      coa.code,
+      coa.name AS account_name,
+      COALESCE(SUM(jl.base_debit), 0) AS debit_total,
+      COALESCE(SUM(jl.base_credit), 0) AS credit_total,
+      CASE
+        WHEN coa.normal_balance = 'DEBIT'
+          THEN COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)
+        ELSE COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)
+      END AS total
+    FROM finance.chart_of_accounts coa
+    JOIN finance.journal_lines jl ON jl.account_id = coa.id
+    JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+    JOIN finance.accounting_periods ap ON ap.id = je.period_id
+    WHERE je.status = 'POSTED'
+      AND je.organization_id = v_org_id
+      AND coa.organization_id = v_org_id
+      AND ap.start_date >= v_start
+      AND ap.end_date <= v_end
+      AND coa.is_active = true
+      AND coa.account_type IN ('REVENUE', 'COST_OF_SALES', 'OPERATING_EXPENSE', 'OTHER_INCOME', 'OTHER_EXPENSE')
+    GROUP BY coa.id, coa.account_type, coa.code, coa.name, coa.normal_balance
+    HAVING CASE
+      WHEN coa.normal_balance = 'DEBIT'
+        THEN COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)
+      ELSE COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)
+    END != 0
+  )
+  SELECT json_build_object(
+    'revenue', COALESCE((SELECT json_agg(json_build_object('code', code, 'account_name', account_name, 'total', total, 'debit_total', debit_total, 'credit_total', credit_total) ORDER BY code) FROM lines WHERE account_type = 'REVENUE'), '[]'::json),
+    'cost_of_sales', COALESCE((SELECT json_agg(json_build_object('code', code, 'account_name', account_name, 'total', total, 'debit_total', debit_total, 'credit_total', credit_total) ORDER BY code) FROM lines WHERE account_type = 'COST_OF_SALES'), '[]'::json),
+    'operating_expenses', COALESCE((SELECT json_agg(json_build_object('code', code, 'account_name', account_name, 'total', total, 'debit_total', debit_total, 'credit_total', credit_total) ORDER BY code) FROM lines WHERE account_type = 'OPERATING_EXPENSE'), '[]'::json),
+    'other_income', COALESCE((SELECT json_agg(json_build_object('code', code, 'account_name', account_name, 'total', total, 'debit_total', debit_total, 'credit_total', credit_total) ORDER BY code) FROM lines WHERE account_type = 'OTHER_INCOME'), '[]'::json),
+    'other_expenses', COALESCE((SELECT json_agg(json_build_object('code', code, 'account_name', account_name, 'total', total, 'debit_total', debit_total, 'credit_total', credit_total) ORDER BY code) FROM lines WHERE account_type = 'OTHER_EXPENSE'), '[]'::json)
+  ) INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date") IS 'Org-scoped P&L for the calling user''s organization only (resolved via core.current_user_org_id(), not caller-supplied). Fixes BUG-001: previously the frontend called a function (public.profit_and_loss) that did not exist -- reporting.get_profit_and_loss existed but lives in a schema PostgREST never exposes and returns a different shape.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."rls_auto_enable"() RETURNS "event_trigger"
@@ -5916,7 +6265,7 @@ CREATE TABLE IF NOT EXISTS "finance"."accounting_periods" (
     "closed_at" timestamp with time zone,
     "reopening_reason" "text",
     "organization_id" "uuid",
-    CONSTRAINT "accounting_periods_period_number_check" CHECK ((("period_number" >= 1) AND ("period_number" <= 12))),
+    CONSTRAINT "accounting_periods_period_number_check" CHECK ((("period_number" >= 1) AND ("period_number" <= 13))),
     CONSTRAINT "accounting_periods_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'OPEN'::"text", 'SOFT_CLOSED'::"text", 'HARD_CLOSED'::"text"]))),
     CONSTRAINT "ap_dates_valid" CHECK (("end_date" > "start_date")),
     CONSTRAINT "ap_name_not_empty" CHECK ((TRIM(BOTH FROM "name") <> ''::"text")),
@@ -6414,7 +6763,8 @@ CREATE TABLE IF NOT EXISTS "finance"."fee_computation_log" (
     "fee_amount" numeric(18,4) DEFAULT 0 NOT NULL,
     "computed_by" "uuid",
     "computed_at" timestamp with time zone DEFAULT "now"(),
-    "details" "jsonb" DEFAULT '{}'::"jsonb"
+    "details" "jsonb" DEFAULT '{}'::"jsonb",
+    "organization_id" "uuid"
 );
 
 
@@ -7613,6 +7963,7 @@ END) STORED,
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "commissions_base_amount_check" CHECK (("base_amount" >= (0)::numeric)),
     CONSTRAINT "commissions_calculation_basis_check" CHECK ((("calculation_basis")::"text" = ANY ((ARRAY['PROJECT_REVENUE'::character varying, 'INVOICE_AMOUNT'::character varying, 'MILESTONE_VALUE'::character varying, 'CLIENT_PAYMENT'::character varying, 'SALES_TARGET'::character varying, 'FIXED_AMOUNT'::character varying])::"text"[]))),
     CONSTRAINT "commissions_commission_amount_check" CHECK (("commission_amount" >= (0)::numeric)),
@@ -7654,6 +8005,7 @@ CREATE TABLE IF NOT EXISTS "public"."contractors" (
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "contractors_payment_terms_check" CHECK ((("payment_terms")::"text" = ANY ((ARRAY['NET_15'::character varying, 'NET_30'::character varying, 'NET_45'::character varying, 'NET_60'::character varying, 'UPFRONT'::character varying, 'MILESTONE'::character varying])::"text"[]))),
     CONSTRAINT "contractors_rate_check" CHECK (("rate" >= (0)::numeric)),
     CONSTRAINT "contractors_rate_type_check" CHECK ((("rate_type")::"text" = ANY ((ARRAY['HOURLY'::character varying, 'DAILY'::character varying, 'WEEKLY'::character varying, 'MONTHLY'::character varying, 'FIXED_PROJECT'::character varying])::"text"[]))),
@@ -7849,6 +8201,7 @@ CREATE TABLE IF NOT EXISTS "public"."incomes" (
     "posted_at" timestamp with time zone,
     "rejection_reason" "text",
     "account_id" "uuid",
+    "organization_id" "uuid",
     CONSTRAINT "incomes_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
 );
 
@@ -8134,6 +8487,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_advances" (
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "payroll_advances_amount_check" CHECK (("amount" > (0)::numeric)),
     CONSTRAINT "payroll_advances_approval_status_check" CHECK ((("approval_status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying, 'REJECTED'::character varying, 'PARTIALLY_RECOVERED'::character varying, 'FULLY_RECOVERED'::character varying])::"text"[])))
 );
@@ -8161,6 +8515,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_commissions" (
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "payroll_commissions_commission_type_check" CHECK ((("commission_type")::"text" = ANY ((ARRAY['PERFORMANCE_BASED'::character varying, 'PROJECT_BASED'::character varying, 'SALES_BASED'::character varying, 'REFERRAL'::character varying, 'OTHER'::character varying])::"text"[]))),
     CONSTRAINT "payroll_commissions_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying, 'PAID'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying])::"text"[])))
 );
@@ -8183,6 +8538,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_compensation" (
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "payroll_compensation_amount_check" CHECK (("amount" >= (0)::numeric)),
     CONSTRAINT "payroll_compensation_compensation_type_check" CHECK ((("compensation_type")::"text" = ANY ((ARRAY['MONTHLY_SALARY'::character varying, 'HOURLY_RATE'::character varying, 'DAILY_RATE'::character varying, 'PROJECT_BASED'::character varying, 'COMMISSION_ONLY'::character varying, 'FIXED_CONTRACT'::character varying])::"text"[])))
 );
@@ -8204,6 +8560,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_deductions" (
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "payroll_deductions_deduction_type_check" CHECK ((("deduction_type")::"text" = ANY ((ARRAY['TAX'::character varying, 'PROVIDENT_FUND'::character varying, 'EOBI'::character varying, 'SOCIAL_SECURITY'::character varying, 'LOAN_INSTALLMENT'::character varying, 'ADVANCE_DEDUCTION'::character varying, 'ABSENCE_PENALTY'::character varying, 'OTHER'::character varying])::"text"[])))
 );
 
@@ -8241,6 +8598,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_employees" (
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "payroll_employees_employment_type_check" CHECK ((("employment_type")::"text" = ANY ((ARRAY['FULL_TIME'::character varying, 'PART_TIME'::character varying, 'CONTRACTOR'::character varying, 'INTERN'::character varying, 'CONSULTANT'::character varying])::"text"[]))),
     CONSTRAINT "payroll_employees_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['ACTIVE'::character varying, 'ON_LEAVE'::character varying, 'TERMINATED'::character varying, 'SUSPENDED'::character varying])::"text"[])))
 );
@@ -8250,6 +8608,10 @@ ALTER TABLE "public"."payroll_employees" OWNER TO "postgres";
 
 
 COMMENT ON TABLE "public"."payroll_employees" IS 'Finance-side employee registry for payroll. Full HR master data lives in future hr.employees.';
+
+
+
+COMMENT ON COLUMN "public"."payroll_employees"."organization_id" IS 'Added by P1_059 (Remediation ISS-01, Critical). Nullable by design -- see migration header. Backfilled from created_by -> profiles.organization_id in STEP 2.';
 
 
 
@@ -8289,6 +8651,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_lines" (
     "notes" "text",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "payroll_lines_payment_status_check" CHECK ((("payment_status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'PAID'::character varying, 'PARTIALLY_PAID'::character varying, 'FAILED'::character varying])::"text"[])))
 );
 
@@ -8316,6 +8679,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_reimbursements" (
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "payroll_reimbursements_amount_check" CHECK (("amount" > (0)::numeric)),
     CONSTRAINT "payroll_reimbursements_category_check" CHECK ((("category")::"text" = ANY ((ARRAY['TRAVEL'::character varying, 'MEAL'::character varying, 'MEDICAL'::character varying, 'EQUIPMENT'::character varying, 'INTERNET'::character varying, 'OTHER'::character varying])::"text"[]))),
     CONSTRAINT "payroll_reimbursements_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying, 'REJECTED'::character varying, 'PAID'::character varying, 'CANCELLED'::character varying])::"text"[])))
@@ -8346,6 +8710,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_runs" (
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "payroll_runs_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'CALCULATED'::character varying, 'UNDER_REVIEW'::character varying, 'APPROVED'::character varying, 'POSTED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying])::"text"[])))
 );
 
@@ -8372,6 +8737,27 @@ CREATE OR REPLACE VIEW "public"."permissions" WITH ("security_invoker"='true') A
 
 
 ALTER VIEW "public"."permissions" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."policy_documents" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "title" "text" NOT NULL,
+    "document_type" "text" DEFAULT 'POLICY'::"text" NOT NULL,
+    "content" "text" NOT NULL,
+    "is_active" boolean DEFAULT true NOT NULL,
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "policy_documents_document_type_check" CHECK (("document_type" = ANY (ARRAY['POLICY'::"text", 'PROCEDURE'::"text", 'CONTRACT'::"text", 'GUIDELINE'::"text", 'OTHER'::"text"])))
+);
+
+
+ALTER TABLE "public"."policy_documents" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."policy_documents" IS 'Added P1_061 to support the spec 9.1/Appendix B "Policy/document Q&A" AI capability and the existing policy-qa route, which already queried this table by name before it existed. Minimal schema (title/content/document_type) -- document ingestion (upload, chunking, embeddings for real RAG) is explicitly out of scope for this migration; see remediation matrix.';
+
 
 
 CREATE OR REPLACE VIEW "public"."postable_accounts" WITH ("security_invoker"='true') AS
@@ -8497,6 +8883,7 @@ CREATE TABLE IF NOT EXISTS "public"."subscriptions" (
     "created_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
     CONSTRAINT "subscriptions_amount_check" CHECK (("amount" >= (0)::numeric)),
     CONSTRAINT "subscriptions_billing_frequency_check" CHECK ((("billing_frequency")::"text" = ANY ((ARRAY['WEEKLY'::character varying, 'MONTHLY'::character varying, 'QUARTERLY'::character varying, 'SEMI_ANNUALLY'::character varying, 'ANNUALLY'::character varying, 'BIENNIAL'::character varying, 'ONE_TIME'::character varying])::"text"[]))),
     CONSTRAINT "subscriptions_category_check" CHECK ((("category")::"text" = ANY ((ARRAY['HOSTING'::character varying, 'DOMAIN'::character varying, 'AI_API'::character varying, 'DATABASE'::character varying, 'EMAIL'::character varying, 'INTERNET'::character varying, 'RENT'::character varying, 'UTILITIES'::character varying, 'SOFTWARE'::character varying, 'HARDWARE'::character varying, 'INSURANCE'::character varying, 'MEMBERSHIP'::character varying, 'CLOUD_STORAGE'::character varying, 'CRM'::character varying, 'PROJECT_MANAGEMENT'::character varying, 'COMMUNICATION'::character varying, 'SECURITY'::character varying, 'OTHER'::character varying])::"text"[]))),
@@ -9234,7 +9621,8 @@ CREATE OR REPLACE VIEW "reporting"."unreconciled_lines" WITH ("security_invoker"
     "fa"."account_name" AS "financial_account_name",
     "fa"."institution_name",
     "fa"."currency",
-    "fa"."masked_identifier"
+    "fa"."masked_identifier",
+    "fa"."id" AS "financial_account_id"
    FROM (("finance"."statement_lines" "sl"
      JOIN "finance"."bank_statements" "bs" ON (("bs"."id" = "sl"."bank_statement_id")))
      JOIN "finance"."financial_accounts" "fa" ON (("fa"."id" = "bs"."financial_account_id")))
@@ -9243,6 +9631,10 @@ CREATE OR REPLACE VIEW "reporting"."unreconciled_lines" WITH ("security_invoker"
 
 
 ALTER VIEW "reporting"."unreconciled_lines" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "reporting"."unreconciled_lines" IS 'P1_061 (corrected): added financial_account_id, appended as the last column so CREATE OR REPLACE VIEW does not attempt to rename/renumber any existing column. No existing column removed, renamed, or reordered.';
+
 
 
 CREATE OR REPLACE VIEW "reporting"."v_asset_register" WITH ("security_invoker"='true') AS
@@ -10174,6 +10566,11 @@ ALTER TABLE ONLY "public"."payroll_runs"
 
 
 
+ALTER TABLE ONLY "public"."policy_documents"
+    ADD CONSTRAINT "policy_documents_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."profiles"
     ADD CONSTRAINT "profiles_pkey" PRIMARY KEY ("id");
 
@@ -10604,6 +11001,10 @@ CREATE INDEX "idx_fa_type" ON "finance"."financial_accounts" USING "btree" ("ins
 
 
 
+CREATE INDEX "idx_fee_computation_log_org" ON "finance"."fee_computation_log" USING "btree" ("organization_id");
+
+
+
 CREATE INDEX "idx_financial_accounts_fin_active" ON "finance"."financial_accounts" USING "btree" ("id") WHERE ("deleted_at" IS NULL);
 
 
@@ -10904,6 +11305,10 @@ CREATE INDEX "idx_commissions_employee" ON "public"."payroll_commissions" USING 
 
 
 
+CREATE INDEX "idx_commissions_org" ON "public"."commissions" USING "btree" ("organization_id");
+
+
+
 CREATE INDEX "idx_commissions_period" ON "public"."commissions" USING "btree" ("period_start", "period_end");
 
 
@@ -10933,6 +11338,10 @@ CREATE INDEX "idx_compensation_employee" ON "public"."payroll_compensation" USIN
 
 
 CREATE INDEX "idx_contractors_contract_end" ON "public"."contractors" USING "btree" ("contract_end") WHERE (("status")::"text" = 'ACTIVE'::"text");
+
+
+
+CREATE INDEX "idx_contractors_org" ON "public"."contractors" USING "btree" ("organization_id");
 
 
 
@@ -10969,6 +11378,10 @@ CREATE INDEX "idx_expenses_user_id" ON "public"."expenses" USING "btree" ("user_
 
 
 CREATE INDEX "idx_incomes_date" ON "public"."incomes" USING "btree" ("income_date" DESC);
+
+
+
+CREATE INDEX "idx_incomes_org" ON "public"."incomes" USING "btree" ("organization_id");
 
 
 
@@ -11016,11 +11429,31 @@ CREATE INDEX "idx_payments_journal_entry" ON "public"."payments" USING "btree" (
 
 
 
+CREATE INDEX "idx_payroll_advances_org" ON "public"."payroll_advances" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_payroll_commissions_org" ON "public"."payroll_commissions" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_payroll_compensation_org" ON "public"."payroll_compensation" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_payroll_deductions_org" ON "public"."payroll_deductions" USING "btree" ("organization_id");
+
+
+
 CREATE INDEX "idx_payroll_employees_code" ON "public"."payroll_employees" USING "btree" ("employee_code");
 
 
 
 CREATE INDEX "idx_payroll_employees_dept" ON "public"."payroll_employees" USING "btree" ("department");
+
+
+
+CREATE INDEX "idx_payroll_employees_org" ON "public"."payroll_employees" USING "btree" ("organization_id");
 
 
 
@@ -11032,6 +11465,10 @@ CREATE INDEX "idx_payroll_lines_employee" ON "public"."payroll_lines" USING "btr
 
 
 
+CREATE INDEX "idx_payroll_lines_org" ON "public"."payroll_lines" USING "btree" ("organization_id");
+
+
+
 CREATE INDEX "idx_payroll_lines_payment" ON "public"."payroll_lines" USING "btree" ("payment_status");
 
 
@@ -11040,11 +11477,27 @@ CREATE INDEX "idx_payroll_lines_run" ON "public"."payroll_lines" USING "btree" (
 
 
 
+CREATE INDEX "idx_payroll_reimbursements_org" ON "public"."payroll_reimbursements" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_payroll_runs_org" ON "public"."payroll_runs" USING "btree" ("organization_id");
+
+
+
 CREATE INDEX "idx_payroll_runs_period" ON "public"."payroll_runs" USING "btree" ("payroll_period");
 
 
 
 CREATE INDEX "idx_payroll_runs_status" ON "public"."payroll_runs" USING "btree" ("status");
+
+
+
+CREATE INDEX "idx_policy_documents_active" ON "public"."policy_documents" USING "btree" ("organization_id", "is_active") WHERE ("is_active" = true);
+
+
+
+CREATE INDEX "idx_policy_documents_org" ON "public"."policy_documents" USING "btree" ("organization_id");
 
 
 
@@ -11085,6 +11538,10 @@ CREATE INDEX "idx_reimb_employee" ON "public"."payroll_reimbursements" USING "bt
 
 
 CREATE INDEX "idx_subscriptions_category" ON "public"."subscriptions" USING "btree" ("category");
+
+
+
+CREATE INDEX "idx_subscriptions_org" ON "public"."subscriptions" USING "btree" ("organization_id");
 
 
 
@@ -11463,6 +11920,10 @@ CREATE OR REPLACE TRIGGER "trg_enforce_postable_account" BEFORE INSERT OR UPDATE
 
 
 
+CREATE OR REPLACE TRIGGER "trg_enforce_transition_year_period_13" BEFORE INSERT OR UPDATE OF "period_number", "fiscal_year_id" ON "finance"."accounting_periods" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_transition_year_period_13"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_fa_single_default" BEFORE INSERT OR UPDATE OF "is_default" ON "finance"."financial_accounts" FOR EACH ROW WHEN (("new"."is_default" IS TRUE)) EXECUTE FUNCTION "finance"."fn_enforce_single_default_fa"();
 
 
@@ -11487,7 +11948,15 @@ CREATE OR REPLACE TRIGGER "trg_gen_bt_number" BEFORE INSERT ON "finance"."bank_t
 
 
 
+CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "finance"."bank_transfers" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "finance"."journal_entries" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "finance"."profit_distributions" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
 
 
 
@@ -11540,6 +12009,10 @@ CREATE OR REPLACE TRIGGER "trg_prevent_posted_vendor_bill_edit" BEFORE DELETE OR
 
 
 CREATE OR REPLACE TRIGGER "trg_prevent_used_financial_account_deletion" BEFORE DELETE ON "finance"."financial_accounts" FOR EACH ROW EXECUTE FUNCTION "finance"."prevent_used_financial_account_deletion"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_prevent_used_fiscal_year_deletion" BEFORE DELETE ON "finance"."fiscal_years" FOR EACH ROW EXECUTE FUNCTION "finance"."prevent_used_fiscal_year_deletion"();
 
 
 
@@ -11780,6 +12253,10 @@ CREATE OR REPLACE TRIGGER "invoices_audit" AFTER INSERT OR DELETE OR UPDATE ON "
 
 
 CREATE OR REPLACE TRIGGER "notifications_audit" AFTER INSERT OR DELETE OR UPDATE ON "public"."notifications" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "policy_documents_set_updated_at" BEFORE UPDATE ON "public"."policy_documents" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
 
 
 
@@ -12158,7 +12635,7 @@ ALTER TABLE ONLY "finance"."accounting_periods"
 
 
 ALTER TABLE ONLY "finance"."accounting_periods"
-    ADD CONSTRAINT "accounting_periods_fiscal_year_id_fkey" FOREIGN KEY ("fiscal_year_id") REFERENCES "finance"."fiscal_years"("id") ON DELETE CASCADE;
+    ADD CONSTRAINT "accounting_periods_fiscal_year_id_fkey" FOREIGN KEY ("fiscal_year_id") REFERENCES "finance"."fiscal_years"("id") ON DELETE RESTRICT;
 
 
 
@@ -13306,11 +13783,11 @@ ALTER TABLE "ai"."ai_tool_calls" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ai"."ai_user_cost_tracking" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "authenticated_read_model_registry" ON "ai"."ai_model_registry" FOR SELECT USING (true);
+CREATE POLICY "authenticated_read_model_registry" ON "ai"."ai_model_registry" FOR SELECT TO "authenticated" USING (true);
 
 
 
-CREATE POLICY "authenticated_read_prompts" ON "ai"."ai_prompt_versions" FOR SELECT USING (true);
+CREATE POLICY "authenticated_read_prompts" ON "ai"."ai_prompt_versions" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -13768,7 +14245,11 @@ CREATE POLICY "admin_write_platforms" ON "finance"."platforms" USING ("core"."ha
 
 
 
-CREATE POLICY "admin_write_tiers" ON "finance"."fee_tiers" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text"));
+CREATE POLICY "admin_write_tiers" ON "finance"."fee_tiers" TO "authenticated" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text") AND (EXISTS ( SELECT 1
+   FROM "finance"."fee_rules" "fr"
+  WHERE (("fr"."id" = "fee_tiers"."fee_rule_id") AND "core"."same_org"("fr"."organization_id")))))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text") AND (EXISTS ( SELECT 1
+   FROM "finance"."fee_rules" "fr"
+  WHERE (("fr"."id" = "fee_tiers"."fee_rule_id") AND "core"."same_org"("fr"."organization_id"))))));
 
 
 
@@ -13854,10 +14335,6 @@ CREATE POLICY "attendance_period_snapshots_insert" ON "finance"."attendance_peri
 
 
 CREATE POLICY "attendance_period_snapshots_select" ON "finance"."attendance_period_snapshots" FOR SELECT USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
-
-
-
-CREATE POLICY "authenticated_read_tiers" ON "finance"."fee_tiers" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -14074,6 +14551,12 @@ ALTER TABLE "finance"."fee_rules" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."fee_tiers" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "fee_tiers_select_org_scoped" ON "finance"."fee_tiers" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "finance"."fee_rules" "fr"
+  WHERE (("fr"."id" = "fee_tiers"."fee_rule_id") AND "core"."same_org"("fr"."organization_id")))));
+
+
+
 ALTER TABLE "finance"."financial_accounts" ENABLE ROW LEVEL SECURITY;
 
 
@@ -14183,7 +14666,7 @@ ALTER TABLE "finance"."numbering_sequences" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."opening_balance_imports" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "org_read_fee_log" ON "finance"."fee_computation_log" FOR SELECT USING (true);
+CREATE POLICY "org_read_fee_log" ON "finance"."fee_computation_log" FOR SELECT TO "authenticated" USING ("core"."same_org"("organization_id"));
 
 
 
@@ -14649,188 +15132,6 @@ CREATE POLICY "tax_returns_pub_update_frozen" ON "legacy"."tax_returns" FOR UPDA
 
 
 
-CREATE POLICY "Admin can delete any income" ON "public"."incomes" FOR DELETE USING ("public"."is_admin"());
-
-
-
-CREATE POLICY "Admin can delete income" ON "public"."incomes" FOR DELETE USING ("public"."is_admin"());
-
-
-
-CREATE POLICY "Admin can insert any income" ON "public"."incomes" FOR INSERT WITH CHECK ("public"."is_admin"());
-
-
-
-CREATE POLICY "Admin can insert income" ON "public"."incomes" FOR INSERT WITH CHECK ("public"."is_admin"());
-
-
-
-CREATE POLICY "Admin can manage payments" ON "public"."payments" USING ("public"."is_admin"());
-
-
-
-CREATE POLICY "Admin can read MFA status" ON "public"."user_mfa" FOR SELECT USING ((EXISTS ( SELECT 1
-   FROM "public"."profiles" "p"
-  WHERE (("p"."user_id" = "auth"."uid"()) AND ("p"."role" = ANY (ARRAY['CEO'::"text", 'Admin'::"text"]))))));
-
-
-
-CREATE POLICY "Admin can update any income" ON "public"."incomes" FOR UPDATE USING ("public"."is_admin"());
-
-
-
-CREATE POLICY "Admin can update income" ON "public"."incomes" FOR UPDATE USING ("public"."is_admin"());
-
-
-
-CREATE POLICY "Admin full access on profiles" ON "public"."profiles" USING ("public"."is_admin"());
-
-
-
-CREATE POLICY "All authenticated users can view incomes" ON "public"."incomes" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
-
-
-
-CREATE POLICY "Authenticated delete on commissions" ON "public"."commissions" FOR DELETE TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated delete on contractors" ON "public"."contractors" FOR DELETE TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated delete on payroll_employees" ON "public"."payroll_employees" FOR DELETE TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated delete on subscriptions" ON "public"."subscriptions" FOR DELETE TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated insert on commissions" ON "public"."commissions" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated insert on contractors" ON "public"."contractors" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated insert on payroll_advances" ON "public"."payroll_advances" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated insert on payroll_commissions" ON "public"."payroll_commissions" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated insert on payroll_compensation" ON "public"."payroll_compensation" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated insert on payroll_deductions" ON "public"."payroll_deductions" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated insert on payroll_employees" ON "public"."payroll_employees" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated insert on payroll_lines" ON "public"."payroll_lines" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated insert on payroll_reimbursements" ON "public"."payroll_reimbursements" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated insert on payroll_runs" ON "public"."payroll_runs" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated insert on subscriptions" ON "public"."subscriptions" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated read on payroll_advances" ON "public"."payroll_advances" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated read on payroll_commissions" ON "public"."payroll_commissions" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated read on payroll_employees" ON "public"."payroll_employees" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated read on payroll_lines" ON "public"."payroll_lines" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated read on payroll_reimbursements" ON "public"."payroll_reimbursements" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated read on payroll_runs" ON "public"."payroll_runs" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated select on commissions" ON "public"."commissions" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated select on contractors" ON "public"."contractors" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated select on subscriptions" ON "public"."subscriptions" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Authenticated update on commissions" ON "public"."commissions" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated update on contractors" ON "public"."contractors" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated update on payroll_advances" ON "public"."payroll_advances" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated update on payroll_commissions" ON "public"."payroll_commissions" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated update on payroll_compensation" ON "public"."payroll_compensation" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated update on payroll_deductions" ON "public"."payroll_deductions" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated update on payroll_employees" ON "public"."payroll_employees" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated update on payroll_lines" ON "public"."payroll_lines" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated update on payroll_reimbursements" ON "public"."payroll_reimbursements" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated update on payroll_runs" ON "public"."payroll_runs" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Authenticated update on subscriptions" ON "public"."subscriptions" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
 CREATE POLICY "Service role full access on commissions" ON "public"."commissions" TO "service_role" USING (true) WITH CHECK (true);
 
 
@@ -14875,30 +15176,6 @@ CREATE POLICY "Service role full access on subscriptions" ON "public"."subscript
 
 
 
-CREATE POLICY "User can delete own income" ON "public"."incomes" FOR DELETE USING (("auth"."uid"() = "user_id"));
-
-
-
-CREATE POLICY "User can insert own income" ON "public"."incomes" FOR INSERT WITH CHECK (("auth"."uid"() = "user_id"));
-
-
-
-CREATE POLICY "User can update own income" ON "public"."incomes" FOR UPDATE USING (("auth"."uid"() = "user_id"));
-
-
-
-CREATE POLICY "Users can delete own income" ON "public"."incomes" FOR DELETE USING (("auth"."uid"() = "user_id"));
-
-
-
-CREATE POLICY "Users can insert own income" ON "public"."incomes" FOR INSERT WITH CHECK (("auth"."uid"() = "user_id"));
-
-
-
-CREATE POLICY "Users can update own income" ON "public"."incomes" FOR UPDATE USING (("auth"."uid"() = "user_id"));
-
-
-
 CREATE POLICY "Users manage own notifications" ON "public"."notifications" USING (("auth"."uid"() = "user_id"));
 
 
@@ -14907,7 +15184,11 @@ CREATE POLICY "Users see own MFA" ON "public"."user_mfa" USING (("auth"."uid"() 
 
 
 
-CREATE POLICY "Users with permission can manage payments" ON "public"."payments" USING (("auth"."uid"() = "user_id"));
+CREATE POLICY "admin_can_read_mfa_status_org_scoped" ON "public"."user_mfa" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."user_id" = "auth"."uid"()) AND ("p"."role" = 'CEO'::"text") AND ("p"."organization_id" IS NOT NULL) AND ("p"."organization_id" = ( SELECT "target"."organization_id"
+           FROM "public"."profiles" "target"
+          WHERE ("target"."user_id" = "user_mfa"."user_id")))))));
 
 
 
@@ -14950,7 +15231,39 @@ CREATE POLICY "clients_update_org_scoped" ON "public"."clients" FOR UPDATE TO "a
 ALTER TABLE "public"."commissions" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "commissions_delete_org_scoped" ON "public"."commissions" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "commissions_insert_org_scoped" ON "public"."commissions" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "commissions_select_org_scoped" ON "public"."commissions" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "commissions_update_org_scoped" ON "public"."commissions" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
 ALTER TABLE "public"."contractors" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "contractors_delete_org_scoped" ON "public"."contractors" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "contractors_insert_org_scoped" ON "public"."contractors" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "contractors_select_org_scoped" ON "public"."contractors" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('PROJECT_MANAGER'::"text"))));
+
+
+
+CREATE POLICY "contractors_update_org_scoped" ON "public"."contractors" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
 
 
 ALTER TABLE "public"."expenses" ENABLE ROW LEVEL SECURITY;
@@ -14977,19 +15290,21 @@ CREATE POLICY "expenses_update_org_scoped" ON "public"."expenses" FOR UPDATE TO 
 ALTER TABLE "public"."incomes" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "incomes_delete" ON "public"."incomes" FOR DELETE USING ((("auth"."uid"() = "user_id") OR "public"."is_admin"()));
+CREATE POLICY "incomes_delete_org_scoped" ON "public"."incomes" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "core"."is_finance_head"())));
 
 
 
-CREATE POLICY "incomes_insert" ON "public"."incomes" FOR INSERT WITH CHECK ((("auth"."uid"() = "user_id") OR "public"."is_admin"()));
+CREATE POLICY "incomes_insert_org_scoped" ON "public"."incomes" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "core"."is_finance_head"())));
 
 
 
-CREATE POLICY "incomes_select" ON "public"."incomes" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "incomes_select_org_scoped" ON "public"."incomes" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR ("user_id" = "auth"."uid"()) OR (("project_id" IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "public"."projects" "pr"
+  WHERE (("pr"."id" = "incomes"."project_id") AND ("pr"."user_id" = "auth"."uid"()))))))));
 
 
 
-CREATE POLICY "incomes_update" ON "public"."incomes" FOR UPDATE USING ((("auth"."uid"() = "user_id") OR "public"."is_admin"()));
+CREATE POLICY "incomes_update_org_scoped" ON "public"."incomes" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "core"."is_finance_head"()))) WITH CHECK (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "core"."is_finance_head"())));
 
 
 
@@ -15053,49 +15368,200 @@ CREATE POLICY "notification_prefs_update_own" ON "public"."notification_preferen
 ALTER TABLE "public"."notifications" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "org_scoped_view_payments" ON "public"."payments" FOR SELECT TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR "public"."is_admin"() OR (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND ("organization_id" = "core"."current_user_org_config_id"()))));
-
-
-
-COMMENT ON POLICY "org_scoped_view_payments" ON "public"."payments" IS 'Fixed migration 033 (Compliance Audit R7): replaced "auth.uid() IS NOT NULL" (any authenticated user, any org) with owner/admin/org-scoped-finance-role access.';
-
-
-
 ALTER TABLE "public"."payments" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "payments_modify_org_scoped" ON "public"."payments" TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR ("core"."is_finance_head"() AND ("organization_id" IS NOT NULL) AND ("organization_id" = "core"."current_user_org_id"())))) WITH CHECK ((("user_id" = "auth"."uid"()) OR ("core"."is_finance_head"() AND ("organization_id" IS NOT NULL) AND ("organization_id" = "core"."current_user_org_id"()))));
+
+
+
+CREATE POLICY "payments_select_org_scoped" ON "public"."payments" FOR SELECT TO "authenticated" USING ((("user_id" = "auth"."uid"()) OR (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND ("organization_id" IS NOT NULL) AND ("organization_id" = "core"."current_user_org_id"()))));
+
 
 
 ALTER TABLE "public"."payroll_advances" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "payroll_advances_delete_org_scoped" ON "public"."payroll_advances" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "payroll_advances_insert_org_scoped" ON "public"."payroll_advances" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_advances_select_org_scoped" ON "public"."payroll_advances" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_advances_update_org_scoped" ON "public"."payroll_advances" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
 ALTER TABLE "public"."payroll_commissions" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "payroll_commissions_delete_org_scoped" ON "public"."payroll_commissions" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "payroll_commissions_insert_org_scoped" ON "public"."payroll_commissions" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_commissions_select_org_scoped" ON "public"."payroll_commissions" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_commissions_update_org_scoped" ON "public"."payroll_commissions" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
 
 
 ALTER TABLE "public"."payroll_compensation" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "payroll_compensation_delete_org_scoped" ON "public"."payroll_compensation" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "payroll_compensation_insert_org_scoped" ON "public"."payroll_compensation" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_compensation_select_org_scoped" ON "public"."payroll_compensation" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_compensation_update_org_scoped" ON "public"."payroll_compensation" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
 ALTER TABLE "public"."payroll_deductions" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "payroll_deductions_delete_org_scoped" ON "public"."payroll_deductions" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "payroll_deductions_insert_org_scoped" ON "public"."payroll_deductions" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_deductions_select_org_scoped" ON "public"."payroll_deductions" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_deductions_update_org_scoped" ON "public"."payroll_deductions" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
 
 
 ALTER TABLE "public"."payroll_employees" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "payroll_employees_delete_org_scoped" ON "public"."payroll_employees" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "payroll_employees_insert_org_scoped" ON "public"."payroll_employees" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_employees_select_org_scoped" ON "public"."payroll_employees" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR ("user_id" = "auth"."uid"()))));
+
+
+
+CREATE POLICY "payroll_employees_update_org_scoped" ON "public"."payroll_employees" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
 ALTER TABLE "public"."payroll_lines" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "payroll_lines_delete_org_scoped" ON "public"."payroll_lines" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "payroll_lines_insert_org_scoped" ON "public"."payroll_lines" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_lines_select_org_scoped" ON "public"."payroll_lines" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_lines_update_org_scoped" ON "public"."payroll_lines" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
 
 
 ALTER TABLE "public"."payroll_reimbursements" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "payroll_reimbursements_delete_org_scoped" ON "public"."payroll_reimbursements" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "payroll_reimbursements_insert_org_scoped" ON "public"."payroll_reimbursements" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_reimbursements_select_org_scoped" ON "public"."payroll_reimbursements" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_reimbursements_update_org_scoped" ON "public"."payroll_reimbursements" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
 ALTER TABLE "public"."payroll_runs" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "payroll_runs_delete_org_scoped" ON "public"."payroll_runs" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "payroll_runs_insert_org_scoped" ON "public"."payroll_runs" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_runs_select_org_scoped" ON "public"."payroll_runs" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "payroll_runs_update_org_scoped" ON "public"."payroll_runs" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+ALTER TABLE "public"."policy_documents" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "policy_documents_delete_org_scoped" ON "public"."policy_documents" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "policy_documents_insert_org_scoped" ON "public"."policy_documents" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "policy_documents_select_org_scoped" ON "public"."policy_documents" FOR SELECT TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "policy_documents_service_role" ON "public"."policy_documents" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "policy_documents_update_org_scoped" ON "public"."policy_documents" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"())) WITH CHECK (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
 
 
 ALTER TABLE "public"."profiles" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "profiles_modify" ON "public"."profiles" USING ((("auth"."uid"() = "user_id") OR "public"."is_admin"()));
+CREATE POLICY "profiles_modify_org_scoped" ON "public"."profiles" TO "authenticated" USING ((("auth"."uid"() = "user_id") OR ("public"."is_admin"() AND ("organization_id" IS NOT NULL) AND ("organization_id" = "core"."current_user_org_id"())))) WITH CHECK ((("auth"."uid"() = "user_id") OR ("public"."is_admin"() AND ("organization_id" IS NOT NULL) AND ("organization_id" = "core"."current_user_org_id"()))));
 
 
 
-CREATE POLICY "profiles_select" ON "public"."profiles" FOR SELECT USING ((("auth"."uid"() = "user_id") OR "public"."is_admin"()));
+CREATE POLICY "profiles_select_org_scoped" ON "public"."profiles" FOR SELECT TO "authenticated" USING ((("auth"."uid"() = "user_id") OR ("public"."is_admin"() AND ("organization_id" IS NOT NULL) AND ("organization_id" = "core"."current_user_org_id"()))));
 
 
 
@@ -15121,12 +15587,29 @@ CREATE POLICY "projects_update_org_scoped" ON "public"."projects" FOR UPDATE TO 
 ALTER TABLE "public"."subscriptions" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "subscriptions_delete_org_scoped" ON "public"."subscriptions" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "subscriptions_insert_org_scoped" ON "public"."subscriptions" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "subscriptions_select_org_scoped" ON "public"."subscriptions" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR "core"."has_role"('PROJECT_MANAGER'::"text"))));
+
+
+
+CREATE POLICY "subscriptions_update_org_scoped" ON "public"."subscriptions" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
 ALTER TABLE "public"."user_mfa" ENABLE ROW LEVEL SECURITY;
 
 
 
 
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
+
 
 
 GRANT USAGE ON SCHEMA "audit" TO "authenticated";
@@ -15161,6 +15644,7 @@ GRANT ALL ON SCHEMA "reporting" TO "authenticated";
 GRANT ALL ON SCHEMA "reporting" TO "service_role";
 GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
+
 
 
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
@@ -15219,11 +15703,26 @@ GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", 
 
 
 
+
 GRANT ALL ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") TO "authenticated";
 
 
 
 REVOKE ALL ON FUNCTION "finance"."prevent_posted_capital_transaction_edit"() FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "public"."balance_sheet"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."balance_sheet"() TO "anon";
+GRANT ALL ON FUNCTION "public"."balance_sheet"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."balance_sheet"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") TO "anon";
+GRANT ALL ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") TO "service_role";
 
 
 
@@ -15324,6 +15823,13 @@ GRANT ALL ON FUNCTION "public"."prevent_posted_payroll_run_edit"() TO "service_r
 
 
 
+REVOKE ALL ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date") TO "anon";
+GRANT ALL ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "anon";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
@@ -15370,6 +15876,15 @@ GRANT ALL ON FUNCTION "reporting"."get_project_profitability"("p_start_date" "da
 
 REVOKE ALL ON FUNCTION "reporting"."get_statement_of_changes_in_equity"("p_period_start" "date", "p_period_end" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "reporting"."get_statement_of_changes_in_equity"("p_period_start" "date", "p_period_end" "date") TO "authenticated";
+
+
+
+
+
+
+
+
+
 
 
 
@@ -15847,6 +16362,7 @@ GRANT ALL ON TABLE "public"."expenses" TO "service_role";
 
 GRANT ALL ON TABLE "reporting"."general_ledger" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."general_ledger" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."general_ledger" TO "ai_readonly_role";
 
 
 
@@ -15979,6 +16495,13 @@ GRANT ALL ON TABLE "public"."payroll_runs" TO "service_role";
 GRANT ALL ON TABLE "public"."permissions" TO "anon";
 GRANT ALL ON TABLE "public"."permissions" TO "authenticated";
 GRANT ALL ON TABLE "public"."permissions" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."policy_documents" TO "anon";
+GRANT ALL ON TABLE "public"."policy_documents" TO "authenticated";
+GRANT ALL ON TABLE "public"."policy_documents" TO "service_role";
+GRANT SELECT ON TABLE "public"."policy_documents" TO "ai_readonly_role";
 
 
 
@@ -16121,6 +16644,7 @@ GRANT ALL ON TABLE "public"."v_user_roles" TO "service_role";
 
 GRANT ALL ON TABLE "reporting"."budget_vs_actual" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."budget_vs_actual" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."budget_vs_actual" TO "ai_readonly_role";
 
 
 
@@ -16136,21 +16660,25 @@ GRANT ALL ON TABLE "reporting"."budget_gl_actual" TO "service_role";
 
 GRANT ALL ON TABLE "reporting"."payable_aging" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."payable_aging" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."payable_aging" TO "ai_readonly_role";
 
 
 
 GRANT ALL ON TABLE "reporting"."receivable_aging" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."receivable_aging" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."receivable_aging" TO "ai_readonly_role";
 
 
 
 GRANT ALL ON TABLE "reporting"."reconciliation_summary" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."reconciliation_summary" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."reconciliation_summary" TO "ai_readonly_role";
 
 
 
 GRANT ALL ON TABLE "reporting"."unreconciled_lines" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."unreconciled_lines" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."unreconciled_lines" TO "ai_readonly_role";
 
 
 
@@ -16184,7 +16712,6 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "ai_readonly_role
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
-
 
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";
@@ -16228,5 +16755,9 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
+
+
+
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
+
