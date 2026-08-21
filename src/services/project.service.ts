@@ -79,7 +79,8 @@ export const projectService = {
     organization_id: string;
     created_by: string;
   }) {
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'PRJ' });
+    // FIX: Use finance schema for get_next_number (function lives in finance schema, not public)
+    const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'PRJ' });
     const projectCode = numData || `PRJ-${Date.now().toString().slice(-6)}`;
 
     const { data, error } = await supabase

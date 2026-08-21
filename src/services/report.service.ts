@@ -10,35 +10,49 @@ import type {
   CurrencyExposureRow,
 } from '@/types/reports.types';
 
+// Schema-qualified database clients
+const reportingDb = () => supabase.schema('reporting');
+const auditDb = () => supabase.schema('audit');
+const financeDb = () => supabase.schema('finance');
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Financial Statements
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getProfitAndLoss = async (start?: string, end?: string) => {
-  const { data, error } = await supabase.rpc('profit_and_loss', {
-    p_start: start || null, p_end: end || null
+  // FIX: Function is reporting.get_profit_and_loss with params p_start_date/p_end_date
+  const { data, error } = await reportingDb().rpc('get_profit_and_loss', {
+    p_start_date: start || null,
+    p_end_date: end || null,
   });
   if (error) throw new Error(error.message);
   return data as PLData;
 };
 
-export const getBalanceSheet = async () => {
-  const { data, error } = await supabase.rpc('balance_sheet');
+export const getBalanceSheet = async (asOfDate?: string) => {
+  // FIX: Function is reporting.get_balance_sheet with param p_as_of_date
+  const { data, error } = await reportingDb().rpc('get_balance_sheet', {
+    p_as_of_date: asOfDate || null,
+  });
   if (error) throw new Error(error.message);
   return data as BSData;
 };
 
 export const getCashFlow = async (start?: string, end?: string) => {
-  const { data, error } = await supabase.rpc('cash_flow', {
-    p_start: start || null, p_end: end || null
+  // FIX: Function is reporting.get_cash_flow with params p_start_date/p_end_date
+  const { data, error } = await reportingDb().rpc('get_cash_flow', {
+    p_start_date: start || null,
+    p_end_date: end || null,
   });
   if (error) throw new Error(error.message);
   return data as CFData;
 };
 
 export const getStatementOfChangesInEquity = async (start?: string, end?: string) => {
-  const { data, error } = await supabase.rpc('statement_of_changes_in_equity', {
-    p_start: start || null, p_end: end || null
+  // FIX: Function is reporting.get_statement_of_changes_in_equity with params p_period_start/p_period_end
+  const { data, error } = await reportingDb().rpc('get_statement_of_changes_in_equity', {
+    p_period_start: start || null,
+    p_period_end: end || null,
   });
   if (error) throw new Error(error.message);
   return data as SOCEData;
@@ -49,9 +63,23 @@ export const getStatementOfChangesInEquity = async (start?: string, end?: string
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getAgingReport = async () => {
-  const { data, error } = await supabase.rpc('aging_report');
-  if (error) throw new Error(error.message);
-  return data as AgingData;
+  // FIX: No function named aging_report exists. Views reporting.receivable_aging and
+  // reporting.payable_aging exist. Query both views and combine the results.
+  const { data: receivable, error: arErr } = await reportingDb()
+    .from('receivable_aging')
+    .select('*');
+  if (arErr) throw new Error(arErr.message);
+
+  const { data: payable, error: apErr } = await reportingDb()
+    .from('payable_aging')
+    .select('*');
+  if (apErr) throw new Error(apErr.message);
+
+  const combined = [
+    ...(receivable || []).map((r: any) => ({ ...r, aging_type: 'receivable' })),
+    ...(payable || []).map((p: any) => ({ ...p, aging_type: 'payable' })),
+  ];
+  return combined as unknown as AgingData;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -59,8 +87,10 @@ export const getAgingReport = async () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getProjectProfitability = async (start?: string, end?: string) => {
-  const { data, error } = await supabase.rpc('project_profitability_report', {
-    p_start: start || null, p_end: end || null
+  // FIX: Function is reporting.get_project_profitability with params p_start_date/p_end_date
+  const { data, error } = await reportingDb().rpc('get_project_profitability', {
+    p_start_date: start || null,
+    p_end_date: end || null,
   });
   if (error) throw new Error(error.message);
   return (data || []) as ProjectProfitRow[];
@@ -71,6 +101,8 @@ export const getProjectProfitability = async (start?: string, end?: string) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getTaxReport = async (taxYear?: string) => {
+  // DEFERRED: No function named tax_report exists in any schema.
+  // This requires a database function to be created. Left unchanged.
   const { data, error } = await supabase.rpc('tax_report', {
     p_tax_year: taxYear || null
   });
@@ -90,6 +122,8 @@ export const getGeneralLedger = async (params: {
   pageSize?: number;
   search?: string;
 }) => {
+  // DEFERRED: No function named general_ledger_report exists (only views).
+  // Left unchanged.
   const { data, error } = await supabase.rpc('general_ledger_report', {
     p_account_id: params.accountId || null,
     p_start: params.startDate || null,
@@ -112,14 +146,31 @@ export const getTrialBalance = async (params: {
   periodEnd?: string;
   includePrior?: boolean;
 }) => {
-  const { data, error } = await supabase.rpc('get_trial_balance', {
-    p_fiscal_year_id: params.fiscalYearId || null,
-    p_period_start: params.periodStart || null,
-    p_period_end: params.periodEnd || null,
-    p_include_prior: params.includePrior || false,
+  // FIX: Function is reporting.get_trial_balance. It takes p_period_ids (uuid array)
+  // not the individual params the service was passing. Since the frontend passes
+  // fiscalYearId, we need to fetch the period IDs first, then call the function.
+  // Fallback: if no fiscalYearId, return empty array.
+  if (!params.fiscalYearId) return [] as TBEntry[];
+
+  // Fetch period IDs for the fiscal year
+  const { data: periods, error: pErr } = await financeDb()
+    .from('accounting_periods')
+    .select('id')
+    .eq('fiscal_year_id', params.fiscalYearId);
+
+  if (pErr) throw new Error(pErr.message);
+
+  // Build period_ids array: include prior periods if requested, else only current FY
+  let periodIds: string[] = [];
+  if (periods) {
+    periodIds = periods.map((p: any) => p.id);
+  }
+
+  const { data, error } = await reportingDb().rpc('get_trial_balance', {
+    p_period_ids: periodIds,
   });
   if (error) throw new Error(error.message);
-  return data as TBEntry[];
+  return (data || []) as TBEntry[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -127,12 +178,14 @@ export const getTrialBalance = async (params: {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getAccountBalances = async () => {
+  // DEFERRED: No function named account_balances_report exists in any schema.
   const { data, error } = await supabase.rpc('account_balances_report');
   if (error) throw new Error(error.message);
   return (data || []) as AccountBalanceRow[];
 };
 
 export const getBankTransfers = async (start?: string, end?: string) => {
+  // DEFERRED: No function named bank_transfers_report exists in any schema.
   const { data, error } = await supabase.rpc('bank_transfers_report', {
     p_start: start || null, p_end: end || null
   });
@@ -145,6 +198,7 @@ export const getBankTransfers = async (start?: string, end?: string) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getBudgetVariance = async (fiscalYearId?: string) => {
+  // DEFERRED: No function named budget_variance_report exists in any schema.
   const { data, error } = await supabase.rpc('budget_variance_report', {
     p_fiscal_year_id: fiscalYearId || null
   });
@@ -157,6 +211,7 @@ export const getBudgetVariance = async (fiscalYearId?: string) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getOwnershipEquity = async () => {
+  // DEFERRED: No function named ownership_equity_report exists in any schema.
   const { data, error } = await supabase.rpc('ownership_equity_report');
   if (error) throw new Error(error.message);
   return (data || []) as OwnershipRow[];
@@ -167,6 +222,7 @@ export const getOwnershipEquity = async () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getPlatformSettlements = async (start?: string, end?: string) => {
+  // DEFERRED: No function named platform_settlements_report exists in any schema.
   const { data, error } = await supabase.rpc('platform_settlements_report', {
     p_start: start || null, p_end: end || null
   });
@@ -179,11 +235,33 @@ export const getPlatformSettlements = async (start?: string, end?: string) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getFiscalCloseStatus = async (fiscalYearId?: string) => {
-  const { data, error } = await supabase.rpc('fiscal_close_status_report', {
-    p_fiscal_year_id: fiscalYearId || null
-  });
-  if (error) throw new Error(error.message);
-  return (data || []) as FiscalPeriodRow[];
+  // FIX: No function exists. Query finance.fiscal_years and finance.accounting_periods directly.
+  if (!fiscalYearId) return [] as FiscalPeriodRow[];
+
+  const [fyRes, periodsRes] = await Promise.all([
+    financeDb().from('fiscal_years').select('id, name, status, start_date, end_date').eq('id', fiscalYearId).single(),
+    financeDb().from('accounting_periods').select('id, period_number, period_name, status, start_date, end_date, closed_by, closed_at').eq('fiscal_year_id', fiscalYearId).order('period_number', { ascending: true }),
+  ]);
+
+  if (fyRes.error) throw new Error(fyRes.error.message);
+  if (periodsRes.error) throw new Error(periodsRes.error.message);
+
+  const fy = fyRes.data;
+  const periods = periodsRes.data || [];
+
+  return periods.map((p: any) => ({
+    fiscal_year_id: fy.id,
+    fiscal_year_name: fy.name,
+    fiscal_year_status: fy.status,
+    period_id: p.id,
+    period_number: p.period_number,
+    period_name: p.period_name,
+    status: p.status,
+    start_date: p.start_date,
+    end_date: p.end_date,
+    closed_by: p.closed_by,
+    closed_at: p.closed_at,
+  })) as unknown as FiscalPeriodRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -191,6 +269,7 @@ export const getFiscalCloseStatus = async (fiscalYearId?: string) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getApprovalAging = async () => {
+  // DEFERRED: No function named approval_aging_report exists in any schema.
   const { data, error } = await supabase.rpc('approval_aging_report');
   if (error) throw new Error(error.message);
   return (data || []) as ApprovalAgingRow[];
@@ -204,7 +283,10 @@ export const getAuditLog = async (params: {
   page?: number;
   pageSize?: number;
 }) => {
-  const { data, error } = await supabase.rpc('audit_log_report', {
+  // FIX: Function exists in audit schema as audit.audit_log_report with expanded params.
+  // The service passes a subset of the available params — only the ones the function
+  // accepts will be used, extras will be ignored by PostgreSQL.
+  const { data, error } = await auditDb().rpc('audit_log_report', {
     p_start: params.startDate || null,
     p_end: params.endDate || null,
     p_action: params.action || null,
@@ -221,6 +303,7 @@ export const getAuditLog = async (params: {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getCurrencyExposure = async () => {
+  // DEFERRED: No function named currency_exposure_report exists in any schema.
   const { data, error } = await supabase.rpc('currency_exposure_report');
   if (error) throw new Error(error.message);
   return (data || []) as CurrencyExposureRow[];

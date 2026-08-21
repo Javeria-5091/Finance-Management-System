@@ -21,9 +21,9 @@ async function currentUserId(): Promise<string> {
   return data.user.id;
 }
 
-// ══════════════════════════════════════════
+// ════════════════════════════════════════
 // FISCAL YEARS
-// ══════════════════════════════════════════
+// ════════════════════════════════════════
 
 export async function getFiscalYears(): Promise<FiscalYearSummary[]> {
   const { data, error } = await db()
@@ -107,7 +107,8 @@ export async function hardCloseFiscalYear(fyId: string, reason: string): Promise
   }
 
   // Call YEAR-END CLOSE API (calculates P&L, transfers to Retained Earnings)
-  const res = await fetch('/api/finance/year-end-close', {
+  // FIX: Corrected URL from /api/finance/year-end-close to /api/year-end-close
+  const res = await fetch('/api/year-end-close', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fiscalYearId: fyId, confirm: true }),
@@ -119,9 +120,9 @@ export async function hardCloseFiscalYear(fyId: string, reason: string): Promise
   }
 }
 
-// ══════════════════════════════════════════
+// ════════════════════════════════════════
 // ACCOUNTING PERIODS
-// ══════════════════════════════════════════
+// ════════════════════════════════════════
 
 export async function getPeriods(fyId: string): Promise<AccountingPeriod[]> {
   const { data, error } = await db()

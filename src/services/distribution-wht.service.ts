@@ -294,7 +294,7 @@ export async function postDistributionWithWHT(
   }
 
   // 6. Generate reference number
-  const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'JE-DIST' });
+  const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'JE-DIST' });
   const reference = numData || `JE-DIST-${Date.now()}`;
 
   // 7. Build journal lines

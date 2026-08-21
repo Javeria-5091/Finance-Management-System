@@ -64,7 +64,8 @@ export const clientService = {
     organization_id: string;
     created_by: string;
   }) {
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'CLT' });
+    // FIX: Use finance schema for get_next_number (function lives in finance schema, not public)
+    const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'CLT' });
     const clientCode = numData || `CLT-${Date.now().toString().slice(-6)}`;
 
     const { data, error } = await supabase
