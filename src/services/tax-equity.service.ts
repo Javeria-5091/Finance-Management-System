@@ -180,8 +180,8 @@ export interface DistributionLine {
 
 // ==================== TAXPAYER PROFILE ====================
 
-export const getTaxpayerProfile = async () => {
-  const { data, error } = await db.from('taxpayer_profile').select('*').single();
+export const getTaxpayerProfile = async (orgId: string) => {
+  const { data, error } = await db.from('taxpayer_profile').select('*').eq('organization_id', orgId).single();
   return { data: data as TaxpayerProfile, error };
 };
 
@@ -194,18 +194,18 @@ export const updateTaxpayerProfile = async (id: string, payload: Partial<Taxpaye
 
 // ==================== TAX RULE SETS ====================
 
-export const getTaxRuleSets = async () => {
-  const { data, error } = await db.from('tax_rule_sets').select('*').order('tax_year', { ascending: false });
+export const getTaxRuleSets = async (orgId: string) => {
+  const { data, error } = await db.from('tax_rule_sets').select('*').eq('organization_id', orgId).order('tax_year', { ascending: false });
   return { data: data as TaxRuleSet[], error };
 };
 
-export const getTaxRuleSetWithSlabs = async (id: string) => {
-  const { data, error } = await db.from('tax_rule_sets').select('*, tax_slabs(*)').eq('id', id).single();
+export const getTaxRuleSetWithSlabs = async (orgId: string, id: string) => {
+  const { data, error } = await db.from('tax_rule_sets').select('*, tax_slabs(*)').eq('organization_id', orgId).eq('id', id).single();
   return { data: data as TaxRuleSet, error };
 };
 
-export const createTaxRuleSet = async (payload: Partial<TaxRuleSet> & { created_by: string }) => {
-  const { data, error } = await db.from('tax_rule_sets').insert(payload).select().single();
+export const createTaxRuleSet = async (orgId: string, payload: Partial<TaxRuleSet> & { created_by: string }) => {
+  const { data, error } = await db.from('tax_rule_sets').insert({ ...payload, organization_id: orgId }).select().single();
   return { data: data as TaxRuleSet, error };
 };
 
@@ -217,8 +217,6 @@ export const updateTaxRuleSetStatus = async (id: string, status: string, userId?
     updates.approved_at = new Date().toISOString();
   }
 
-  console.log('🔧 [TAX] Updating rule set:', { id, status, userId, updates });
-
   const { data, error } = await db
     .from('tax_rule_sets')
     .update(updates)
@@ -227,28 +225,26 @@ export const updateTaxRuleSetStatus = async (id: string, status: string, userId?
     .single();
 
   if (error) {
-    console.error(' [TAX] DB Error:', error);
     throw error;
   }
 
   if (!data) {
-    console.error(' [TAX] No data returned for id:', id);
     throw new Error('Update failed — no data returned. Check RLS policies or if row exists.');
   }
 
-  console.log(' [TAX] Update success:', data);
   return { data: data as TaxRuleSet, error: null };
 };
 
 // ==================== TAX SLABS ====================
 
-export const getTaxSlabs = async (ruleSetId: string) => {
-  const { data, error } = await db.from('tax_slabs').select('*').eq('tax_rule_set_id', ruleSetId).order('sort_order', { ascending: true });
+export const getTaxSlabs = async (orgId: string, ruleSetId: string) => {
+  const { data, error } = await db.from('tax_slabs').select('*').eq('organization_id', orgId).eq('tax_rule_set_id', ruleSetId).order('sort_order', { ascending: true });
   return { data: data as TaxSlab[], error };
 };
 
-export const saveTaxSlabs = async (slabs: Omit<TaxSlab, 'id' | 'created_at' | 'updated_at'>[]) => {
-  const { data, error } = await db.from('tax_slabs').upsert(slabs, { onConflict: 'id' }).select();
+export const saveTaxSlabs = async (orgId: string, slabs: Omit<TaxSlab, 'id' | 'created_at' | 'updated_at'>[]) => {
+  const withOrg = slabs.map(s => ({ ...s, organization_id: orgId }));
+  const { data, error } = await db.from('tax_slabs').upsert(withOrg, { onConflict: 'id' }).select();
   return { data, error };
 };
 
@@ -259,18 +255,18 @@ export const deleteTaxSlab = async (id: string) => {
 
 // ==================== TAX RECONCILIATIONS ====================
 
-export const getTaxReconciliations = async () => {
-  const { data, error } = await db.from('tax_reconciliations').select('*, tax_rule_sets(name)').order('tax_year', { ascending: false });
+export const getTaxReconciliations = async (orgId: string) => {
+  const { data, error } = await db.from('tax_reconciliations').select('*, tax_rule_sets(name)').eq('organization_id', orgId).order('tax_year', { ascending: false });
   return { data: data as TaxReconciliation[], error };
 };
 
-export const getTaxReconciliation = async (id: string) => {
-  const { data, error } = await db.from('tax_reconciliations').select('*, tax_rule_sets(*)').eq('id', id).single();
+export const getTaxReconciliation = async (orgId: string, id: string) => {
+  const { data, error } = await db.from('tax_reconciliations').select('*, tax_rule_sets(*)').eq('organization_id', orgId).eq('id', id).single();
   return { data: data as TaxReconciliation, error };
 };
 
-export const createTaxReconciliation = async (payload: any) => {
-  const { data, error } = await db.from('tax_reconciliations').insert(payload).select().single();
+export const createTaxReconciliation = async (orgId: string, payload: any) => {
+  const { data, error } = await db.from('tax_reconciliations').insert({ ...payload, organization_id: orgId }).select().single();
   return { data: data as TaxReconciliation, error };
 };
 
@@ -279,20 +275,20 @@ export const updateTaxReconciliation = async (id: string, payload: any) => {
   return { data: data as TaxReconciliation, error };
 };
 
-export const computeTax = async (reconId: string) => {
-  const { data, error } = await db.rpc('compute_tax_liability', { p_tax_recon_id: reconId });
+export const computeTax = async (orgId: string, reconId: string) => {
+  const { data, error } = await db.rpc('compute_tax_liability', { p_tax_recon_id: reconId, p_organization_id: orgId });
   return { data, error };
 };
 
 // ==================== TAX ADJUSTMENTS ====================
 
-export const getTaxAdjustments = async (reconId: string) => {
-  const { data, error } = await db.from('tax_adjustments').select('*').eq('tax_reconciliation_id', reconId).order('created_at', { ascending: true });
+export const getTaxAdjustments = async (orgId: string, reconId: string) => {
+  const { data, error } = await db.from('tax_adjustments').select('*').eq('organization_id', orgId).eq('tax_reconciliation_id', reconId).order('created_at', { ascending: true });
   return { data: data as TaxAdjustment[], error };
 };
 
-export const addTaxAdjustment = async (payload: Omit<TaxAdjustment, 'id' | 'created_at' | 'updated_at'>) => {
-  const { data, error } = await db.from('tax_adjustments').insert(payload).select().single();
+export const addTaxAdjustment = async (orgId: string, payload: Omit<TaxAdjustment, 'id' | 'created_at' | 'updated_at'>) => {
+  const { data, error } = await db.from('tax_adjustments').insert({ ...payload, organization_id: orgId }).select().single();
   return { data: data as TaxAdjustment, error };
 };
 
@@ -308,11 +304,11 @@ export const deleteTaxAdjustment = async (id: string) => {
 
 // ==================== OWNERS ====================
 
-export const getOwners = async () => {
-  const { data: owners, error } = await db.from('owners').select('*').order('name');
+export const getOwners = async (orgId: string) => {
+  const { data: owners, error } = await db.from('owners').select('*').eq('organization_id', orgId).order('name');
   if (error || !owners) return { data: [], error };
 
-  const { data: history } = await db.from('ownership_history').select('*').order('effective_from', { ascending: false });
+  const { data: history } = await db.from('ownership_history').select('*').eq('organization_id', orgId).order('effective_from', { ascending: false });
   const histMap = new Map<string, number>();
 
   (history || []).forEach((h: OwnershipHistory) => {
@@ -325,8 +321,8 @@ export const getOwners = async () => {
   return { data: enriched as Owner[], error: null };
 };
 
-export const createOwner = async (payload: any) => {
-  const { data, error } = await db.from('owners').insert(payload).select().single();
+export const createOwner = async (orgId: string, payload: any) => {
+  const { data, error } = await db.from('owners').insert({ ...payload, organization_id: orgId }).select().single();
   return { data: data as Owner, error };
 };
 
@@ -337,25 +333,25 @@ export const updateOwner = async (id: string, payload: any) => {
 
 // ==================== OWNERSHIP HISTORY ====================
 
-export const getOwnershipHistory = async () => {
-  const { data, error } = await db.from('ownership_history').select('*, owners(name)').order('effective_from', { ascending: false }).limit(50);
+export const getOwnershipHistory = async (orgId: string) => {
+  const { data, error } = await db.from('ownership_history').select('*, owners(name)').eq('organization_id', orgId).order('effective_from', { ascending: false }).limit(50);
   return { data: data as OwnershipHistory[], error };
 };
 
-export const addOwnershipEntry = async (payload: any) => {
-  const { data, error } = await db.from('ownership_history').insert(payload).select().single();
+export const addOwnershipEntry = async (orgId: string, payload: any) => {
+  const { data, error } = await db.from('ownership_history').insert({ ...payload, organization_id: orgId }).select().single();
   return { data, error };
 };
 
 // ==================== RESERVE POLICIES ====================
 
-export const getReservePolicies = async () => {
-  const { data, error } = await db.from('reserve_policies').select('*').order('effective_from', { ascending: false });
+export const getReservePolicies = async (orgId: string) => {
+  const { data, error } = await db.from('reserve_policies').select('*').eq('organization_id', orgId).order('effective_from', { ascending: false });
   return { data: data as ReservePolicy[], error };
 };
 
-export const createReservePolicy = async (payload: any) => {
-  const { data, error } = await db.from('reserve_policies').insert(payload).select().single();
+export const createReservePolicy = async (orgId: string, payload: any) => {
+  const { data, error } = await db.from('reserve_policies').insert({ ...payload, organization_id: orgId }).select().single();
   return { data: data as ReservePolicy, error };
 };
 
@@ -364,25 +360,25 @@ export const updateReservePolicy = async (id: string, payload: any) => {
   return { data: data as ReservePolicy, error };
 };
 
-export const calculateReserve = async (profit: number, date?: string) => {
-  const { data, error } = await db.rpc('calculate_reserve', { p_profit: profit, p_on_date: date || null });
+export const calculateReserve = async (orgId: string, profit: number, date?: string) => {
+  const { data, error } = await db.rpc('calculate_reserve', { p_profit: profit, p_on_date: date || null, p_organization_id: orgId });
   return { data, error };
 };
 
 // ==================== PROFIT DISTRIBUTIONS ====================
 
-export const getProfitDistributions = async () => {
-  const { data, error } = await db.from('profit_distributions').select('*').order('created_at', { ascending: false });
+export const getProfitDistributions = async (orgId: string) => {
+  const { data, error } = await db.from('profit_distributions').select('*').eq('organization_id', orgId).order('created_at', { ascending: false });
   return { data: data as ProfitDistribution[], error };
 };
 
-export const getProfitDistributionWithLines = async (id: string) => {
-  const { data, error } = await db.from('profit_distributions').select('*, distribution_lines(*, owners(name))').eq('id', id).single();
+export const getProfitDistributionWithLines = async (orgId: string, id: string) => {
+  const { data, error } = await db.from('profit_distributions').select('*, distribution_lines(*, owners(name))').eq('organization_id', orgId).eq('id', id).single();
   return { data: data as ProfitDistribution, error };
 };
 
-export const createProfitDistribution = async (payload: any) => {
-  const { data, error } = await db.from('profit_distributions').insert(payload).select().single();
+export const createProfitDistribution = async (orgId: string, payload: any) => {
+  const { data, error } = await db.from('profit_distributions').insert({ ...payload, organization_id: orgId }).select().single();
   return { data: data as ProfitDistribution, error };
 };
 
@@ -391,29 +387,30 @@ export const updateProfitDistribution = async (id: string, payload: any) => {
   return { data: data as ProfitDistribution, error };
 };
 
-export const saveDistributionLines = async (lines: any[]) => {
-  const { data, error } = await db.from('distribution_lines').upsert(lines, { onConflict: 'id' }).select();
+export const saveDistributionLines = async (orgId: string, lines: any[]) => {
+  const withOrg = lines.map(l => ({ ...l, organization_id: orgId }));
+  const { data, error } = await db.from('distribution_lines').upsert(withOrg, { onConflict: 'id' }).select();
   return { data, error };
 };
 
-export const postProfitDistribution = async (distId: string, periodId: string, date: string) => {
-  const { data, error } = await db.rpc('post_profit_distribution', { p_distribution_id: distId, p_period_id: periodId, p_transaction_date: date });
+export const postProfitDistribution = async (orgId: string, distId: string, periodId: string, date: string) => {
+  const { data, error } = await db.rpc('post_profit_distribution', { p_distribution_id: distId, p_period_id: periodId, p_transaction_date: date, p_organization_id: orgId });
   return { data, error };
 };
 
 // ==================== DROPDOWNS ====================
 
-export const getFiscalYears = async () => {
-  const { data, error } = await db.from('fiscal_years').select('*').order('start_date', { ascending: false });
+export const getFiscalYears = async (orgId: string) => {
+  const { data, error } = await db.from('fiscal_years').select('*').eq('organization_id', orgId).order('start_date', { ascending: false });
   return { data, error };
 };
 
-export const getOpenPeriod = async () => {
-  const { data, error } = await db.from('accounting_periods').select('id, period_name').eq('status', 'OPEN').limit(1).single();
+export const getOpenPeriod = async (orgId: string) => {
+  const { data, error } = await db.from('accounting_periods').select('id, period_name').eq('organization_id', orgId).eq('status', 'OPEN').limit(1).single();
   return { data, error };
 };
 
-export const getExpenseAccounts = async () => {
-  const { data, error } = await db.from('chart_of_accounts').select('id, code, name, account_type').in('account_type', ['OPERATING_EXPENSE', 'OTHER_EXPENSE', 'COST_OF_SALES']).eq('is_active', true).order('code');
+export const getExpenseAccounts = async (orgId: string) => {
+  const { data, error } = await db.from('chart_of_accounts').select('id, code, name, account_type').eq('organization_id', orgId).in('account_type', ['OPERATING_EXPENSE', 'OTHER_EXPENSE', 'COST_OF_SALES']).eq('is_active', true).order('code');
   return { data, error };
 };

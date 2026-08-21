@@ -43,11 +43,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Payment receipt is already reversed' }, { status: 400 });
     }
 
-    // Get open period
+    // BUG-020 FIX: Get open period with org filter
     const period = getData(await supabase
       .from('finance.accounting_periods')
       .select('id')
       .eq('status', 'OPEN')
+      .eq('organization_id', auth.orgId)
       .order('start_date', { ascending: false })
       .limit(1)
       .single());
@@ -140,10 +141,11 @@ export async function POST(req: NextRequest) {
           const total = Number(invoice.total_amount);
           const newStatus = newPaid <= 0.01 ? 'ISSUED' : 'PARTIALLY_PAID';
 
+          // BUG-028 FIX: Add organization_id filter to invoice status update
           await supabase.from('invoices').update({
             amount_paid: newPaid,
             status: newStatus,
-          }).eq('id', alloc.invoice_id);
+          }).eq('id', alloc.invoice_id).eq('organization_id', auth.orgId);
         }
       }
     }

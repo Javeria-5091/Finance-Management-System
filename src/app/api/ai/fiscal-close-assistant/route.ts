@@ -9,7 +9,7 @@
 import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
-import { getAuthSupabase } from '@/lib/api-auth';
+import { getAuthSupabase, isSqlSafe } from '@/lib/api-auth';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
@@ -69,34 +69,52 @@ export async function POST(req: Request) {
     let contextData = '';
 
     // Check unreconciled accounts
-    const { data: reconStatus } = await supabase.rpc('execute_ai_readonly_query', {
-      query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
+    const reconQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
         SELECT account_name, institution_name, reconciliation_status, last_reconciled_at
         FROM reporting.reconciliation_summary
-        WHERE reconciliation_status != 'reconciled'
-      ) t`,
+        WHERE organization_id = '${orgId}'
+        AND reconciliation_status != 'reconciled'
+      ) t`;
+    const reconSafety = await isSqlSafe(reconQuery);
+    if (!reconSafety.safe) {
+      return NextResponse.json({ error: 'Query safety check failed', reason: reconSafety.reason }, { status: 500 });
+    }
+    const { data: reconStatus } = await supabase.rpc('execute_ai_readonly_query', {
+      query_string: reconQuery,
     });
 
     // Check open periods
-    const { data: openPeriods } = await supabase.rpc('execute_ai_readonly_query', {
-      query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
+    const periodsQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
         SELECT period_number, name, start_date, end_date, status
         FROM finance.accounting_periods
         WHERE fiscal_year_id = '${fiscal_year_id}'
+        AND organization_id = '${orgId}'
         AND status != 'HARD_CLOSED'
         ORDER BY period_number
-      ) t`,
+      ) t`;
+    const periodsSafety = await isSqlSafe(periodsQuery);
+    if (!periodsSafety.safe) {
+      return NextResponse.json({ error: 'Query safety check failed', reason: periodsSafety.reason }, { status: 500 });
+    }
+    const { data: openPeriods } = await supabase.rpc('execute_ai_readonly_query', {
+      query_string: periodsQuery,
     });
 
     // Check pending journal entries
-    const { data: pendingJournals } = await supabase.rpc('execute_ai_readonly_query', {
-      query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
+    const journalsQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
         SELECT reference, description, transaction_date, status, source_type
         FROM finance.journal_entries
         WHERE fiscal_year_id = '${fiscal_year_id}'
+        AND organization_id = '${orgId}'
         AND status = 'DRAFT'
         LIMIT 50
-      ) t`,
+      ) t`;
+    const journalsSafety = await isSqlSafe(journalsQuery);
+    if (!journalsSafety.safe) {
+      return NextResponse.json({ error: 'Query safety check failed', reason: journalsSafety.reason }, { status: 500 });
+    }
+    const { data: pendingJournals } = await supabase.rpc('execute_ai_readonly_query', {
+      query_string: journalsQuery,
     });
 
     contextData = `

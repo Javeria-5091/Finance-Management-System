@@ -103,6 +103,7 @@ export async function POST(req: NextRequest) {
       .from('finance.accounting_periods')
       .select('id, start_date, end_date')
       .eq('status', 'OPEN')
+      .eq('organization_id', orgId)
       .order('start_date', { ascending: false })
       .limit(1)
       .single());

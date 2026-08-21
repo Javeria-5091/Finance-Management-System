@@ -1,6 +1,6 @@
 import { supabase } from '@/lib/supabase';
 
-// ─── Client Service ───
+// --- Client Service ---
 // Provides CRUD operations for client master records
 // Spec: Maintain client master records, addresses, contacts, tax details, payment terms, currencies
 // Used by: /api/clients/route.ts, /api/clients/[id]/route.ts
@@ -105,24 +105,30 @@ export const clientService = {
   },
 
   async getClientStats(orgId?: string) {
-    let q = supabase.from('clients').select('id', { count: 'exact', head: true });
-    if (orgId) q = q.eq('organization_id', orgId);
-
-    const { count: activeCount } = await supabase
+    // BUG-057 FIX: Add organization_id filter to both count queries
+    let activeQuery = supabase
       .from('clients')
       .select('id', { count: 'exact', head: true })
       .eq('is_active', true);
-    const { count: inactiveCount } = await supabase
+    if (orgId) activeQuery = activeQuery.eq('organization_id', orgId);
+
+    let inactiveQuery = supabase
       .from('clients')
       .select('id', { count: 'exact', head: true })
       .eq('is_active', false);
+    if (orgId) inactiveQuery = inactiveQuery.eq('organization_id', orgId);
+
+    const { count: activeCount } = await activeQuery;
+    const { count: inactiveCount } = await inactiveQuery;
 
     return { active: activeCount || 0, inactive: inactiveCount || 0 };
   },
 
   async getClientARSummary(clientId: string) {
+    // BUG-057 FIX: Use supabase.schema('reporting').from('v_ar_aging') instead of dot syntax
     const { data, error } = await supabase
-      .from('reporting.v_ar_aging')
+      .schema('reporting')
+      .from('v_ar_aging')
       .select('*')
       .eq('client_id', clientId);
     if (error) throw error;

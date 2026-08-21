@@ -3,17 +3,12 @@ import { supabase } from '@/lib/supabase';
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export type BudgetWarningLevel = 'OK' | 'CAUTION' | 'WARNING' | 'BLOCKED';
-
 export type BudgetEnforcementMode = 'WARN_ONLY' | 'HARD_BLOCK';
 
 export interface BudgetPolicyConfig {
-  /** Whether to only warn (WARN_ONLY) or hard-block (HARD_BLOCK) exceeding transactions */
   enforcement_mode: BudgetEnforcementMode;
-  /** Utilization % at which CAUTION level triggers (default 75) */
   caution_threshold: number;
-  /** Utilization % at which WARNING level triggers (default 90) */
   warning_threshold: number;
-  /** Utilization % at which BLOCKED level triggers (default 100) */
   block_threshold: number;
 }
 
@@ -52,7 +47,6 @@ export interface BudgetCheckResponse {
   policy: BudgetPolicyConfig;
   checks: BudgetCheckResult[];
   message: string;
-  /** Notification payload for budget threshold alerts (Spec 13.4) */
   notifications?: BudgetAlertNotification[];
 }
 
@@ -70,7 +64,7 @@ export interface BudgetAlertNotification {
   available_remaining: number;
 }
 
-// ─── Default Policy (configurable via core.budget_policies table) ──────────
+// ─── Default Policy ──────────────────────────────────────────────────────────
 
 const DEFAULT_POLICY: BudgetPolicyConfig = {
   enforcement_mode: 'HARD_BLOCK',
@@ -101,9 +95,13 @@ export async function getBudgetPolicy(
   organizationId: string
 ): Promise<BudgetPolicyConfig> {
   try {
+    // BUG-009 FIX: Changed supabase.from('core.budget_policies') to
+    // supabase.schema('core').from('budget_policies').
+    // Supabase JS client does NOT support schema.table dot syntax in .from().
     const policy = getData<{ enforcement_mode: BudgetEnforcementMode; caution_threshold: number; warning_threshold: number; block_threshold: number }>(
       await supabase
-        .from('core.budget_policies')
+        .schema('core')
+        .from('budget_policies')
         .select('enforcement_mode, caution_threshold, warning_threshold, block_threshold')
         .eq('organization_id', organizationId)
         .eq('is_active', true)
@@ -137,8 +135,14 @@ function checkSingleBudget(
   const actual = Number(budget.actual_amount) || 0;
   const available = totalBudget - committed - actual;
 
-  const utilizationBefore = totalBudget > 0 ? ((committed + actual) / totalBudget) * 100 : 0;
-  const utilizationAfter = totalBudget > 0 ? ((committed + actual + transactionAmount) / totalBudget) * 100 : 0;
+  // BUG-061 FIX: When total_budget is 0, utilization would be NaN (0/0).
+  // Return 0 utilization instead of NaN to prevent downstream errors.
+  const utilizationBefore = totalBudget > 0
+    ? ((committed + actual) / totalBudget) * 100
+    : 0;
+  const utilizationAfter = totalBudget > 0
+    ? ((committed + actual + transactionAmount) / totalBudget) * 100
+    : (transactionAmount > 0 ? Infinity : 0);
   const exceedsBudget = transactionAmount > available;
 
   return {
@@ -154,13 +158,12 @@ function checkSingleBudget(
     transaction_amount: transactionAmount,
     exceeds_budget: exceedsBudget,
     utilization_before: Math.round(utilizationBefore * 10) / 10,
-    utilization_after: Math.round(utilizationAfter * 10) / 10,
+    utilization_after: Math.min(Math.round(utilizationAfter * 10) / 10, 99999.9),
     warning_level: computeWarningLevel(utilizationAfter, policy),
   };
 }
 
-// ─── Build Alert Notifications (Spec 13.4: Budget threshold reached) ─────────
-// Recipients: Project Manager, HOD, Finance, CEO according to severity
+// ─── Build Alert Notifications (Spec 13.4) ──────────────────────────────────
 
 function buildNotifications(
   checks: BudgetCheckResult[]
@@ -201,7 +204,7 @@ function buildNotifications(
       recipient_roles: recipientRoles,
       severity,
       message: `Budget ${check.budget_name || check.budget_id} at ${check.utilization_after}% utilization (${check.warning_level}). Available: PKR ${check.available.toLocaleString()}, Transaction: PKR ${check.transaction_amount.toLocaleString()}`,
-      project_id: undefined, // Can be enriched by caller if project context available
+      project_id: undefined,
       department: check.department,
       category: check.category,
       utilization_after: check.utilization_after,
@@ -220,30 +223,34 @@ export async function checkBudgetForTransaction(
   const { budget_id, project_id, department, category, amount, organization_id } = input;
   const transactionAmount = Number(amount);
 
-if (!organization_id) {
-  return {
-    allowed: false,
-    blocked: false,
-    warning: false,
-    enforcement_mode: 'WARN_ONLY',
-    policy: DEFAULT_POLICY,
-    checks: [],
-    message: 'Organization ID is required for budget check',
-  };
-}
+  if (!organization_id) {
+    return {
+      allowed: false,
+      blocked: false,
+      warning: false,
+      enforcement_mode: 'WARN_ONLY',
+      policy: DEFAULT_POLICY,
+      checks: [],
+      message: 'Organization ID is required for budget check',
+    };
+  }
 
-// Fetch configurable policy
-const policy = await getBudgetPolicy(organization_id);
+  const policy = await getBudgetPolicy(organization_id);
 
   const results: BudgetCheckResult[] = [];
 
   // ── 1. Check project budget if project_id provided ──
   if (project_id) {
+    // BUG-009 FIX: Changed supabase.from('finance.budgets') to
+    // supabase.schema('finance').from('budgets').
+    // Also added .eq('organization_id', organization_id) for org isolation.
     const budget = getData(
       await supabase
-        .from('finance.budgets')
+        .schema('finance')
+        .from('budgets')
         .select('*')
         .eq('project_id', project_id)
+        .eq('organization_id', organization_id)
         .eq('status', 'APPROVED')
         .maybeSingle()
     );
@@ -255,8 +262,11 @@ const policy = await getBudgetPolicy(organization_id);
 
   // ── 2. Check category/department budgets ──
   if (category || department) {
+    // BUG-009 FIX: Changed supabase.from('finance.budgets') to
+    // supabase.schema('finance').from('budgets').
     let query = supabase
-      .from('finance.budgets')
+      .schema('finance')
+      .from('budgets')
       .select('*')
       .eq('status', 'APPROVED')
       .eq('organization_id', organization_id);
@@ -276,9 +286,12 @@ const policy = await getBudgetPolicy(organization_id);
 
   // ── 3. Check budget by direct ID if provided ──
   if (budget_id) {
+    // BUG-009 FIX: Changed supabase.from('finance.budgets') to
+    // supabase.schema('finance').from('budgets').
     const budget = getData(
       await supabase
-        .from('finance.budgets')
+        .schema('finance')
+        .from('budgets')
         .select('*')
         .eq('id', budget_id)
         .eq('organization_id', organization_id)
@@ -294,12 +307,9 @@ const policy = await getBudgetPolicy(organization_id);
   const hasBlocked = results.some(r => r.warning_level === 'BLOCKED');
   const hasWarning = results.some(r => r.warning_level === 'WARNING' || r.warning_level === 'CAUTION');
 
-  // HARD_BLOCK: Block if any budget is exceeded (>= block_threshold)
-  // WARN_ONLY: Always allow, just return warnings
   const isBlocked = policy.enforcement_mode === 'HARD_BLOCK' && hasBlocked;
   const allowed = !isBlocked;
 
-  // Build notifications for threshold alerts (Spec 13.4)
   const notifications = buildNotifications(results);
 
   return {

@@ -87,7 +87,9 @@ export async function POST(req: NextRequest) {
  
     // Enforce budget block (unless overridden by authorized role)
     if (budgetCheck.blocked) {
-      if (force_budget_override && ['CEO', 'FINANCE_HEAD', 'Admin'].includes(auth.role)) {
+      // BUG-026 FIX: Removed 'Admin' from override roles — per spec Appendix A,
+      // Technical Admin has NO finance data access.
+      if (force_budget_override && ['CEO', 'FINANCE_HEAD'].includes(auth.role)) {
         // Allow with override — log the override in audit
         try {
           await supabase.schema('audit').rpc('log_action', {
@@ -129,12 +131,14 @@ export async function POST(req: NextRequest) {
       }
     }
  
+    // BUG-020 FIX: Open period with org filter
     // 3. Open period
     let auditLogFailed = false;
     const period = getData(await supabase
       .from('finance.accounting_periods')
       .select('id')
       .eq('status', 'OPEN')
+      .eq('organization_id', orgId)
       .order('start_date', { ascending: false })
       .limit(1)
       .single());

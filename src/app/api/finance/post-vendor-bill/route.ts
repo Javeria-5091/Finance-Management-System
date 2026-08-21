@@ -83,7 +83,9 @@ export async function POST(req: NextRequest) {
     }
 
     if (budgetCheck.blocked) {
-      if (force_budget_override && ['CEO', 'FINANCE_HEAD', 'Admin'].includes(auth.role)) {
+      // BUG-026 FIX: Removed 'Admin' from override roles — per spec Appendix A,
+      // Technical Admin has NO finance data access.
+      if (force_budget_override && ['CEO', 'FINANCE_HEAD'].includes(auth.role)) {
         try {
           await supabase.schema('audit').rpc('log_action', {
             p_user_id: auth.userId, p_action: 'BUDGET_OVERRIDE', p_entity_type: 'vendor_bill',
@@ -109,6 +111,7 @@ export async function POST(req: NextRequest) {
       .from('finance.accounting_periods')
       .select('id')
       .eq('status', 'OPEN')
+      .eq('organization_id', orgId)
       .order('start_date', { ascending: false })
       .limit(1)
       .single());

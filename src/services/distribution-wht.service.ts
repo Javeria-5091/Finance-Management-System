@@ -90,7 +90,7 @@ export async function getWithholdingTaxConfig(
   try {
     const config = getData<WithholdingTaxConfig>(
       await supabase
-        .from('core.distribution_tax_config')
+        .schema('core').from('distribution_tax_config')
         .select('*')
         .eq('organization_id', organizationId)
         .eq('enabled', true)
@@ -183,7 +183,7 @@ export async function postDistributionWithWHT(
   // completely broken end-to-end.
   const distribution = getData(
     await supabase
-      .from('finance.profit_distributions')
+      .schema('finance').from('profit_distributions')
       .select('*, distribution_lines(*)')
       .eq('id', distribution_id)
       .eq('organization_id', organization_id)
@@ -210,7 +210,7 @@ export async function postDistributionWithWHT(
   if (distribution.fiscal_year_id) {
     const fiscalYear = getData(
       await supabase
-        .from('finance.fiscal_years')
+        .schema('finance').from('fiscal_years')
         .select('id, status, name')
         .eq('id', distribution.fiscal_year_id)
         .single()
@@ -266,7 +266,7 @@ export async function postDistributionWithWHT(
   // 5. Find required accounts
   const retainedEarningsAccount = getData(
     await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'EQUITY')
       .eq('is_active', true)
@@ -281,7 +281,7 @@ export async function postDistributionWithWHT(
 
   const dividendPayableAccount = getData(
     await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'LIABILITY')
       .eq('is_active', true)
@@ -430,7 +430,7 @@ export async function recordWithholdingForTaxCompliance(
     }
 
     const { error } = await supabase
-      .from('finance.tax_credits_and_withholding')
+      .schema('finance').from('tax_credits_and_withholding')
       .insert(whtRecords);
 
     if (error) {

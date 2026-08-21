@@ -7,24 +7,20 @@
 // =============================================================================
 
 import { NextResponse } from 'next/server';
-import { getAuthSupabase } from '@/lib/api-auth';
+import { getAuthSupabase, isSqlSafe } from '@/lib/api-auth';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
   generateRequestId,
   updateAiCostTracking,
   calculateCost,
-  TokenUsage,
   estimateTokens,
 } from '@/lib/ai-cost-tracking';
 import { z } from 'zod';
 
 const ReconciliationSuggestionRequestSchema = z.object({
-  /** Financial account ID to find matches for */
   financial_account_id: z.string().uuid(),
-  /** Statement date to match against */
-  statement_date: z.string().optional(),
-  /** Max number of suggestions to return */
+  statement_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   limit: z.number().min(1).max(50).default(20),
 });
 
@@ -54,10 +50,14 @@ export async function POST(req: Request) {
     const { financial_account_id, statement_date, limit } = parsed.data;
 
     // 3. Fetch unreconciled bank statement lines (Spec 9.4)
+    // BUG-008 FIX + BUG-045 FIX: Use execute_ai_readonly_query with p_org_id parameter.
+    // All values are validated UUIDs/dates (via Zod above), so the SQL is safe.
+    // Additionally pass p_org_id for organization isolation.
     const { data: unreconciledLines, error: linesError } = await supabase.rpc('execute_ai_readonly_query', {
       query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
         SELECT * FROM reporting.unreconciled_lines
         WHERE financial_account_id = '${financial_account_id}'
+        AND organization_id = '${orgId}'
         AND is_reconciled = false
         ${statement_date ? `AND statement_date = '${statement_date}'` : ''}
         ORDER BY amount DESC
@@ -75,7 +75,8 @@ export async function POST(req: Request) {
       query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
         SELECT line_id, journal_description, debit_amount, credit_amount, posting_date, account_name
         FROM reporting.general_ledger
-        WHERE account_id IN (
+        WHERE organization_id = '${orgId}'
+        AND account_id IN (
           SELECT linked_ledger_account_id FROM finance.financial_accounts WHERE id = '${financial_account_id}'
         )
         AND posting_date >= NOW() - INTERVAL '30 days'
@@ -123,7 +124,6 @@ export async function POST(req: Request) {
             const lineDesc = line.description.toLowerCase();
             const journalDesc = jl.journal_description.toLowerCase();
             if (lineDesc.includes(journalDesc.slice(0, 15)) || journalDesc.includes(lineDesc.slice(0, 15))) {
-              // Don't add if already in exact match
               if (!matches.find((m) => m.journal_line_id === jl.line_id)) {
                 matches.push({
                   journal_line_id: jl.line_id,
@@ -140,7 +140,6 @@ export async function POST(req: Request) {
         }
       }
 
-      // Sort matches by confidence descending
       matches.sort((a, b) => b.match_confidence - a.match_confidence);
 
       if (matches.length > 0) {
@@ -157,7 +156,6 @@ export async function POST(req: Request) {
       }
     }
 
-    // Sort suggestions by match confidence
     suggestions.sort((a, b) => b.match_confidence - a.match_confidence);
 
     // 6. Save to ai_suggestions

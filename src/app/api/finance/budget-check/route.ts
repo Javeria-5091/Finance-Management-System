@@ -55,8 +55,9 @@ export async function POST(req: NextRequest) {
     let overrideMessage: string | null = null;
  
     if (force_allow && result.blocked) {
-      // Only CEO, FINANCE_HEAD, or Admin can force-allow blocked transactions
-      const overrideRoles = ['CEO', 'FINANCE_HEAD', 'Admin'];
+      // BUG-026 FIX: Removed 'Admin' from override roles — per spec Appendix A,
+      // Technical Admin has NO finance data access.
+      const overrideRoles = ['CEO', 'FINANCE_HEAD'];
       if (overrideRoles.includes(auth.role)) {
         finalAllowed = true;
         overrideMessage = `Budget override applied by ${auth.role}. Original result was BLOCKED.`;

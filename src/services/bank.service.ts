@@ -126,28 +126,31 @@ export interface ReconciliationSummary {
 
 // ==================== FINANCIAL ACCOUNTS ====================
 
-export const getFinancialAccounts = async () => {
+export const getFinancialAccounts = async (orgId: string) => {
   const { data, error } = await db
     .from('financial_accounts')
     .select('*')
+    .eq('organization_id', orgId)
     .eq('is_active', true)
     .order('institution_type', { ascending: true })
     .order('account_name', { ascending: true });
   return { data: data as FinancialAccount[], error };
 };
 
-export const getReconciliationSummary = async () => {
+export const getReconciliationSummary = async (orgId: string) => {
   const { data, error } = await rpt
     .from('reconciliation_summary')
     .select('*')
+    .eq('organization_id', orgId)
     .order('account_name', { ascending: true });
   return { data: data as ReconciliationSummary[], error };
 };
 
-export const getAssetAccounts = async () => {
+export const getAssetAccounts = async (orgId: string) => {
   const { data, error } = await db
     .from('chart_of_accounts')
     .select('id, code, name, account_type')
+    .eq('organization_id', orgId)
     .eq('posting_allowed', true)
     .eq('is_active', true)
     .like('code', '1%')
@@ -176,10 +179,11 @@ export const updateFinancialAccount = async (id: string, payload: Partial<Financ
 
 // ==================== BANK STATEMENTS ====================
 
-export const getBankStatements = async (accountId: string) => {
+export const getBankStatements = async (orgId: string, accountId: string) => {
   const { data, error } = await db
     .from('bank_statements')
     .select('*, financial_accounts(account_name, currency, masked_identifier)')
+    .eq('organization_id', orgId)
     .eq('financial_account_id', accountId)
     .order('statement_date', { ascending: false });
   return { data: data as BankStatement[], error };
@@ -212,19 +216,21 @@ export const importStatementLines = async (lines: Omit<StatementLine, 'id' | 'cr
 
 // ==================== STATEMENT LINES ====================
 
-export const getStatementLines = async (statementId: string) => {
+export const getStatementLines = async (orgId: string, statementId: string) => {
   const { data, error } = await db
     .from('statement_lines')
     .select('*')
+    .eq('organization_id', orgId)
     .eq('bank_statement_id', statementId)
     .order('line_number', { ascending: true });
   return { data: data as StatementLine[], error };
 };
 
-export const getUnreconciledLines = async () => {
+export const getUnreconciledLines = async (orgId: string) => {
   const { data, error } = await rpt
     .from('unreconciled_lines')
     .select('*')
+    .eq('organization_id', orgId)
     .limit(100);
   return { data, error };
 };
@@ -271,10 +277,11 @@ export const excludeLine = async (lineId: string, reason: string) => {
 
 // ==================== BANK TRANSFERS ====================
 
-export const getBankTransfers = async () => {
+export const getBankTransfers = async (orgId: string) => {
   const { data: transfers, error } = await db
     .from('bank_transfers')
     .select('*')
+    .eq('organization_id', orgId)
     .order('transfer_date', { ascending: false });
 
   if (error || !transfers) return { data: [], error };
@@ -282,7 +289,8 @@ export const getBankTransfers = async () => {
   // Fetch account names separately to avoid FK join issues
   const { data: accounts } = await db
     .from('financial_accounts')
-    .select('id, account_name, currency, masked_identifier');
+    .select('id, account_name, currency, masked_identifier')
+    .eq('organization_id', orgId);
 
   const accMap = new Map((accounts || []).map((a: any) => [a.id, a]));
 
@@ -334,10 +342,11 @@ export const postBankTransfer = async (
 
 // ==================== OPEN PERIOD ====================
 
-export const getOpenPeriod = async () => {
+export const getOpenPeriod = async (orgId: string) => {
   const { data, error } = await db
     .from('accounting_periods')
     .select('id, period_name, start_date, end_date')
+    .eq('organization_id', orgId)
     .eq('status', 'OPEN')
     .order('start_date', { ascending: false })
     .limit(1)

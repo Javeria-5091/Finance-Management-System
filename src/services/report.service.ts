@@ -100,14 +100,18 @@ export const getProjectProfitability = async (start?: string, end?: string) => {
 // Tax Reports
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const getTaxReport = async (taxYear?: string) => {
-  // DEFERRED: No function named tax_report exists in any schema.
-  // This requires a database function to be created. Left unchanged.
-  const { data, error } = await supabase.rpc('tax_report', {
-    p_tax_year: taxYear || null
-  });
+export const getTaxReport = async (taxYear?: string, organization_id?: string) => {
+  // BUG-037 FIX: Query finance.tax_credits_and_withholding instead of non-existent RPC
+  let query = financeDb()
+    .from('tax_credits_and_withholding')
+    .select('*');
+
+  if (organization_id) query = query.eq('organization_id', organization_id);
+  if (taxYear) query = query.eq('tax_year', taxYear);
+
+  const { data, error } = await query;
   if (error) throw new Error(error.message);
-  return data as TaxReportData;
+  return data as unknown as TaxReportData;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -121,19 +125,33 @@ export const getGeneralLedger = async (params: {
   page?: number;
   pageSize?: number;
   search?: string;
+  organization_id?: string;
 }) => {
-  // DEFERRED: No function named general_ledger_report exists (only views).
-  // Left unchanged.
-  const { data, error } = await supabase.rpc('general_ledger_report', {
-    p_account_id: params.accountId || null,
-    p_start: params.startDate || null,
-    p_end: params.endDate || null,
-    p_page: params.page || 1,
-    p_page_size: params.pageSize || 50,
-    p_search: params.search || null,
-  });
+  // BUG-037 FIX: Query reporting.general_ledger view instead of non-existent RPC
+  const page = params.page || 1;
+  const pageSize = params.pageSize || 50;
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+
+  let query = reportingDb()
+    .from('general_ledger')
+    .select('*', { count: 'exact' });
+
+  if (params.organization_id) query = query.eq('organization_id', params.organization_id);
+  if (params.accountId) query = query.eq('account_id', params.accountId);
+  if (params.startDate) query = query.gte('transaction_date', params.startDate);
+  if (params.endDate) query = query.lte('transaction_date', params.endDate);
+  if (params.search) {
+    const escaped = params.search.replace(/[%_]/g, '\\$&');
+    query = query.or(`description.ilike.%${escaped}%,reference.ilike.%${escaped}%`);
+  }
+
+  const { data, error, count } = await query
+    .order('transaction_date', { ascending: true })
+    .range(from, to);
+
   if (error) throw new Error(error.message);
-  return data as { rows: GLEntry[]; total_count: number };
+  return { rows: (data || []) as GLEntry[], total_count: count || 0 };
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -177,57 +195,203 @@ export const getTrialBalance = async (params: {
 // Cash & Bank
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const getAccountBalances = async () => {
-  // DEFERRED: No function named account_balances_report exists in any schema.
-  const { data, error } = await supabase.rpc('account_balances_report');
+export const getAccountBalances = async (organization_id?: string) => {
+  // BUG-037 FIX: Query finance.chart_of_accounts + aggregate from finance.journal_lines
+  // Fetch accounts first (no nested join — avoid TS error with Supabase generated types)
+  let query = financeDb()
+    .from('chart_of_accounts')
+    .select('id, code, name, account_type, is_active, currency, organization_id')
+    .eq('is_active', true);
+
+  if (organization_id) query = query.eq('organization_id', organization_id);
+
+  const { data: accounts, error } = await query.order('code', { ascending: true });
   if (error) throw new Error(error.message);
-  return (data || []) as AccountBalanceRow[];
+
+  // Fetch journal lines separately and aggregate by account_id
+  const accountIds = (accounts || []).map((a: any) => a.id);
+  let lineQuery = financeDb()
+    .from('journal_lines')
+    .select('account_id, debit_amount, credit_amount');
+  if (accountIds.length > 0) {
+    lineQuery = lineQuery.in('account_id', accountIds);
+  }
+  const { data: allLines } = await lineQuery;
+
+  // Build a map: account_id → { totalDebit, totalCredit }
+  const lineMap = new Map<string, { totalDebit: number; totalCredit: number }>();
+  for (const l of allLines || []) {
+    const entry = lineMap.get(l.account_id) || { totalDebit: 0, totalCredit: 0 };
+    entry.totalDebit += Number(l.debit_amount || 0);
+    entry.totalCredit += Number(l.credit_amount || 0);
+    lineMap.set(l.account_id, entry);
+  }
+
+  // Aggregate debit/credit totals per account
+  const rows = (accounts || []).map((account: any) => {
+    const aggregated = lineMap.get(account.id) || { totalDebit: 0, totalCredit: 0 };
+    const totalDebit = aggregated.totalDebit;
+    const totalCredit = aggregated.totalCredit;
+    const balance = totalDebit - totalCredit;
+    return {
+      account_id: account.id,
+      account_code: account.code,
+      account_name: account.name,
+      account_type: account.account_type,
+      currency: account.currency,
+      total_debit: totalDebit,
+      total_credit: totalCredit,
+      balance,
+    };
+  });
+
+  return rows as unknown as AccountBalanceRow[];
 };
 
-export const getBankTransfers = async (start?: string, end?: string) => {
-  // DEFERRED: No function named bank_transfers_report exists in any schema.
-  const { data, error } = await supabase.rpc('bank_transfers_report', {
-    p_start: start || null, p_end: end || null
-  });
+export const getBankTransfers = async (start?: string, end?: string, organization_id?: string) => {
+  // BUG-037 FIX: Query finance.journal_entries where source_type='BANK_TRANSFER'
+  let query = financeDb()
+    .from('journal_entries')
+    .select('*')
+    .eq('source_type', 'BANK_TRANSFER');
+
+  if (organization_id) query = query.eq('organization_id', organization_id);
+  if (start) query = query.gte('transaction_date', start);
+  if (end) query = query.lte('transaction_date', end);
+
+  const { data, error } = await query.order('transaction_date', { ascending: false });
   if (error) throw new Error(error.message);
-  return (data || []) as BankTransferRow[];
+  return (data || []) as unknown as BankTransferRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Budget Variance
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const getBudgetVariance = async (fiscalYearId?: string) => {
-  // DEFERRED: No function named budget_variance_report exists in any schema.
-  const { data, error } = await supabase.rpc('budget_variance_report', {
-    p_fiscal_year_id: fiscalYearId || null
-  });
+export const getBudgetVariance = async (fiscalYearId?: string, organization_id?: string) => {
+  // BUG-037 FIX: Query finance.budgets with left join on budget_lines for actual data
+  // Fetch budgets with their lines (single-level nested select only)
+  let query = financeDb()
+    .from('budgets')
+    .select(`
+      id,
+      name,
+      fiscal_year_id,
+      total_amount,
+      budget_lines(
+        id,
+        account_id,
+        budgeted_amount
+      )
+    `);
+
+  if (organization_id) query = query.eq('organization_id', organization_id);
+  if (fiscalYearId) query = query.eq('fiscal_year_id', fiscalYearId);
+
+  const { data: budgets, error } = await query;
   if (error) throw new Error(error.message);
-  return (data || []) as BudgetVarianceRow[];
+
+  // Collect all account_ids from budget lines to fetch actuals in one query
+  const allAccountIds: string[] = [];
+  for (const budget of budgets || []) {
+    for (const line of budget.budget_lines || []) {
+      if (line.account_id) allAccountIds.push(line.account_id);
+    }
+  }
+
+  // Fetch journal lines for all referenced accounts in a single query
+  let actualsQuery = financeDb()
+    .from('journal_lines')
+    .select('account_id, debit_amount, credit_amount');
+  if (allAccountIds.length > 0) {
+    actualsQuery = actualsQuery.in('account_id', allAccountIds);
+  }
+  const { data: allActualLines } = await actualsQuery;
+
+  // Build account_id → actual amount map
+  const actualsMap = new Map<string, number>();
+  for (const l of allActualLines || []) {
+    const current = actualsMap.get(l.account_id) || 0;
+    actualsMap.set(l.account_id, current + Number(l.debit_amount || 0) - Number(l.credit_amount || 0));
+  }
+
+  // Fetch account names for display
+  const accountNamesMap = new Map<string, string>();
+  if (allAccountIds.length > 0) {
+    const { data: acctData } = await financeDb()
+      .from('chart_of_accounts')
+      .select('id, name')
+      .in('id', allAccountIds);
+    for (const a of acctData || []) {
+      accountNamesMap.set(a.id, a.name);
+    }
+  }
+
+  // Flatten budget lines with computed variance
+  const rows: any[] = [];
+  for (const budget of budgets || []) {
+    for (const line of budget.budget_lines || []) {
+      const actual = Math.abs(actualsMap.get(line.account_id) || 0);
+      const budgeted = Number(line.budgeted_amount || 0);
+      rows.push({
+        budget_id: budget.id,
+        budget_name: budget.name,
+        account_id: line.account_id,
+        account_name: accountNamesMap.get(line.account_id) || 'Unknown',
+        budgeted_amount: budgeted,
+        actual_amount: actual,
+        variance: budgeted - actual,
+      });
+    }
+  }
+
+  return rows as unknown as BudgetVarianceRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Ownership & Equity
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const getOwnershipEquity = async () => {
-  // DEFERRED: No function named ownership_equity_report exists in any schema.
-  const { data, error } = await supabase.rpc('ownership_equity_report');
+export const getOwnershipEquity = async (organization_id?: string) => {
+  // BUG-037 FIX: Query finance.profit_distributions and finance.distribution_lines
+  let query = financeDb()
+    .from('profit_distributions')
+    .select(`
+      id,
+      distribution_date,
+      total_amount,
+      status,
+      distribution_lines(
+        id,
+        shareholder_id
+      )
+    `);
+
+  if (organization_id) query = query.eq('organization_id', organization_id);
+
+  const { data, error } = await query.order('distribution_date', { ascending: false });
   if (error) throw new Error(error.message);
-  return (data || []) as OwnershipRow[];
+  return (data || []) as unknown as OwnershipRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Platform Settlements
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const getPlatformSettlements = async (start?: string, end?: string) => {
-  // DEFERRED: No function named platform_settlements_report exists in any schema.
-  const { data, error } = await supabase.rpc('platform_settlements_report', {
-    p_start: start || null, p_end: end || null
-  });
+export const getPlatformSettlements = async (start?: string, end?: string, organization_id?: string) => {
+  // BUG-037 FIX: Query finance.journal_entries where source_type in ('PLATFORM_FEE','COMMISSION')
+  let query = financeDb()
+    .from('journal_entries')
+    .select('*')
+    .in('source_type', ['PLATFORM_FEE', 'COMMISSION']);
+
+  if (organization_id) query = query.eq('organization_id', organization_id);
+  if (start) query = query.gte('transaction_date', start);
+  if (end) query = query.lte('transaction_date', end);
+
+  const { data, error } = await query.order('transaction_date', { ascending: false });
   if (error) throw new Error(error.message);
-  return (data || []) as PlatformSettlementRow[];
+  return (data || []) as unknown as PlatformSettlementRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -268,11 +432,84 @@ export const getFiscalCloseStatus = async (fiscalYearId?: string) => {
 // Controls & Audit
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const getApprovalAging = async () => {
-  // DEFERRED: No function named approval_aging_report exists in any schema.
-  const { data, error } = await supabase.rpc('approval_aging_report');
-  if (error) throw new Error(error.message);
-  return (data || []) as ApprovalAgingRow[];
+export const getApprovalAging = async (organization_id?: string) => {
+  // BUG-037 FIX: Query expenses, invoices, vendor_bills where status in pending states
+  // Combine results from multiple source tables
+  const pendingStatuses = ['SUBMITTED', 'VERIFIED', 'APPROVED'];
+
+  const [invoicesRes, expensesRes, vendorBillsRes] = await Promise.all([
+    supabase
+      .from('invoices')
+      .select('id, invoice_number, total_amount, currency, due_date, status, created_at, organization_id')
+      .in('status', pendingStatuses),
+    supabase
+      .from('expenses')
+      .select('id, title, amount, currency, status, expense_date, created_at, organization_id')
+      .in('status', pendingStatuses),
+    supabase
+      .from('vendor_bills')
+      .select('id, bill_number, total_amount, currency, due_date, status, created_at, organization_id')
+      .in('status', pendingStatuses),
+  ]);
+
+  if (invoicesRes.error) throw new Error(invoicesRes.error.message);
+  if (expensesRes.error) throw new Error(expensesRes.error.message);
+  if (vendorBillsRes.error) throw new Error(vendorBillsRes.error.message);
+
+  const now = new Date();
+  const rows: any[] = [];
+
+  for (const inv of invoicesRes.data || []) {
+    const createdAt = new Date(inv.created_at);
+    const daysPending = Math.floor((now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24));
+    rows.push({
+      id: inv.id,
+      document_type: 'invoice',
+      document_number: inv.invoice_number,
+      amount: inv.total_amount,
+      currency: inv.currency,
+      status: inv.status,
+      days_pending: daysPending,
+      organization_id: inv.organization_id,
+    });
+  }
+
+  for (const exp of expensesRes.data || []) {
+    const createdAt = new Date(exp.created_at);
+    const daysPending = Math.floor((now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24));
+    rows.push({
+      id: exp.id,
+      document_type: 'expense',
+      document_number: exp.title,
+      amount: exp.amount,
+      currency: exp.currency,
+      status: exp.status,
+      days_pending: daysPending,
+      organization_id: exp.organization_id,
+    });
+  }
+
+  for (const vb of vendorBillsRes.data || []) {
+    const createdAt = new Date(vb.created_at);
+    const daysPending = Math.floor((now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24));
+    rows.push({
+      id: vb.id,
+      document_type: 'vendor_bill',
+      document_number: vb.bill_number,
+      amount: vb.total_amount,
+      currency: vb.currency,
+      status: vb.status,
+      days_pending: daysPending,
+      organization_id: vb.organization_id,
+    });
+  }
+
+  // Filter by organization_id if provided
+  const filtered = organization_id
+    ? rows.filter((r) => r.organization_id === organization_id)
+    : rows;
+
+  return filtered as unknown as ApprovalAgingRow[];
 };
 
 export const getAuditLog = async (params: {
@@ -302,11 +539,43 @@ export const getAuditLog = async (params: {
 // Currency Exposure
 // ═══════════════════════════════════════════════════════════════════════════
 
-export const getCurrencyExposure = async () => {
-  // DEFERRED: No function named currency_exposure_report exists in any schema.
-  const { data, error } = await supabase.rpc('currency_exposure_report');
+export const getCurrencyExposure = async (organization_id?: string) => {
+  // BUG-037 FIX: Query finance.journal_entries grouped by currency
+  let query = financeDb()
+    .from('journal_entries')
+    .select('currency');
+
+  if (organization_id) query = query.eq('organization_id', organization_id);
+
+  const { data, error } = await query;
   if (error) throw new Error(error.message);
-  return (data || []) as CurrencyExposureRow[];
+
+  // Group by currency and compute totals from journal_lines
+  const currencies = [...new Set((data || []).map((e: any) => e.currency).filter(Boolean))];
+  const rows: any[] = [];
+
+  for (const currency of currencies) {
+    let lineQuery = financeDb()
+      .from('journal_lines')
+      .select('debit_amount, credit_amount')
+      .eq('currency', currency);
+
+    if (organization_id) lineQuery = lineQuery.eq('organization_id', organization_id);
+
+    const { data: lines } = await lineQuery;
+    const totalDebit = (lines || []).reduce((s: number, l: any) => s + Number(l.debit_amount || 0), 0);
+    const totalCredit = (lines || []).reduce((s: number, l: any) => s + Number(l.credit_amount || 0), 0);
+
+    rows.push({
+      currency,
+      total_debit: totalDebit,
+      total_credit: totalCredit,
+      net_exposure: totalDebit - totalCredit,
+      transaction_count: (data || []).filter((e: any) => e.currency === currency).length,
+    });
+  }
+
+  return rows as unknown as CurrencyExposureRow[];
 };
 
 export default {

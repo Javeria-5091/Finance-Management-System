@@ -1,6 +1,6 @@
 import { supabase } from '@/lib/supabase';
 
-// ─── Project Service ───
+// --- Project Service ---
 // Provides CRUD and profitability operations for project records
 // Spec: Maintain project code, client, manager, platform, contract value, currency, start/end date,
 //        status, budget, and profitability dimensions
@@ -53,8 +53,10 @@ export const projectService = {
   },
 
   async fetchProjectProfitability(projectId: string) {
+    // BUG-058 FIX: Use supabase.schema('reporting').from('v_project_profitability') instead of dot syntax
     const { data, error } = await supabase
-      .from('reporting.v_project_profitability')
+      .schema('reporting')
+      .from('v_project_profitability')
       .select('*')
       .eq('project_id', projectId)
       .maybeSingle();
@@ -127,14 +129,21 @@ export const projectService = {
   },
 
   async getProjectStats(orgId?: string) {
-    const { count: activeCount } = await supabase
+    // BUG-058 FIX: Add organization_id filter to both count queries
+    let activeQuery = supabase
       .from('projects')
       .select('id', { count: 'exact', head: true })
       .eq('is_active', true);
-    const { count: closedCount } = await supabase
+    if (orgId) activeQuery = activeQuery.eq('organization_id', orgId);
+
+    let closedQuery = supabase
       .from('projects')
       .select('id', { count: 'exact', head: true })
       .eq('status', 'CLOSED');
+    if (orgId) closedQuery = closedQuery.eq('organization_id', orgId);
+
+    const { count: activeCount } = await activeQuery;
+    const { count: closedCount } = await closedQuery;
 
     return { active: activeCount || 0, closed: closedCount || 0 };
   },

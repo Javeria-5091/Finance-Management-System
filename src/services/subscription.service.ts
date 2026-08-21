@@ -49,6 +49,7 @@ export async function fetchSubscriptions(filters?: {
   status?: string;
 }) {
   let query = supabase
+    .schema('finance')
     .from('subscriptions')
     .select('*')
     .order('created_at', { ascending: false });
@@ -73,6 +74,7 @@ export async function fetchSubscriptions(filters?: {
 // ─── Fetch single subscription ───
 export async function fetchSubscriptionById(id: string) {
   const { data, error } = await supabase
+    .schema('finance')
     .from('subscriptions')
     .select('*')
     .eq('id', id)
@@ -96,6 +98,7 @@ export async function createSubscription(subData: Record<string, any>) {
   }
 
   const { data, error } = await supabase
+    .schema('finance')
     .from('subscriptions')
     .insert(cleaned)
     .select('*')
@@ -119,6 +122,7 @@ export async function updateSubscription(id: string, updates: Record<string, any
   }
 
   const { data, error } = await supabase
+    .schema('finance')
     .from('subscriptions')
     .update(cleaned)
     .eq('id', id)
@@ -131,6 +135,7 @@ export async function updateSubscription(id: string, updates: Record<string, any
 // ─── Delete subscription ───
 export async function deleteSubscription(id: string) {
   const { error } = await supabase
+    .schema('finance')
     .from('subscriptions')
     .delete()
     .eq('id', id);
@@ -140,6 +145,7 @@ export async function deleteSubscription(id: string) {
 // ─── Fetch upcoming renewals (from view) ───
 export async function fetchUpcomingRenewals() {
   const { data, error } = await supabase
+    .schema('reporting')
     .from('v_subscription_renewals')
     .select('*')
     .order('renewal_date', { ascending: true });
@@ -150,6 +156,7 @@ export async function fetchUpcomingRenewals() {
 // ─── Fetch spend summary (from view) ───
 export async function fetchSpendSummary() {
   const { data, error } = await supabase
+    .schema('reporting')
     .from('v_subscription_spend')
     .select('*');
   if (error) throw new Error(error.message);
@@ -160,10 +167,12 @@ export async function fetchSpendSummary() {
 export async function fetchSubscriptionStats(): Promise<SubscriptionStats> {
   const [activeRes, renewalsRes] = await Promise.all([
     supabase
+      .schema('finance')
       .from('subscriptions')
       .select('id, amount, billing_frequency')
       .eq('status', 'ACTIVE'),
     supabase
+      .schema('reporting')
       .from('v_subscription_renewals')
       .select('id, renewal_bucket'),
   ]);

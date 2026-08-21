@@ -2,7 +2,7 @@
 // OSYSTIC Finance Management System — Payroll Service (P1)
 // ================================================================
 // P0/P1 Convention: Service layer for payroll data access
-// Uses financeDB (finance schema) and default supabase client
+// Uses finance schema for all payroll tables
 // ================================================================
 
 import { supabase } from "@/lib/supabase";
@@ -126,6 +126,7 @@ function emptyToNull(obj: Record<string, any>): Record<string, any> {
 
 export async function fetchEmployees(search?: string) {
   let query = supabase
+    .schema('finance')
     .from("payroll_employees")
     .select("*")
     .order("created_at", { ascending: false });
@@ -143,6 +144,7 @@ export async function fetchEmployees(search?: string) {
 
 export async function fetchEmployeeWithCompensation(employeeId: string) {
   const { data, error } = await supabase
+    .schema('finance')
     .from("payroll_employees")
     .select("*, payroll_compensation(*)")
     .eq("id", employeeId)
@@ -154,9 +156,9 @@ export async function fetchEmployeeWithCompensation(employeeId: string) {
 
 export async function createEmployee(employeeData: any) {
   // Generate employee code
-  const { data: codeData } = await supabase.rpc(
-    "payroll_generate_employee_code"
-  );
+  const { data: codeData } = await supabase
+    .schema('finance')
+    .rpc("payroll_generate_employee_code");
   const employeeCode =
     codeData || `EMP-${Date.now().toString().slice(-4)}`;
 
@@ -168,6 +170,7 @@ export async function createEmployee(employeeData: any) {
   });
 
   const { data, error } = await supabase
+    .schema('finance')
     .from("payroll_employees")
     .insert(cleanedData)
     .select("*")
@@ -182,6 +185,7 @@ export async function updateEmployee(id: string, updates: any) {
   const cleanedUpdates = emptyToNull(updates);
 
   const { data, error } = await supabase
+    .schema('finance')
     .from("payroll_employees")
     .update(cleanedUpdates)
     .eq("id", id)
@@ -197,6 +201,7 @@ export async function updateEmployee(id: string, updates: any) {
 export async function setCompensation(employeeId: string, compData: any) {
   // Deactivate old active compensation
   await supabase
+    .schema('finance')
     .from("payroll_compensation")
     .update({ is_active: false })
     .eq("employee_id", employeeId)
@@ -210,6 +215,7 @@ export async function setCompensation(employeeId: string, compData: any) {
   });
 
   const { data, error } = await supabase
+    .schema('finance')
     .from("payroll_compensation")
     .insert(cleanedData)
     .select("*")
@@ -230,6 +236,7 @@ export async function setDeduction(employeeId: string, dedData: any) {
   });
 
   const { data, error } = await supabase
+    .schema('finance')
     .from("payroll_deductions")
     .insert(cleanedData)
     .select("*")
@@ -241,6 +248,7 @@ export async function setDeduction(employeeId: string, dedData: any) {
 
 export async function fetchDeductions(employeeId: string) {
   const { data, error } = await supabase
+    .schema('finance')
     .from("payroll_deductions")
     .select("*")
     .eq("employee_id", employeeId)
@@ -254,6 +262,7 @@ export async function fetchDeductions(employeeId: string) {
 
 export async function fetchPayrollRuns() {
   const { data, error } = await supabase
+    .schema('finance')
     .from("payroll_runs")
     .select("*")
     .order("created_at", { ascending: false });
@@ -264,6 +273,7 @@ export async function fetchPayrollRuns() {
 
 export async function fetchPayrollLines(runId: string) {
   const { data, error } = await supabase
+    .schema('finance')
     .from("payroll_lines")
     .select("*")
     .eq("payroll_run_id", runId);
@@ -276,6 +286,7 @@ export async function fetchPayrollLines(runId: string) {
 
 export async function fetchAdvances() {
   const { data, error } = await supabase
+    .schema('finance')
     .from("payroll_advances")
     .select("*, payroll_employees(id, name, employee_code, department)")
     .order("request_date", { ascending: false });
@@ -288,6 +299,7 @@ export async function fetchAdvances() {
 
 export async function fetchCommissions() {
   const { data, error } = await supabase
+    .schema('finance')
     .from("payroll_commissions")
     .select("*, payroll_employees(id, name, employee_code, department)")
     .order("created_at", { ascending: false });
@@ -301,16 +313,19 @@ export async function fetchCommissions() {
 export async function fetchPayrollStats() {
   const [empRes, runRes, advRes] = await Promise.all([
     supabase
+      .schema('finance')
       .from("payroll_employees")
       .select("id", { count: "exact" })
       .eq("status", "ACTIVE"),
     supabase
+      .schema('finance')
       .from("payroll_runs")
       .select("total_net_pay")
       .eq("status", "POSTED")
       .order("created_at", { ascending: false })
       .limit(1),
     supabase
+      .schema('finance')
       .from("payroll_advances")
       .select("remaining_balance")
       .in("approval_status", ["APPROVED", "PARTIALLY_RECOVERED"]),

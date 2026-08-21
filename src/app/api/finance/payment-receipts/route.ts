@@ -91,11 +91,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Client not found' }, { status: 404 });
     }
 
-    // Validate financial account exists
+    // BUG-021 FIX: Validate financial account exists with org isolation
     const finAccount = getData(await supabase
       .from('finance.financial_accounts')
       .select('id, name, account_type, currency')
       .eq('id', financial_account_id)
+      .eq('organization_id', auth.orgId)
       .single());
 
     if (!finAccount) {
@@ -106,11 +107,12 @@ export async function POST(req: NextRequest) {
     const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'PMT-RC' });
     const receiptNumber = numData || `PMT-RC-${Date.now().toString().slice(-6)}`;
 
-    // Get open period
+    // BUG-020 FIX: Get open period with org filter
     const period = getData(await supabase
       .from('finance.accounting_periods')
       .select('id')
       .eq('status', 'OPEN')
+      .eq('organization_id', auth.orgId)
       .order('start_date', { ascending: false })
       .limit(1)
       .single());

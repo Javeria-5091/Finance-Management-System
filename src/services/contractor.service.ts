@@ -47,6 +47,7 @@ export async function fetchContractors(filters?: {
   status?: string;
 }) {
   let query = supabase
+    .schema('finance')
     .from('contractors')
     .select('*')
     .order('created_at', { ascending: false });
@@ -70,6 +71,7 @@ export async function fetchContractors(filters?: {
 // ─── Fetch single contractor ───
 export async function fetchContractorById(id: string) {
   const { data, error } = await supabase
+    .schema('finance')
     .from('contractors')
     .select('*')
     .eq('id', id)
@@ -92,6 +94,7 @@ export async function createContractor(contractorData: Record<string, any>) {
   }
 
   const { data, error } = await supabase
+    .schema('finance')
     .from('contractors')
     .insert(cleaned)
     .select('*')
@@ -113,6 +116,7 @@ export async function updateContractor(id: string, updates: Record<string, any>)
   }
 
   const { data, error } = await supabase
+    .schema('finance')
     .from('contractors')
     .update(cleaned)
     .eq('id', id)
@@ -125,6 +129,7 @@ export async function updateContractor(id: string, updates: Record<string, any>)
 // ─── Delete contractor ───
 export async function deleteContractor(id: string) {
   const { error } = await supabase
+    .schema('finance')
     .from('contractors')
     .delete()
     .eq('id', id);
@@ -134,6 +139,7 @@ export async function deleteContractor(id: string) {
 // ─── Fetch expiring contracts (from view) ───
 export async function fetchExpiringContracts() {
   const { data, error } = await supabase
+    .schema('reporting')
     .from('v_contractor_expirations')
     .select('*')
     .order('contract_end', { ascending: true });
@@ -144,6 +150,7 @@ export async function fetchExpiringContracts() {
 // ─── Fetch cost summary by role (from view) ───
 export async function fetchCostByRole() {
   const { data, error } = await supabase
+    .schema('reporting')
     .from('v_contractor_costs')
     .select('*');
   if (error) throw new Error(error.message);
@@ -153,6 +160,7 @@ export async function fetchCostByRole() {
 // ─── Fetch cost summary by project (from view) ───
 export async function fetchCostByProject() {
   const { data, error } = await supabase
+    .schema('reporting')
     .from('v_contractor_project_costs')
     .select('*');
   if (error) throw new Error(error.message);
@@ -163,10 +171,12 @@ export async function fetchCostByProject() {
 export async function fetchContractorStats(): Promise<ContractorStats> {
   const [activeRes, expirationsRes] = await Promise.all([
     supabase
+      .schema('finance')
       .from('contractors')
       .select('id, rate, rate_type, currency')
       .eq('status', 'ACTIVE'),
     supabase
+      .schema('reporting')
       .from('v_contractor_expirations')
       .select('id, expiry_bucket'),
   ]);
@@ -211,7 +221,7 @@ export async function fetchContractorStats(): Promise<ContractorStats> {
 
   return {
     activeCount: active.length,
- normalizedMonthly: Math.round(normalizedMonthly * 100) / 100,
+    normalizedMonthly: Math.round(normalizedMonthly * 100) / 100,
     annualizedTotal: Math.round(annualizedTotal * 100) / 100,
     expiring30Days,
     expiredCount,

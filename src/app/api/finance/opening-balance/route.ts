@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requirePermission } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
  
@@ -39,6 +40,10 @@ export async function POST(req: NextRequest) {
   const auth = await requirePermission('JOURNAL_CREATE');
   if (auth instanceof NextResponse) return auth;
  
+  // BUG-025 FIX: Enforce MFA for opening balance import (P0 financial action)
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
+
   try {
     const { action, rows, fiscalYearId } = await req.json();
     const supabase = db();
@@ -149,13 +154,19 @@ export async function POST(req: NextRequest) {
         });
       }
  
-      // Audit
-      try {
-        await supabase.from('audit.audit_log').insert({
-          user_id: auth.userId, action: 'OPENING_BALANCE_IMPORTED', module: 'ACCOUNTING',
-          details: JSON.stringify({ batch_id: batchId, rows: rows.length, total_debit: totalDebit, total_credit: totalCredit, journal_id: journalId }),
-        });
-      } catch {}
+      // BUG-027 FIX: Use proper audit RPC instead of raw insert
+      await supabase.schema('audit').rpc('log_action', {
+        p_user_id: auth.userId,
+        p_action: 'OPENING_BALANCE_IMPORTED',
+        p_entity_type: 'opening_balance',
+        p_entity_id: batchId,
+        p_description: `Opening balance imported: ${rows.length} accounts, balanced at PKR ${totalDebit.toLocaleString()}`,
+        p_previous_status: null,
+        p_new_status: 'IMPORTED',
+        p_source_module: 'accounting',
+        p_severity: 'high',
+        p_new_values: { batch_id: batchId, rows: rows.length, total_debit: totalDebit, total_credit: totalCredit, journal_id: journalId },
+      });
  
       return NextResponse.json({ success: true, batch_id: batchId, journal_id: journalId, message: `Opening balance imported: ${rows.length} accounts, balanced at PKR ${totalDebit.toLocaleString()}` });
     }

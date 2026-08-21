@@ -44,7 +44,7 @@ export function calculateCommission(
 }
 
 // ─── Fetch all commissions ───
-export async function fetchCommissions(filters?: {
+export async function fetchCommissions(orgId: string, filters?: {
   search?: string;
   status?: string;
   commission_type?: string;
@@ -53,8 +53,10 @@ export async function fetchCommissions(filters?: {
   contractor_id?: string;
 }) {
   let query = supabase
+    .schema('finance')
     .from('commissions')
     .select('*')
+    .eq('organization_id', orgId)
     .order('created_at', { ascending: false });
 
   if (filters?.search) {
@@ -83,10 +85,12 @@ export async function fetchCommissions(filters?: {
 }
 
 // ─── Fetch single commission ───
-export async function fetchCommissionById(id: string) {
+export async function fetchCommissionById(orgId: string, id: string) {
   const { data, error } = await supabase
+    .schema('finance')
     .from('commissions')
     .select('*')
+    .eq('organization_id', orgId)
     .eq('id', id)
     .single();
   if (error) throw new Error(error.message);
@@ -124,6 +128,7 @@ export async function createCommission(commissionData: Record<string, any>) {
   }
 
   const { data, error } = await supabase
+    .schema('finance')
     .from('commissions')
     .insert(cleaned)
     .select('*')
@@ -133,7 +138,7 @@ export async function createCommission(commissionData: Record<string, any>) {
 }
 
 // ─── Update commission ───
-export async function updateCommission(id: string, updates: Record<string, any>) {
+export async function updateCommission(orgId: string, id: string, updates: Record<string, any>) {
   const { created_by, id: _id, net_amount: _na, ...rest } = updates as any;
   const cleaned = emptyToNull(rest);
 
@@ -153,15 +158,17 @@ export async function updateCommission(id: string, updates: Record<string, any>)
 
   // Recalculate commission if percentage type and base/rate changed
   if (cleaned.commission_type === 'PERCENTAGE' && (cleaned.base_amount !== undefined || cleaned.rate_or_amount !== undefined)) {
-    const existing = await fetchCommissionById(id);
+    const existing = await fetchCommissionById(orgId, id);
     const base = cleaned.base_amount ?? existing.base_amount;
     const rate = cleaned.rate_or_amount ?? existing.rate_or_amount;
     cleaned.commission_amount = calculateCommission('PERCENTAGE', rate, base);
   }
 
   const { data, error } = await supabase
+    .schema('finance')
     .from('commissions')
     .update(cleaned)
+    .eq('organization_id', orgId)
     .eq('id', id)
     .select('*')
     .single();
@@ -172,6 +179,7 @@ export async function updateCommission(id: string, updates: Record<string, any>)
 // ─── Delete commission ───
 export async function deleteCommission(id: string) {
   const { error } = await supabase
+    .schema('finance')
     .from('commissions')
     .delete()
     .eq('id', id);
@@ -181,6 +189,7 @@ export async function deleteCommission(id: string) {
 // ─── Approve commission ───
 export async function approveCommission(id: string, approvedBy: string) {
   const { data, error } = await supabase
+    .schema('finance')
     .from('commissions')
     .update({
       status: 'APPROVED',
@@ -199,6 +208,7 @@ export async function approveCommission(id: string, approvedBy: string) {
 // ─── Mark commission as paid ───
 export async function markCommissionPaid(id: string, paymentDate: string, paymentRef: string) {
   const { data, error } = await supabase
+    .schema('finance')
     .from('commissions')
     .update({
       status: 'PAID',
@@ -215,46 +225,56 @@ export async function markCommissionPaid(id: string, paymentDate: string, paymen
 }
 
 // ─── Fetch summary by person (from view) ───
-export async function fetchCommissionByPerson() {
+export async function fetchCommissionByPerson(orgId: string) {
   const { data, error } = await supabase
+    .schema('reporting')
     .from('v_commission_by_person')
-    .select('*');
+    .select('*')
+    .eq('organization_id', orgId);
   if (error) throw new Error(error.message);
   return (data as CommissionByPersonRow[]) || [];
 }
 
 // ─── Fetch summary by project (from view) ───
-export async function fetchCommissionByProject() {
+export async function fetchCommissionByProject(orgId: string) {
   const { data, error } = await supabase
+    .schema('reporting')
     .from('v_commission_by_project')
-    .select('*');
+    .select('*')
+    .eq('organization_id', orgId);
   if (error) throw new Error(error.message);
   return (data as CommissionByProjectRow[]) || [];
 }
 
 // ─── Fetch summary by type (from view) ───
-export async function fetchCommissionByType() {
+export async function fetchCommissionByType(orgId: string) {
   const { data, error } = await supabase
+    .schema('reporting')
     .from('v_commission_by_type')
-    .select('*');
+    .select('*')
+    .eq('organization_id', orgId);
   if (error) throw new Error(error.message);
   return (data as CommissionByTypeRow[]) || [];
 }
 
 // ─── Fetch status summary (from view) ───
-export async function fetchCommissionStatusSummary() {
+export async function fetchCommissionStatusSummary(orgId: string) {
   const { data, error } = await supabase
+    .schema('reporting')
     .from('v_commission_status_summary')
-    .select('*');
+    .select('*')
+    .eq('organization_id', orgId);
   if (error) throw new Error(error.message);
   return (data as CommissionStatusRow[]) || [];
 }
 
 // ─── Fetch commission stats ───
-export async function fetchCommissionStats(): Promise<CommissionStats> {
+export async function fetchCommissionStats(orgId: string): Promise<CommissionStats> {
   const { data, error } = await supabase
+    .schema('finance')
     .from('commissions')
-    .select('id, commission_amount, tax_withheld, net_amount, status, currency');
+    .select('id, commission_amount, tax_withheld, net_amount, status, currency')
+    .eq('organization_id', orgId);
   if (error) throw new Error(error.message);
 
   const rows = data || [];

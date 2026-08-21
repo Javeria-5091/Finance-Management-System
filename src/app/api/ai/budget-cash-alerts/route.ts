@@ -13,7 +13,7 @@
 import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
-import { getAuthSupabase } from '@/lib/api-auth';
+import { getAuthSupabase, isSqlSafe } from '@/lib/api-auth';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
@@ -70,22 +70,33 @@ export async function POST(req: Request) {
     const alertData: Record<string, any> = {};
 
     // Cash position
-    const { data: cashPosition } = await supabase.rpc('execute_ai_readonly_query', {
-      query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
+    const cashQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
         SELECT * FROM reporting.v_cash_position WHERE organization_id = '${orgId}' LIMIT 50
-      ) t`,
+      ) t`;
+    const cashSafety = await isSqlSafe(cashQuery);
+    if (!cashSafety.safe) {
+      return NextResponse.json({ error: 'Query safety check failed', reason: cashSafety.reason }, { status: 500 });
+    }
+    const { data: cashPosition } = await supabase.rpc('execute_ai_readonly_query', {
+      query_string: cashQuery,
     });
     alertData.cash_position = cashPosition || [];
 
     // Budget vs actual
-    const { data: budgetVsActual } = await supabase.rpc('execute_ai_readonly_query', {
-      query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
+    const budgetQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
         SELECT * FROM reporting.budget_vs_actual
-        WHERE utilization_pct > 80
+        WHERE organization_id = '${orgId}'
+        AND utilization_pct > 80
         ${budget_id ? `AND budget_id = '${budget_id}'` : ''}
         ${project_id ? `AND project_id = '${project_id}'` : ''}
         LIMIT 50
-      ) t`,
+      ) t`;
+    const budgetSafety = await isSqlSafe(budgetQuery);
+    if (!budgetSafety.safe) {
+      return NextResponse.json({ error: 'Query safety check failed', reason: budgetSafety.reason }, { status: 500 });
+    }
+    const { data: budgetVsActual } = await supabase.rpc('execute_ai_readonly_query', {
+      query_string: budgetQuery,
     });
     alertData.budget_overruns = budgetVsActual || [];
 
@@ -93,25 +104,37 @@ export async function POST(req: Request) {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() + days_ahead);
 
-    const { data: upcomingPayables } = await supabase.rpc('execute_ai_readonly_query', {
-      query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
+    const payableQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
         SELECT * FROM reporting.payable_aging
-        WHERE due_date <= '${cutoffDate.toISOString().split('T')[0]}'
+        WHERE organization_id = '${orgId}'
+        AND due_date <= '${cutoffDate.toISOString().split('T')[0]}'
         AND outstanding_amount > 0
         ORDER BY due_date ASC
         LIMIT 50
-      ) t`,
+      ) t`;
+    const payableSafety = await isSqlSafe(payableQuery);
+    if (!payableSafety.safe) {
+      return NextResponse.json({ error: 'Query safety check failed', reason: payableSafety.reason }, { status: 500 });
+    }
+    const { data: upcomingPayables } = await supabase.rpc('execute_ai_readonly_query', {
+      query_string: payableQuery,
     });
     alertData.upcoming_obligations = upcomingPayables || [];
 
     // Receivable aging (collection risk)
-    const { data: collectionRisk } = await supabase.rpc('execute_ai_readonly_query', {
-      query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
+    const receivableQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
         SELECT * FROM reporting.receivable_aging
-        WHERE overdue_1_30_days > 0 OR overdue_31_60_days > 0 OR overdue_61_90_days > 0 OR overdue_over_90_days > 0
+        WHERE organization_id = '${orgId}'
+        AND (overdue_1_30_days > 0 OR overdue_31_60_days > 0 OR overdue_61_90_days > 0 OR overdue_over_90_days > 0)
         ORDER BY overdue_over_90_days DESC
         LIMIT 50
-      ) t`,
+      ) t`;
+    const receivableSafety = await isSqlSafe(receivableQuery);
+    if (!receivableSafety.safe) {
+      return NextResponse.json({ error: 'Query safety check failed', reason: receivableSafety.reason }, { status: 500 });
+    }
+    const { data: collectionRisk } = await supabase.rpc('execute_ai_readonly_query', {
+      query_string: receivableQuery,
     });
     alertData.collection_risk = collectionRisk || [];
 

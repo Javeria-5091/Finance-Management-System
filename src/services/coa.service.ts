@@ -7,11 +7,9 @@ import type {
   CreateAccountInput,
 } from '@/types/accounting.types';
 
-// ⭐ Yeh sab tables 'finance' schema mein hain
 const SCHEMA = 'finance';
 
 export async function getCOATree(): Promise<ChartOfAccountTree[]> {
-  // ⭐ .schema(SCHEMA) add kiya
   const { data, error } = await supabase
     .schema(SCHEMA)
     .from('coa_tree')
@@ -162,7 +160,14 @@ export async function reactivateAccount(id: string): Promise<void> {
 }
 
 export async function isAccountUsed(id: string): Promise<boolean> {
-  return false; // Phase 2 mein implement hoga
+  // BUG-056 FIX: Actually check if the account has any journal line entries.
+  // An account is considered "used" if any posted journal entry references it.
+  const { count } = await supabase
+    .schema(SCHEMA)
+    .from('journal_lines')
+    .select('id', { count: 'exact', head: true })
+    .eq('account_id', id);
+  return (count || 0) > 0;
 }
 
 export async function getAccountTypeSummary() {

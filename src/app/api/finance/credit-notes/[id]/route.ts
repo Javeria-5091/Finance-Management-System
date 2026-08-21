@@ -8,7 +8,7 @@ function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
 
-// ─── GET: Fetch single credit note by ID ───
+// --- GET: Fetch single credit note by ID ---
 export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -37,7 +37,7 @@ export async function GET(
   }
 }
 
-// ─── PATCH: Update credit note details ───
+// --- PATCH: Update credit note details ---
 export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -109,8 +109,8 @@ export async function PATCH(
   }
 }
 
-// ─── POST (sub-action): Post credit note to GL ───
-// Spec: Credit Note → DR Revenue, CR Receivable (reverse of invoice)
+// --- POST (sub-action): Post credit note to GL ---
+// Spec: Credit Note -> DR Revenue, CR Receivable (reverse of invoice)
 // BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
 //   with single atomic RPC call using correct signature:
 //   finance.post_journal_entry(p_description, p_transaction_date, p_period_id, p_lines, p_currency, p_exchange_rate, p_source_type, p_source_id, p_project_id, p_department_id)
@@ -190,9 +190,11 @@ export async function POST(
     }
 
     // Get open period
+    // BUG-020 FIX: Add organization_id filter to period lookup
     const period = getData(await supabase
       .from('finance.accounting_periods')
       .select('id')
+      .eq('organization_id', auth.orgId)
       .eq('status', 'OPEN')
       .order('start_date', { ascending: false })
       .limit(1)
@@ -266,7 +268,7 @@ export async function POST(
         p_action: 'CREDIT_NOTE_POSTED',
         p_entity_type: 'credit_note',
         p_entity_id: id,
-        p_description: `Credit note posted to GL: ${creditNote.credit_note_number} → ${reference}`,
+        p_description: `Credit note posted to GL: ${creditNote.credit_note_number} -> ${reference}`,
         p_previous_status: 'APPROVED',
         p_new_status: 'POSTED',
         p_source_module: 'invoice',

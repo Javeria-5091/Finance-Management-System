@@ -3717,7 +3717,7 @@ COMMENT ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") IS 'O
 
 CREATE OR REPLACE FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text" DEFAULT 'User'::"text", "p_full_name" "text" DEFAULT ''::"text") RETURNS json
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public', 'public'
+    SET "search_path" TO 'pg_catalog', 'public'
     AS $$ DECLARE
   v_new_user_id UUID;
 BEGIN
@@ -3767,7 +3767,7 @@ ALTER FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "t
 
 CREATE OR REPLACE FUNCTION "public"."ensure_profile_exists"("target_user_id" "uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public', 'public'
+    SET "search_path" TO 'pg_catalog', 'public'
     AS $$
 DECLARE
   v_profile_id UUID;
@@ -3860,37 +3860,32 @@ ALTER FUNCTION "public"."execute_ai_readonly_query"("query_string" "text", "p_or
 
 CREATE OR REPLACE FUNCTION "public"."execute_sql_query"("query_string" "text") RETURNS json
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public', 'public'
-    AS $$ 
+    SET "search_path" TO 'pg_catalog', 'public'
+    AS $$
 DECLARE
   result JSON;
   lower_query TEXT;
 BEGIN
-  lower_query := LOWER(TRIM(query_string));
-  
-  -- Allow SELECT and WITH (CTE)
-  IF NOT (
-    LEFT(lower_query, 6) = 'select' 
-    OR LEFT(lower_query, 4) = 'with'
-  ) THEN
-    RAISE EXCEPTION 'Only SELECT queries are allowed';
+  IF COALESCE(current_setting('request.jwt.claim.role', true), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'Access denied: service_role required';
   END IF;
 
-  -- Block dangerous operations (word boundaries)
-  IF lower_query ~* '\b(DROP|DELETE|UPDATE|INSERT|ALTER|CREATE|TRUNCATE|GRANT|REVOKE)\b' THEN
+  lower_query := LOWER(TRIM(query_string));
+  IF NOT (LEFT(lower_query, 6) = 'select' OR LEFT(lower_query, 4) = 'with') THEN
+    RAISE EXCEPTION 'Only SELECT queries are allowed';
+  END IF;
+  IF lower_query ~* '\m(drop|delete|update|insert|alter|create|truncate|grant|revoke)\M' THEN
     RAISE EXCEPTION 'Dangerous operation not allowed';
   END IF;
 
-  -- Execute with error handling
   BEGIN
     EXECUTE format('SELECT json_agg(t) FROM (%s) t', query_string) INTO result;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION 'SQL Error: %', SQLERRM;
   END;
-  
   RETURN COALESCE(result, '[]'::JSON);
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "public"."execute_sql_query"("query_string" "text") OWNER TO "postgres";
@@ -3949,7 +3944,7 @@ ALTER FUNCTION "public"."get_all_system_users"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."get_my_permissions"() RETURNS TABLE("permission_code" "text", "permission_name" "text", "module" "text", "data_scope" "text")
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public', 'public'
+    SET "search_path" TO 'pg_catalog', 'public'
     AS $$ BEGIN
   RETURN QUERY
   SELECT DISTINCT
@@ -3975,7 +3970,7 @@ ALTER FUNCTION "public"."get_my_permissions"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."get_my_user_roles"() RETURNS TABLE("role_id" "uuid", "role" "text", "display_name" "text", "is_active" boolean, "effective_from" "date", "effective_to" "date", "level" integer)
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public', 'public'
+    SET "search_path" TO 'pg_catalog', 'public'
     AS $$ BEGIN
   RETURN QUERY
   SELECT 
@@ -4002,7 +3997,7 @@ ALTER FUNCTION "public"."get_my_user_roles"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."get_user_permissions"("p_user_id" "uuid") RETURNS TABLE("code" "text", "module" "text", "action" "text", "data_scope" "text", "amount_limit" numeric)
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public', 'public'
+    SET "search_path" TO 'pg_catalog', 'public'
     AS $$ BEGIN
   RETURN QUERY SELECT * FROM core.get_user_permissions(p_user_id);
 END;
@@ -4039,7 +4034,7 @@ ALTER FUNCTION "public"."get_user_roles_by_id"("p_target_user_id" "uuid") OWNER 
 
 CREATE OR REPLACE FUNCTION "public"."handle_new_user"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public', 'public'
+    SET "search_path" TO 'pg_catalog', 'public'
     AS $$ BEGIN
     INSERT INTO public.profiles (
         user_id, full_name, role, email,
@@ -4348,7 +4343,7 @@ ALTER FUNCTION "public"."update_updated_at"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."user_has_role"("p_role_name" "text") RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public', 'public'
+    SET "search_path" TO 'pg_catalog', 'public'
     AS $$ DECLARE
   v_current_user uuid;
   v_result boolean;
@@ -4375,7 +4370,7 @@ ALTER FUNCTION "public"."user_has_role"("p_role_name" "text") OWNER TO "postgres
 
 
 CREATE OR REPLACE FUNCTION "reporting"."cash_distribution"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t)), '[]'::JSON) FROM (
@@ -4390,7 +4385,7 @@ ALTER FUNCTION "reporting"."cash_distribution"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_aging"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN json_build_object(
@@ -4419,7 +4414,7 @@ ALTER FUNCTION "reporting"."ceo_chart_aging"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_budget"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t)), '[]'::JSON) FROM (
@@ -4443,7 +4438,7 @@ ALTER FUNCTION "reporting"."ceo_chart_budget"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_cash"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t) ORDER BY balance DESC), '[]'::JSON) FROM (
@@ -4458,7 +4453,7 @@ ALTER FUNCTION "reporting"."ceo_chart_cash"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_categories"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN json_build_object(
@@ -4544,7 +4539,7 @@ ALTER FUNCTION "reporting"."ceo_chart_categories"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_monthly"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t) ORDER BY sort_order), '[]'::JSON) FROM (
@@ -4567,7 +4562,7 @@ ALTER FUNCTION "reporting"."ceo_chart_monthly"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_dashboard_kpis"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ DECLARE
   v_period_id UUID;
@@ -4646,7 +4641,7 @@ ALTER FUNCTION "reporting"."ceo_dashboard_kpis"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_table_audit"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
 BEGIN
@@ -4674,7 +4669,7 @@ ALTER FUNCTION "reporting"."ceo_table_audit"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_table_equity_tax"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ DECLARE
   v_profit_before_tax NUMERIC := 0;
@@ -4731,7 +4726,7 @@ ALTER FUNCTION "reporting"."ceo_table_equity_tax"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_table_fiscal"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
 BEGIN
@@ -4759,7 +4754,7 @@ ALTER FUNCTION "reporting"."ceo_table_fiscal"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date") RETURNS TABLE("section_order" integer, "section" "text", "code" "text", "account_name" "text", "net_amount" numeric)
-    LANGUAGE "sql" STABLE SECURITY DEFINER
+    LANGUAGE "sql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
 SELECT
@@ -4794,7 +4789,7 @@ ALTER FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date") OWNER TO "
 
 
 CREATE OR REPLACE FUNCTION "reporting"."get_cash_flow"("p_start_date" "date", "p_end_date" "date") RETURNS TABLE("section" "text", "account_name" "text", "amount" numeric)
-    LANGUAGE "sql" STABLE SECURITY DEFINER
+    LANGUAGE "sql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
 WITH pnl_changes AS (
@@ -4893,7 +4888,7 @@ ALTER FUNCTION "reporting"."get_cash_flow"("p_start_date" "date", "p_end_date" "
 
 
 CREATE OR REPLACE FUNCTION "reporting"."get_ceo_metrics"() RETURNS TABLE("total_cash" numeric, "total_receivables" numeric, "total_payables" numeric, "current_month_pl" numeric)
-    LANGUAGE "sql" STABLE SECURITY DEFINER
+    LANGUAGE "sql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ WITH gl_balances AS (
     SELECT 
@@ -4929,7 +4924,7 @@ ALTER FUNCTION "reporting"."get_ceo_metrics"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."get_profit_and_loss"("p_start_date" "date", "p_end_date" "date") RETURNS TABLE("section_order" integer, "section" "text", "code" "text", "account_name" "text", "debit_total" numeric, "credit_total" numeric, "net_amount" numeric)
-    LANGUAGE "sql" STABLE SECURITY DEFINER
+    LANGUAGE "sql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
 SELECT
@@ -4968,7 +4963,7 @@ ALTER FUNCTION "reporting"."get_profit_and_loss"("p_start_date" "date", "p_end_d
 
 
 CREATE OR REPLACE FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p_end_date" "date") RETURNS TABLE("project_id" "uuid", "project_name" "text", "total_revenue" numeric, "total_costs" numeric, "gross_profit" numeric, "margin_pct" numeric)
-    LANGUAGE "sql" STABLE SECURITY DEFINER
+    LANGUAGE "sql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ SELECT 
     je.project_id,
@@ -5001,7 +4996,7 @@ ALTER FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p
 
 
 CREATE OR REPLACE FUNCTION "reporting"."get_statement_of_changes_in_equity"("p_period_start" "date", "p_period_end" "date") RETURNS TABLE("account_id" "uuid", "code" "text", "account_name" "text", "opening_balance" numeric, "period_movement" numeric, "closing_balance" numeric)
-    LANGUAGE "sql" STABLE SECURITY DEFINER
+    LANGUAGE "sql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public'
     AS $$
 WITH opening AS (
@@ -5055,7 +5050,7 @@ COMMENT ON FUNCTION "reporting"."get_statement_of_changes_in_equity"("p_period_s
 
 
 CREATE OR REPLACE FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[]) RETURNS TABLE("account_id" "uuid", "code" "text", "name" "text", "account_type" "text", "normal_balance" "text", "total_debit" numeric, "total_credit" numeric, "net_balance" numeric)
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN QUERY
@@ -5091,7 +5086,7 @@ ALTER FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[]) OWNER TO
 
 
 CREATE OR REPLACE FUNCTION "reporting"."pending_approvals_list"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(
@@ -5129,7 +5124,7 @@ ALTER FUNCTION "reporting"."pending_approvals_list"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."project_profitability"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(
@@ -5167,7 +5162,7 @@ ALTER FUNCTION "reporting"."project_profitability"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."receivable_aging_summary"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ DECLARE v_result JSON;
 BEGIN
@@ -5188,7 +5183,7 @@ ALTER FUNCTION "reporting"."receivable_aging_summary"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."revenue_expense_monthly"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t)), '[]'::JSON) FROM (
@@ -5210,7 +5205,7 @@ ALTER FUNCTION "reporting"."revenue_expense_monthly"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."transaction_detail"("p_id" "uuid") RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ DECLARE
   v_result JSON;
@@ -5314,7 +5309,7 @@ ALTER FUNCTION "reporting"."transaction_detail"("p_id" "uuid") OWNER TO "postgre
 
 
 CREATE OR REPLACE FUNCTION "reporting"."transaction_list"("p_search" "text" DEFAULT ''::"text", "p_type" "text" DEFAULT 'ALL'::"text", "p_status" "text" DEFAULT 'ALL'::"text", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_date_from" "date" DEFAULT NULL::"date", "p_date_to" "date" DEFAULT NULL::"date", "p_limit" integer DEFAULT 25, "p_offset" integer DEFAULT 0) RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(json_agg(row_to_json(t) ORDER BY t.entry_date DESC, t.created_at DESC), '[]'::JSON) FROM (
@@ -5370,7 +5365,7 @@ ALTER FUNCTION "reporting"."transaction_list"("p_search" "text", "p_type" "text"
 
 
 CREATE OR REPLACE FUNCTION "reporting"."transaction_summary"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ DECLARE
   v_period_id UUID;
@@ -5392,7 +5387,7 @@ ALTER FUNCTION "reporting"."transaction_summary"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."unreconciled_summary"() RETURNS json
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN COALESCE(
@@ -8216,7 +8211,7 @@ CREATE TABLE IF NOT EXISTS "public"."invoices" (
     "invoice_number" character varying(50) NOT NULL,
     "client_name" character varying(255) NOT NULL,
     "amount" numeric(12,2) NOT NULL,
-    "status" character varying(50) DEFAULT 'Draft'::character varying,
+    "status" character varying(50) DEFAULT 'DRAFT'::character varying,
     "issue_date" "date" DEFAULT CURRENT_DATE NOT NULL,
     "due_date" "date" NOT NULL,
     "notes" "text",
@@ -10486,6 +10481,11 @@ ALTER TABLE ONLY "public"."incomes"
 
 
 
+ALTER TABLE "public"."invoices"
+    ADD CONSTRAINT "invoices_amounts_non_negative_check" CHECK ((("amount" >= (0)::numeric) AND ("subtotal" >= (0)::numeric) AND ("tax_amount" >= (0)::numeric) AND ("discount_amount" >= (0)::numeric) AND ("total_amount" >= (0)::numeric) AND ("base_subtotal" >= (0)::numeric) AND ("base_tax_amount" >= (0)::numeric) AND ("base_discount_amount" >= (0)::numeric) AND ("base_total_amount" >= (0)::numeric) AND ("amount_paid" >= (0)::numeric) AND ("base_amount_paid" >= (0)::numeric) AND ("outstanding_amount" >= (0)::numeric) AND ("base_outstanding_amount" >= (0)::numeric))) NOT VALID;
+
+
+
 ALTER TABLE ONLY "public"."invoices"
     ADD CONSTRAINT "invoices_invoice_number_key" UNIQUE ("invoice_number");
 
@@ -10493,6 +10493,11 @@ ALTER TABLE ONLY "public"."invoices"
 
 ALTER TABLE ONLY "public"."invoices"
     ADD CONSTRAINT "invoices_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."invoices"
+    ADD CONSTRAINT "invoices_status_check" CHECK ((("status")::"text" = ANY (ARRAY['DRAFT'::"text", 'PENDING_APPROVAL'::"text", 'ISSUED'::"text", 'PARTIALLY_PAID'::"text", 'PAID'::"text", 'OVERDUE'::"text", 'VOID'::"text", 'CREDITED'::"text", 'REFUNDED'::"text"]))) NOT VALID;
 
 
 
@@ -13550,7 +13555,7 @@ ALTER TABLE ONLY "public"."payments"
 
 
 ALTER TABLE ONLY "public"."payments"
-    ADD CONSTRAINT "payments_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organization_config"("id") ON DELETE SET NULL;
+    ADD CONSTRAINT "payments_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE SET NULL;
 
 
 
@@ -15089,19 +15094,22 @@ CREATE POLICY "vp_update_org_scoped" ON "finance"."vendor_payments" FOR UPDATE U
 
 
 
-CREATE POLICY "vpa_insert" ON "finance"."vendor_payment_allocations" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "vpa_insert_org_scoped" ON "finance"."vendor_payment_allocations" FOR INSERT WITH CHECK ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND (EXISTS ( SELECT 1
+   FROM "finance"."vendor_bills" "vb"
+  WHERE (("vb"."id" = "vendor_payment_allocations"."vendor_bill_id") AND "core"."same_org"("vb"."organization_id")))) AND (EXISTS ( SELECT 1
+   FROM "finance"."vendor_payments" "vp"
+  WHERE (("vp"."id" = "vendor_payment_allocations"."vendor_payment_id") AND "core"."same_org"("vp"."organization_id")))) AND (EXISTS ( SELECT 1
+   FROM ("finance"."vendor_bills" "vb2"
+     JOIN "finance"."vendor_payments" "vp2" ON (("vp2"."organization_id" = "vb2"."organization_id")))
+  WHERE (("vb2"."id" = "vendor_payment_allocations"."vendor_bill_id") AND ("vp2"."id" = "vendor_payment_allocations"."vendor_payment_id"))))));
 
 
 
-CREATE POLICY "vpa_select" ON "finance"."vendor_payment_allocations" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
-
-
-
-CREATE POLICY "Anyone can view tax returns" ON "legacy"."tax_returns" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Users can view budget lines" ON "legacy"."budget_lines" FOR SELECT TO "authenticated" USING (true);
+CREATE POLICY "vpa_select_org_scoped" ON "finance"."vendor_payment_allocations" FOR SELECT USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")) AND (EXISTS ( SELECT 1
+   FROM "finance"."vendor_bills" "vb"
+  WHERE (("vb"."id" = "vendor_payment_allocations"."vendor_bill_id") AND "core"."same_org"("vb"."organization_id")))) AND (EXISTS ( SELECT 1
+   FROM "finance"."vendor_payments" "vp"
+  WHERE (("vp"."id" = "vendor_payment_allocations"."vendor_payment_id") AND "core"."same_org"("vp"."organization_id"))))));
 
 
 
@@ -15113,6 +15121,12 @@ CREATE POLICY "budget_lines_pub_delete_frozen" ON "legacy"."budget_lines" FOR DE
 
 
 CREATE POLICY "budget_lines_pub_insert_frozen" ON "legacy"."budget_lines" FOR INSERT TO "authenticated" WITH CHECK (false);
+
+
+
+CREATE POLICY "budget_lines_pub_select_org_scoped" ON "legacy"."budget_lines" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "public"."budgets" "b"
+  WHERE (("b"."id" = "budget_lines"."budget_id") AND "core"."same_org"("b"."organization_id")))));
 
 
 
@@ -15151,7 +15165,7 @@ CREATE POLICY "numbering_insert_frozen" ON "legacy"."numbering_sequences" FOR IN
 
 
 
-CREATE POLICY "numbering_select" ON "legacy"."numbering_sequences" FOR SELECT USING (true);
+CREATE POLICY "numbering_select_role_restricted" ON "legacy"."numbering_sequences" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
 
 
 
@@ -15174,6 +15188,12 @@ CREATE POLICY "tax_returns_pub_delete_frozen" ON "legacy"."tax_returns" FOR DELE
 
 
 CREATE POLICY "tax_returns_pub_insert_frozen" ON "legacy"."tax_returns" FOR INSERT TO "authenticated" WITH CHECK (false);
+
+
+
+CREATE POLICY "tax_returns_pub_select_org_scoped" ON "legacy"."tax_returns" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."user_id" = "tax_returns"."user_id") AND "core"."same_org"("p"."organization_id")))));
 
 
 
@@ -15666,8 +15686,6 @@ ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
 
 
 
-
-
 GRANT USAGE ON SCHEMA "audit" TO "authenticated";
 
 
@@ -15908,22 +15926,77 @@ GRANT ALL ON FUNCTION "public"."user_has_role"("p_role_name" "text") TO "service
 
 
 
+REVOKE ALL ON FUNCTION "reporting"."cash_distribution"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."cash_distribution"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."ceo_chart_aging"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_chart_aging"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."ceo_chart_budget"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_chart_budget"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."ceo_chart_cash"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_chart_cash"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."ceo_chart_categories"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_chart_categories"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."ceo_chart_monthly"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_chart_monthly"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."ceo_dashboard_kpis"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_dashboard_kpis"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."ceo_table_audit"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_table_audit"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."ceo_table_equity_tax"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_table_equity_tax"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."ceo_table_fiscal"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_table_fiscal"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date") TO "authenticated";
 
 
 
+REVOKE ALL ON FUNCTION "reporting"."get_cash_flow"("p_start_date" "date", "p_end_date" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "reporting"."get_cash_flow"("p_start_date" "date", "p_end_date" "date") TO "authenticated";
 
 
 
+REVOKE ALL ON FUNCTION "reporting"."get_ceo_metrics"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "reporting"."get_ceo_metrics"() TO "authenticated";
 
 
 
+REVOKE ALL ON FUNCTION "reporting"."get_profit_and_loss"("p_start_date" "date", "p_end_date" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "reporting"."get_profit_and_loss"("p_start_date" "date", "p_end_date" "date") TO "authenticated";
 
 
 
+REVOKE ALL ON FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p_end_date" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p_end_date" "date") TO "authenticated";
 
 
@@ -15933,13 +16006,48 @@ GRANT ALL ON FUNCTION "reporting"."get_statement_of_changes_in_equity"("p_period
 
 
 
+REVOKE ALL ON FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[]) TO "authenticated";
 
 
 
+REVOKE ALL ON FUNCTION "reporting"."pending_approvals_list"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."pending_approvals_list"() TO "authenticated";
 
 
 
+REVOKE ALL ON FUNCTION "reporting"."project_profitability"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."project_profitability"() TO "authenticated";
 
+
+
+REVOKE ALL ON FUNCTION "reporting"."receivable_aging_summary"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."receivable_aging_summary"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."revenue_expense_monthly"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."revenue_expense_monthly"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."transaction_detail"("p_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."transaction_detail"("p_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."transaction_list"("p_search" "text", "p_type" "text", "p_status" "text", "p_project_id" "uuid", "p_date_from" "date", "p_date_to" "date", "p_limit" integer, "p_offset" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."transaction_list"("p_search" "text", "p_type" "text", "p_status" "text", "p_project_id" "uuid", "p_date_from" "date", "p_date_to" "date", "p_limit" integer, "p_offset" integer) TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."transaction_summary"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."transaction_summary"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."unreconciled_summary"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
 
 
 GRANT SELECT,INSERT ON TABLE "audit"."audit_log" TO "authenticated";
@@ -16058,11 +16166,6 @@ GRANT ALL ON TABLE "core"."user_permission_overrides" TO "service_role";
 
 GRANT ALL ON TABLE "core"."user_roles" TO "authenticated";
 GRANT ALL ON TABLE "core"."user_roles" TO "service_role";
-
-
-
-
-
 
 
 
@@ -16414,9 +16517,9 @@ GRANT ALL ON TABLE "public"."expenses" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "reporting"."general_ledger" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."general_ledger" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."general_ledger" TO "ai_readonly_role";
+GRANT SELECT ON TABLE "reporting"."general_ledger" TO "authenticated";
 
 
 
@@ -16696,77 +16799,76 @@ GRANT ALL ON TABLE "public"."v_user_roles" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "reporting"."budget_vs_actual" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."budget_vs_actual" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."budget_vs_actual" TO "ai_readonly_role";
+GRANT SELECT ON TABLE "reporting"."budget_vs_actual" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."budget_category_summary" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."budget_category_summary" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."budget_category_summary" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."budget_gl_actual" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."budget_gl_actual" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."budget_gl_actual" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."payable_aging" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."payable_aging" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."payable_aging" TO "ai_readonly_role";
+GRANT SELECT ON TABLE "reporting"."payable_aging" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."receivable_aging" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."receivable_aging" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."receivable_aging" TO "ai_readonly_role";
+GRANT SELECT ON TABLE "reporting"."receivable_aging" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."reconciliation_summary" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."reconciliation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."reconciliation_summary" TO "ai_readonly_role";
+GRANT SELECT ON TABLE "reporting"."reconciliation_summary" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."unreconciled_lines" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."unreconciled_lines" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."unreconciled_lines" TO "ai_readonly_role";
+GRANT SELECT ON TABLE "reporting"."unreconciled_lines" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."v_asset_register" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_asset_register" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."v_asset_register" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."v_cash_position" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_cash_position" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_cash_position" TO "ai_readonly_role";
+GRANT SELECT ON TABLE "reporting"."v_cash_position" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."v_depreciation_summary" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_depreciation_summary" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."v_depreciation_summary" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."v_legacy_archive_status" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_legacy_archive_status" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."v_legacy_archive_status" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_project_profitability" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "ai_readonly_role";
+GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
-
+GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 
 
 
@@ -16792,14 +16894,10 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQ
 
 
 
-
-
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "postgres";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "service_role";
-
-
 
 
 
@@ -16812,8 +16910,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
-
-
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
-

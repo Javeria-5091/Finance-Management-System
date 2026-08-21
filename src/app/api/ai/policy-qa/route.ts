@@ -9,7 +9,7 @@
 import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
-import { getAuthSupabase } from '@/lib/api-auth';
+import { getAuthSupabase, isSqlSafe } from '@/lib/api-auth';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
@@ -70,16 +70,27 @@ export async function POST(req: Request) {
 
     // Try to search for relevant documents (future: use vector embeddings)
     if (searchTerms.length > 0) {
-      const searchQuery = searchTerms.map((term) => `content ILIKE '%${term}%'`).join(' OR ');
+      // BUG-008 FIX: Escape SQL metacharacters in each search term to prevent injection
+      const safeTerms = searchTerms.map((term) =>
+        term.replace(/'/g, "''").replace(/%/g, '\%').replace(/_/g, '\_')
+      );
+      const searchQuery = safeTerms.map((term) => `content ILIKE '%${term}%'`).join(' OR ');
 
-      const { data: documents } = await supabase.rpc('execute_ai_readonly_query', {
-        query_string: `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
+      const fullQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
           SELECT id, title, SUBSTRING(content, 1, 2000) as content_excerpt, document_type, updated_at
           FROM public.policy_documents
           WHERE organization_id = '${orgId}'
           AND (${searchQuery})
           LIMIT 5
-        ) t`,
+        ) t`;
+
+      const querySafety = await isSqlSafe(fullQuery);
+      if (!querySafety.safe) {
+        return NextResponse.json({ error: 'Query safety check failed', reason: querySafety.reason }, { status: 500 });
+      }
+
+      const { data: documents } = await supabase.rpc('execute_ai_readonly_query', {
+        query_string: fullQuery,
       });
 
       if (documents && Array.isArray(documents) && documents.length > 0) {
