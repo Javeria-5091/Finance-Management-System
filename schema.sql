@@ -14061,21 +14061,18 @@ CREATE POLICY "approval_steps_update" ON "core"."approval_steps" FOR UPDATE USIN
 ALTER TABLE "core"."budget_policies" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "budget_policies_org_isolation" ON "core"."budget_policies" USING (("organization_id" = ( SELECT "budget_policies"."organization_id"
-   FROM "core"."user_roles"
-  WHERE (("user_roles"."user_id" = "auth"."uid"()) AND ("user_roles"."is_active" = true))
- LIMIT 1)));
+CREATE POLICY "budget_policies_org_isolation_fixed" ON "core"."budget_policies" USING ("core"."same_org"("organization_id")) WITH CHECK ("core"."same_org"("organization_id"));
 
 
 
 ALTER TABLE "core"."delegations" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "delegations_create_own" ON "core"."delegations" FOR INSERT WITH CHECK ((("from_user_id" = "auth"."uid"()) OR "core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")));
+CREATE POLICY "delegations_create_own_org_scoped" ON "core"."delegations" FOR INSERT WITH CHECK (((("from_user_id" = "auth"."uid"()) OR "core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "delegations_manage" ON "core"."delegations" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")) WITH CHECK ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
+CREATE POLICY "delegations_manage_org_scoped" ON "core"."delegations" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND "core"."same_org"("organization_id"))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND "core"."same_org"("organization_id")));
 
 
 
@@ -14086,15 +14083,21 @@ CREATE POLICY "delegations_select_own" ON "core"."delegations" FOR SELECT USING 
 ALTER TABLE "core"."employee_links" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "employee_links_insert" ON "core"."employee_links" FOR INSERT WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "employee_links_insert_org_scoped" ON "core"."employee_links" FOR INSERT WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND (EXISTS ( SELECT 1
+   FROM "core"."shared_people" "sp"
+  WHERE (("sp"."id" = "employee_links"."shared_person_id") AND "core"."same_org"("sp"."organization_id"))))));
 
 
 
-CREATE POLICY "employee_links_select" ON "core"."employee_links" FOR SELECT USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "employee_links_select_org_scoped" ON "core"."employee_links" FOR SELECT USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND (EXISTS ( SELECT 1
+   FROM "core"."shared_people" "sp"
+  WHERE (("sp"."id" = "employee_links"."shared_person_id") AND "core"."same_org"("sp"."organization_id"))))));
 
 
 
-CREATE POLICY "employee_links_update" ON "core"."employee_links" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "employee_links_update_org_scoped" ON "core"."employee_links" FOR UPDATE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND (EXISTS ( SELECT 1
+   FROM "core"."shared_people" "sp"
+  WHERE (("sp"."id" = "employee_links"."shared_person_id") AND "core"."same_org"("sp"."organization_id"))))));
 
 
 
@@ -14131,7 +14134,7 @@ CREATE POLICY "org_config_insert" ON "core"."organization_config" FOR INSERT WIT
 
 
 
-CREATE POLICY "org_config_select" ON "core"."organization_config" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "org_config_select_org_scoped" ON "core"."organization_config" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14143,7 +14146,7 @@ CREATE POLICY "org_modules_manage" ON "core"."organization_modules" USING ("core
 
 
 
-CREATE POLICY "org_modules_select" ON "core"."organization_modules" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "org_modules_select_org_scoped" ON "core"."organization_modules" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14181,34 +14184,54 @@ CREATE POLICY "role_select" ON "core"."roles" FOR SELECT USING ((("auth"."uid"()
 ALTER TABLE "core"."roles" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "rp_manage" ON "core"."role_permissions" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
+CREATE POLICY "rp_manage_org_scoped" ON "core"."role_permissions" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
+   FROM "core"."roles" "r"
+  WHERE (("r"."id" = "role_permissions"."role_id") AND "core"."same_org"("r"."organization_id")))))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
+   FROM "core"."roles" "r"
+  WHERE (("r"."id" = "role_permissions"."role_id") AND "core"."same_org"("r"."organization_id"))))));
 
 
 
-CREATE POLICY "rp_select" ON "core"."role_permissions" FOR SELECT USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
+CREATE POLICY "rp_select_org_scoped" ON "core"."role_permissions" FOR SELECT USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
+   FROM "core"."roles" "r"
+  WHERE (("r"."id" = "role_permissions"."role_id") AND "core"."same_org"("r"."organization_id"))))));
 
 
 
 ALTER TABLE "core"."shared_people" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "shared_people_manage" ON "core"."shared_people" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")) WITH CHECK ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
+CREATE POLICY "shared_people_manage_org_scoped" ON "core"."shared_people" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND "core"."same_org"("organization_id"))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "shared_people_select_self" ON "core"."shared_people" FOR SELECT USING ((("auth_user_id" = "auth"."uid"()) OR "core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")));
+CREATE POLICY "shared_people_select_self_org_scoped" ON "core"."shared_people" FOR SELECT USING ((("auth_user_id" = "auth"."uid"()) OR ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND "core"."same_org"("organization_id"))));
 
 
 
-CREATE POLICY "upo_manage" ON "core"."user_permission_overrides" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")) WITH CHECK ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
+CREATE POLICY "upo_manage_org_scoped" ON "core"."user_permission_overrides" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."user_id" = "user_permission_overrides"."user_id") AND "core"."same_org"("p"."organization_id")))))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."user_id" = "user_permission_overrides"."user_id") AND "core"."same_org"("p"."organization_id"))))));
 
 
 
-CREATE POLICY "upo_select_own" ON "core"."user_permission_overrides" FOR SELECT USING ((("user_id" = "auth"."uid"()) OR "core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")));
+CREATE POLICY "upo_select_own_org_scoped" ON "core"."user_permission_overrides" FOR SELECT USING ((("user_id" = "auth"."uid"()) OR ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."user_id" = "user_permission_overrides"."user_id") AND "core"."same_org"("p"."organization_id")))))));
 
 
 
-CREATE POLICY "ur_manage" ON "core"."user_roles" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text"));
+CREATE POLICY "ur_manage_org_scoped" ON "core"."user_roles" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
+   FROM "core"."roles" "r"
+  WHERE (("r"."id" = "user_roles"."role_id") AND "core"."same_org"("r"."organization_id")))) AND (EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."user_id" = "user_roles"."user_id") AND "core"."same_org"("p"."organization_id")))))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
+   FROM "core"."roles" "r"
+  WHERE (("r"."id" = "user_roles"."role_id") AND "core"."same_org"("r"."organization_id")))) AND (EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."user_id" = "user_roles"."user_id") AND "core"."same_org"("p"."organization_id"))))));
 
 
 
@@ -14257,7 +14280,7 @@ CREATE POLICY "ap_insert" ON "finance"."accounting_periods" FOR INSERT WITH CHEC
 
 
 
-CREATE POLICY "ap_select" ON "finance"."accounting_periods" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "ap_select_org_scoped" ON "finance"."accounting_periods" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14268,15 +14291,15 @@ CREATE POLICY "ap_update" ON "finance"."accounting_periods" FOR UPDATE USING ("c
 ALTER TABLE "finance"."asset_categories" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "asset_categories_insert" ON "finance"."asset_categories" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "asset_categories_insert_org_scoped" ON "finance"."asset_categories" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "asset_categories_select" ON "finance"."asset_categories" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "asset_categories_select_org_scoped" ON "finance"."asset_categories" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "asset_categories_update" ON "finance"."asset_categories" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "asset_categories_update_org_scoped" ON "finance"."asset_categories" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id"))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14304,23 +14327,23 @@ CREATE POLICY "asset_verification_lines_update" ON "finance"."asset_verification
 ALTER TABLE "finance"."asset_verifications" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "asset_verifications_insert" ON "finance"."asset_verifications" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "asset_verifications_insert_org_scoped" ON "finance"."asset_verifications" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "asset_verifications_select" ON "finance"."asset_verifications" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "asset_verifications_select_org_scoped" ON "finance"."asset_verifications" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "asset_verifications_update" ON "finance"."asset_verifications" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "asset_verifications_update_org_scoped" ON "finance"."asset_verifications" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id"))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "att_insert" ON "finance"."attachments" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "att_insert_org_scoped" ON "finance"."attachments" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "att_select" ON "finance"."attachments" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "att_select_org_scoped" ON "finance"."attachments" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14356,23 +14379,23 @@ CREATE POLICY "bc_update" ON "finance"."budget_commitments" FOR UPDATE USING (((
 
 
 
-CREATE POLICY "bl_insert" ON "finance"."budget_lines" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "bl_insert_org_scoped" ON "finance"."budget_lines" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "bl_select" ON "finance"."budget_lines" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "bl_select_org_scoped" ON "finance"."budget_lines" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "bs_insert" ON "finance"."bank_statements" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "bs_insert_org_scoped" ON "finance"."bank_statements" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "bs_select" ON "finance"."bank_statements" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "bs_select_org_scoped" ON "finance"."bank_statements" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "bs_update" ON "finance"."bank_statements" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "bs_update_org_scoped" ON "finance"."bank_statements" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id"))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14380,11 +14403,11 @@ CREATE POLICY "bt_delete_restricted" ON "finance"."bank_transfers" FOR DELETE US
 
 
 
-CREATE POLICY "bt_insert" ON "finance"."bank_transfers" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "bt_insert_org_scoped" ON "finance"."bank_transfers" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "bt_select" ON "finance"."bank_transfers" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "bt_select_org_scoped" ON "finance"."bank_transfers" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14401,34 +14424,34 @@ ALTER TABLE "finance"."budget_lines" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."budget_revisions" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "budget_revisions_insert" ON "finance"."budget_revisions" FOR INSERT WITH CHECK ((("requested_by" = "auth"."uid"()) OR "core"."is_finance_head"() OR "core"."is_ceo_or_admin"()));
+CREATE POLICY "budget_revisions_insert_org_scoped" ON "finance"."budget_revisions" FOR INSERT WITH CHECK (("core"."same_org"("organization_id") AND (("requested_by" = "auth"."uid"()) OR "core"."is_finance_head"() OR "core"."is_ceo_or_admin"())));
 
 
 
-CREATE POLICY "budget_revisions_select" ON "finance"."budget_revisions" FOR SELECT USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR ("requested_by" = "auth"."uid"()) OR (EXISTS ( SELECT 1
+CREATE POLICY "budget_revisions_select_org_scoped" ON "finance"."budget_revisions" FOR SELECT USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR ("requested_by" = "auth"."uid"()) OR (EXISTS ( SELECT 1
    FROM "public"."budgets" "b"
   WHERE (("b"."id" = "budget_revisions"."budget_id") AND (("b"."user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
            FROM "public"."projects" "p"
-          WHERE (("p"."id" = "b"."project_id") AND ("p"."user_id" = "auth"."uid"()))))))))));
+          WHERE (("p"."id" = "b"."project_id") AND ("p"."user_id" = "auth"."uid"())))))))))));
 
 
 
-CREATE POLICY "budget_revisions_update" ON "finance"."budget_revisions" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "budget_revisions_update_org_scoped" ON "finance"."budget_revisions" FOR UPDATE USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
 
 
 
 ALTER TABLE "finance"."capital_transactions" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "capital_txn_delete" ON "finance"."capital_transactions" FOR DELETE USING ("core"."is_finance_head"());
+CREATE POLICY "capital_txn_delete_org_scoped" ON "finance"."capital_transactions" FOR DELETE USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
 
 
 
-CREATE POLICY "capital_txn_insert" ON "finance"."capital_transactions" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "capital_txn_insert_org_scoped" ON "finance"."capital_transactions" FOR INSERT WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "capital_txn_select" ON "finance"."capital_transactions" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('CEO'::"text") OR "core"."has_role"('VIEWER'::"text")));
+CREATE POLICY "capital_txn_select_org_scoped" ON "finance"."capital_transactions" FOR SELECT USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('CEO'::"text") OR "core"."has_role"('VIEWER'::"text"))));
 
 
 
@@ -14436,18 +14459,18 @@ CREATE POLICY "capital_txn_service_all" ON "finance"."capital_transactions" TO "
 
 
 
-CREATE POLICY "capital_txn_update" ON "finance"."capital_transactions" FOR UPDATE USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))) WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "capital_txn_update_org_scoped" ON "finance"."capital_transactions" FOR UPDATE USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
 ALTER TABLE "finance"."chart_of_accounts" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "cn_insert" ON "finance"."credit_notes" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "cn_insert_org_scoped" ON "finance"."credit_notes" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "cn_select" ON "finance"."credit_notes" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "cn_select_org_scoped" ON "finance"."credit_notes" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14469,19 +14492,27 @@ ALTER TABLE "finance"."credit_notes" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."depreciation_schedule" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "depreciation_schedule_delete" ON "finance"."depreciation_schedule" FOR DELETE USING ((("auth"."uid"() = "created_by") AND (("status")::"text" = 'calculated'::"text")));
+CREATE POLICY "depreciation_schedule_delete_org_scoped" ON "finance"."depreciation_schedule" FOR DELETE USING ((("auth"."uid"() = "created_by") AND (("status")::"text" = 'calculated'::"text") AND (EXISTS ( SELECT 1
+   FROM "finance"."fixed_assets" "fa"
+  WHERE (("fa"."id" = "depreciation_schedule"."asset_id") AND "core"."same_org"("fa"."organization_id"))))));
 
 
 
-CREATE POLICY "depreciation_schedule_insert" ON "finance"."depreciation_schedule" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "depreciation_schedule_insert_org_scoped" ON "finance"."depreciation_schedule" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "finance"."fixed_assets" "fa"
+  WHERE (("fa"."id" = "depreciation_schedule"."asset_id") AND "core"."same_org"("fa"."organization_id"))))));
 
 
 
-CREATE POLICY "depreciation_schedule_select" ON "finance"."depreciation_schedule" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "depreciation_schedule_select_org_scoped" ON "finance"."depreciation_schedule" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "finance"."fixed_assets" "fa"
+  WHERE (("fa"."id" = "depreciation_schedule"."asset_id") AND "core"."same_org"("fa"."organization_id"))))));
 
 
 
-CREATE POLICY "depreciation_schedule_update" ON "finance"."depreciation_schedule" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "depreciation_schedule_update_org_scoped" ON "finance"."depreciation_schedule" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "finance"."fixed_assets" "fa"
+  WHERE (("fa"."id" = "depreciation_schedule"."asset_id") AND "core"."same_org"("fa"."organization_id"))))));
 
 
 
@@ -14496,7 +14527,7 @@ CREATE POLICY "dimensions_insert" ON "finance"."dimensions" FOR INSERT WITH CHEC
 
 
 
-CREATE POLICY "dimensions_select" ON "finance"."dimensions" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "dimensions_select_org_scoped" ON "finance"."dimensions" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14507,19 +14538,27 @@ CREATE POLICY "dimensions_update" ON "finance"."dimensions" FOR UPDATE USING (("
 ALTER TABLE "finance"."distribution_lines" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "distribution_lines_delete" ON "finance"."distribution_lines" FOR DELETE USING ("core"."is_ceo_or_admin"());
+CREATE POLICY "distribution_lines_delete_org_scoped" ON "finance"."distribution_lines" FOR DELETE USING (("core"."is_ceo_or_admin"() AND (EXISTS ( SELECT 1
+   FROM "finance"."profit_distributions" "pd"
+  WHERE (("pd"."id" = "distribution_lines"."profit_distribution_id") AND "core"."same_org"("pd"."organization_id"))))));
 
 
 
-CREATE POLICY "distribution_lines_insert" ON "finance"."distribution_lines" FOR INSERT WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "distribution_lines_insert_org_scoped" ON "finance"."distribution_lines" FOR INSERT WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND (EXISTS ( SELECT 1
+   FROM "finance"."profit_distributions" "pd"
+  WHERE (("pd"."id" = "distribution_lines"."profit_distribution_id") AND "core"."same_org"("pd"."organization_id"))))));
 
 
 
-CREATE POLICY "distribution_lines_select" ON "finance"."distribution_lines" FOR SELECT USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "distribution_lines_select_org_scoped" ON "finance"."distribution_lines" FOR SELECT USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND (EXISTS ( SELECT 1
+   FROM "finance"."profit_distributions" "pd"
+  WHERE (("pd"."id" = "distribution_lines"."profit_distribution_id") AND "core"."same_org"("pd"."organization_id"))))));
 
 
 
-CREATE POLICY "distribution_lines_update" ON "finance"."distribution_lines" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "distribution_lines_update_org_scoped" ON "finance"."distribution_lines" FOR UPDATE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND (EXISTS ( SELECT 1
+   FROM "finance"."profit_distributions" "pd"
+  WHERE (("pd"."id" = "distribution_lines"."profit_distribution_id") AND "core"."same_org"("pd"."organization_id"))))));
 
 
 
@@ -14548,6 +14587,10 @@ ALTER TABLE "finance"."fee_computation_log" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."fee_rules" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "fee_rules_select_org_scoped" ON "finance"."fee_rules" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
 ALTER TABLE "finance"."fee_tiers" ENABLE ROW LEVEL SECURITY;
 
 
@@ -14566,19 +14609,19 @@ ALTER TABLE "finance"."fiscal_years" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."fixed_assets" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "fixed_assets_delete" ON "finance"."fixed_assets" FOR DELETE USING ((("auth"."uid"() = "created_by") AND (("status")::"text" = 'pending_capitalization'::"text") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "fixed_assets_delete_org_scoped" ON "finance"."fixed_assets" FOR DELETE USING (("core"."same_org"("organization_id") AND ("auth"."uid"() = "created_by") AND (("status")::"text" = 'pending_capitalization'::"text") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "fixed_assets_insert" ON "finance"."fixed_assets" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "fixed_assets_insert_org_scoped" ON "finance"."fixed_assets" FOR INSERT WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "fixed_assets_select" ON "finance"."fixed_assets" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
+CREATE POLICY "fixed_assets_select_org_scoped" ON "finance"."fixed_assets" FOR SELECT USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text"))));
 
 
 
-CREATE POLICY "fixed_assets_update" ON "finance"."fixed_assets" FOR UPDATE USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "fixed_assets_update_org_scoped" ON "finance"."fixed_assets" FOR UPDATE USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
@@ -14656,7 +14699,7 @@ ALTER TABLE "finance"."journal_entries" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."journal_lines" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "ns_select" ON "finance"."numbering_sequences" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "ns_select_org_scoped" ON "finance"."numbering_sequences" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14670,49 +14713,41 @@ CREATE POLICY "org_read_fee_log" ON "finance"."fee_computation_log" FOR SELECT T
 
 
 
-CREATE POLICY "org_read_fee_rules" ON "finance"."fee_rules" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
-
-
-
-CREATE POLICY "org_read_platforms" ON "finance"."platforms" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
-
-
-
 ALTER TABLE "finance"."owners" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "owners_delete" ON "finance"."owners" FOR DELETE USING ("core"."is_ceo_or_admin"());
+CREATE POLICY "owners_delete_org_scoped" ON "finance"."owners" FOR DELETE USING (("core"."same_org"("organization_id") AND "core"."is_ceo_or_admin"()));
 
 
 
-CREATE POLICY "owners_insert" ON "finance"."owners" FOR INSERT WITH CHECK ("core"."is_ceo_or_admin"());
+CREATE POLICY "owners_insert_org_scoped" ON "finance"."owners" FOR INSERT WITH CHECK (("core"."same_org"("organization_id") AND "core"."is_ceo_or_admin"()));
 
 
 
-CREATE POLICY "owners_select" ON "finance"."owners" FOR SELECT USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "owners_select_org_scoped" ON "finance"."owners" FOR SELECT USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "owners_update" ON "finance"."owners" FOR UPDATE USING ("core"."is_ceo_or_admin"()) WITH CHECK ("core"."is_ceo_or_admin"());
+CREATE POLICY "owners_update_org_scoped" ON "finance"."owners" FOR UPDATE USING (("core"."same_org"("organization_id") AND "core"."is_ceo_or_admin"())) WITH CHECK (("core"."same_org"("organization_id") AND "core"."is_ceo_or_admin"()));
 
 
 
 ALTER TABLE "finance"."ownership_history" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "ownership_history_delete" ON "finance"."ownership_history" FOR DELETE USING ("core"."is_ceo_or_admin"());
+CREATE POLICY "ownership_history_delete_org_scoped" ON "finance"."ownership_history" FOR DELETE USING (("core"."same_org"("organization_id") AND "core"."is_ceo_or_admin"()));
 
 
 
-CREATE POLICY "ownership_history_insert" ON "finance"."ownership_history" FOR INSERT WITH CHECK ("core"."is_ceo_or_admin"());
+CREATE POLICY "ownership_history_insert_org_scoped" ON "finance"."ownership_history" FOR INSERT WITH CHECK (("core"."same_org"("organization_id") AND "core"."is_ceo_or_admin"()));
 
 
 
-CREATE POLICY "ownership_history_select" ON "finance"."ownership_history" FOR SELECT USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "ownership_history_select_org_scoped" ON "finance"."ownership_history" FOR SELECT USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "ownership_history_update" ON "finance"."ownership_history" FOR UPDATE USING ("core"."is_ceo_or_admin"()) WITH CHECK ("core"."is_ceo_or_admin"());
+CREATE POLICY "ownership_history_update_org_scoped" ON "finance"."ownership_history" FOR UPDATE USING (("core"."same_org"("organization_id") AND "core"."is_ceo_or_admin"())) WITH CHECK (("core"."same_org"("organization_id") AND "core"."is_ceo_or_admin"()));
 
 
 
@@ -14733,69 +14768,81 @@ ALTER TABLE "finance"."payment_receipts" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."platforms" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "pr_insert" ON "finance"."payment_receipts" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "platforms_select_org_scoped" ON "finance"."platforms" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "pr_select" ON "finance"."payment_receipts" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "pr_insert_org_scoped" ON "finance"."payment_receipts" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "pr_update" ON "finance"."payment_receipts" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "pr_select_org_scoped" ON "finance"."payment_receipts" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+CREATE POLICY "pr_update_org_scoped" ON "finance"."payment_receipts" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id"))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
 ALTER TABLE "finance"."profit_distributions" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "profit_distributions_delete" ON "finance"."profit_distributions" FOR DELETE USING ("core"."is_ceo_or_admin"());
+CREATE POLICY "profit_distributions_delete_org_scoped" ON "finance"."profit_distributions" FOR DELETE USING (("core"."same_org"("organization_id") AND "core"."is_ceo_or_admin"()));
 
 
 
-CREATE POLICY "profit_distributions_insert" ON "finance"."profit_distributions" FOR INSERT WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "profit_distributions_insert_org_scoped" ON "finance"."profit_distributions" FOR INSERT WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
 
 
 
-CREATE POLICY "profit_distributions_select" ON "finance"."profit_distributions" FOR SELECT USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "profit_distributions_select_org_scoped" ON "finance"."profit_distributions" FOR SELECT USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "profit_distributions_update" ON "finance"."profit_distributions" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "profit_distributions_update_org_scoped" ON "finance"."profit_distributions" FOR UPDATE USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
 
 
 
 ALTER TABLE "finance"."reserve_policies" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "reserve_policies_delete" ON "finance"."reserve_policies" FOR DELETE USING ("core"."is_ceo_or_admin"());
+CREATE POLICY "reserve_policies_delete_org_scoped" ON "finance"."reserve_policies" FOR DELETE USING (("core"."same_org"("organization_id") AND "core"."is_ceo_or_admin"()));
 
 
 
-CREATE POLICY "reserve_policies_insert" ON "finance"."reserve_policies" FOR INSERT WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "reserve_policies_insert_org_scoped" ON "finance"."reserve_policies" FOR INSERT WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
 
 
 
-CREATE POLICY "reserve_policies_select" ON "finance"."reserve_policies" FOR SELECT USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
+CREATE POLICY "reserve_policies_select_org_scoped" ON "finance"."reserve_policies" FOR SELECT USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text"))));
 
 
 
-CREATE POLICY "reserve_policies_update" ON "finance"."reserve_policies" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "reserve_policies_update_org_scoped" ON "finance"."reserve_policies" FOR UPDATE USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
 
 
 
-CREATE POLICY "sl_delete" ON "finance"."statement_lines" FOR DELETE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "sl_delete_org_scoped" ON "finance"."statement_lines" FOR DELETE USING ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "finance"."bank_statements" "bs"
+  WHERE (("bs"."id" = "statement_lines"."bank_statement_id") AND "core"."same_org"("bs"."organization_id"))))));
 
 
 
-CREATE POLICY "sl_insert" ON "finance"."statement_lines" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "sl_insert_org_scoped" ON "finance"."statement_lines" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "finance"."bank_statements" "bs"
+  WHERE (("bs"."id" = "statement_lines"."bank_statement_id") AND "core"."same_org"("bs"."organization_id"))))));
 
 
 
-CREATE POLICY "sl_select" ON "finance"."statement_lines" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "sl_select_org_scoped" ON "finance"."statement_lines" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "finance"."bank_statements" "bs"
+  WHERE (("bs"."id" = "statement_lines"."bank_statement_id") AND "core"."same_org"("bs"."organization_id"))))));
 
 
 
-CREATE POLICY "sl_update" ON "finance"."statement_lines" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "sl_update_org_scoped" ON "finance"."statement_lines" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "finance"."bank_statements" "bs"
+  WHERE (("bs"."id" = "statement_lines"."bank_statement_id") AND "core"."same_org"("bs"."organization_id"))))));
 
 
 
@@ -14806,11 +14853,11 @@ CREATE POLICY "ta_delete_restricted" ON "finance"."tax_adjustments" FOR DELETE U
 
 
 
-CREATE POLICY "ta_insert" ON "finance"."tax_adjustments" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "ta_insert_org_scoped" ON "finance"."tax_adjustments" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "ta_select" ON "finance"."tax_adjustments" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "ta_select_org_scoped" ON "finance"."tax_adjustments" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14933,11 +14980,11 @@ CREATE POLICY "tp_update" ON "finance"."taxpayer_profile" FOR UPDATE USING (("co
 
 
 
-CREATE POLICY "tr_insert" ON "finance"."tax_reconciliations" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "tr_insert_org_scoped" ON "finance"."tax_reconciliations" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "tr_select" ON "finance"."tax_reconciliations" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "tr_select_org_scoped" ON "finance"."tax_reconciliations" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14945,15 +14992,15 @@ CREATE POLICY "tr_update_restricted" ON "finance"."tax_reconciliations" FOR UPDA
 
 
 
-CREATE POLICY "trs_insert" ON "finance"."tax_rule_sets" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "trs_insert_org_scoped" ON "finance"."tax_rule_sets" FOR INSERT WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "trs_select" ON "finance"."tax_rule_sets" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "trs_select_org_scoped" ON "finance"."tax_rule_sets" FOR SELECT USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "trs_update" ON "finance"."tax_rule_sets" FOR UPDATE USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "trs_update_org_scoped" ON "finance"."tax_rule_sets" FOR UPDATE USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
@@ -14961,11 +15008,11 @@ CREATE POLICY "tsl_delete_restricted" ON "finance"."tax_slabs" FOR DELETE USING 
 
 
 
-CREATE POLICY "tsl_insert" ON "finance"."tax_slabs" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "tsl_insert_org_scoped" ON "finance"."tax_slabs" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "tsl_select" ON "finance"."tax_slabs" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "tsl_select_org_scoped" ON "finance"."tax_slabs" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -14997,15 +15044,21 @@ CREATE POLICY "vb_update" ON "finance"."vendor_bills" FOR UPDATE USING ((("core"
 
 
 
-CREATE POLICY "vbl_insert" ON "finance"."vendor_bill_lines" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "vbl_insert_org_scoped" ON "finance"."vendor_bill_lines" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "finance"."vendor_bills" "vb"
+  WHERE (("vb"."id" = "vendor_bill_lines"."vendor_bill_id") AND "core"."same_org"("vb"."organization_id"))))));
 
 
 
-CREATE POLICY "vbl_select" ON "finance"."vendor_bill_lines" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "vbl_select_org_scoped" ON "finance"."vendor_bill_lines" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "finance"."vendor_bills" "vb"
+  WHERE (("vb"."id" = "vendor_bill_lines"."vendor_bill_id") AND "core"."same_org"("vb"."organization_id"))))));
 
 
 
-CREATE POLICY "vbl_update" ON "finance"."vendor_bill_lines" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "vbl_update_org_scoped" ON "finance"."vendor_bill_lines" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
+   FROM "finance"."vendor_bills" "vb"
+  WHERE (("vb"."id" = "vendor_bill_lines"."vendor_bill_id") AND "core"."same_org"("vb"."organization_id"))))));
 
 
 
@@ -15024,15 +15077,15 @@ ALTER TABLE "finance"."vendor_payments" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."vendors" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "vp_insert" ON "finance"."vendor_payments" FOR INSERT WITH CHECK (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "vp_insert_org_scoped" ON "finance"."vendor_payments" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "vp_select" ON "finance"."vendor_payments" FOR SELECT USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "vp_select_org_scoped" ON "finance"."vendor_payments" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "vp_update" ON "finance"."vendor_payments" FOR UPDATE USING (("auth"."uid"() IS NOT NULL));
+CREATE POLICY "vp_update_org_scoped" ON "finance"."vendor_payments" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id"))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -15612,6 +15665,9 @@ ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
 
 
 
+
+
+
 GRANT USAGE ON SCHEMA "audit" TO "authenticated";
 
 
@@ -15644,7 +15700,6 @@ GRANT ALL ON SCHEMA "reporting" TO "authenticated";
 GRANT ALL ON SCHEMA "reporting" TO "service_role";
 GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
-
 
 
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
@@ -15700,7 +15755,6 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
-
 
 
 
@@ -16712,6 +16766,8 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "ai_readonly_role
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
+
+
 
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";
