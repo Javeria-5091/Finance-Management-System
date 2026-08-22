@@ -1,9 +1,12 @@
 'use client';
 import { useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@/context/AuthContext';
 import { usePermissions } from "@/context/PermissionContext";
-import { useTaxReconciliations, useTaxReconciliation, useTaxRuleSets, useCreateTaxReconciliation, useTaxAdjustments, useAddTaxAdjustment, useDeleteTaxAdjustment, useComputeTax, useUpdateTaxReconciliation, useFiscalYears, useExpenseAccounts } from '@/hooks/useTaxEquity';
+import { useTaxReconciliations, useTaxReconciliation, useTaxRuleSets, useTaxAdjustments, useDeleteTaxAdjustment, useComputeTax, useUpdateTaxReconciliation, useFiscalYears, useExpenseAccounts } from '@/hooks/useTaxEquity';
 import { Calculator, Plus, Trash2, Loader2, ArrowRight, FileText } from 'lucide-react';
+import { supabase } from '@/lib/supabase';
+import * as taxEquityService from '@/services/tax-equity.service';
 
 const STATUS_STYLES: Record<string, string> = {
   DRAFT: 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300',
@@ -34,14 +37,38 @@ const formatStatus = (s: string) => s?.replace(/_/g, ' ').toLowerCase().replace(
 const inputCls = 'w-full px-3 py-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm outline-none focus:ring-2 focus:ring-blue-500';
 const labelCls = 'block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1';
 
+async function getOrganizationId(): Promise<string> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Authentication required');
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('organization_id')
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  if (error || !data?.organization_id) {
+    throw new Error('Organization context is required');
+  }
+
+  return data.organization_id;
+}
+
 export default function TaxReconciliationPage() {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const { hasPermission, isLoading: permLoading } = usePermissions();
   const { data: reconciliations, isLoading: loadingList } = useTaxReconciliations();
   const { data: ruleSets } = useTaxRuleSets();
   const { data: fiscalYears } = useFiscalYears();
   const { data: expenseAccounts } = useExpenseAccounts();
-  const createRecon = useCreateTaxReconciliation();
+  const createRecon = useMutation({
+    mutationFn: async (payload: Parameters<typeof taxEquityService.createTaxReconciliation>[1]) => {
+      const orgId = await getOrganizationId();
+      return taxEquityService.createTaxReconciliation(orgId, payload);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tax_reconciliations'] }),
+  });
   const updateRecon = useUpdateTaxReconciliation();
   const computeTax = useComputeTax();
 
@@ -60,7 +87,15 @@ export default function TaxReconciliationPage() {
 
   const { data: detail, isLoading: loadingDetail, refetch: refetchDetail } = useTaxReconciliation(selectedId || '');
   const { data: adjustments, isLoading: loadingAdj } = useTaxAdjustments(selectedId || '');
-  const addAdj = useAddTaxAdjustment();
+  const addAdj = useMutation({
+    mutationFn: async (payload: Parameters<typeof taxEquityService.addTaxAdjustment>[1]) => {
+      const orgId = await getOrganizationId();
+      return taxEquityService.addTaxAdjustment(orgId, payload);
+    },
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['tax_adjustments', variables.tax_reconciliation_id] });
+    },
+  });
   const deleteAdj = useDeleteTaxAdjustment();
 
   const [adjForm, setAdjForm] = useState({
@@ -87,6 +122,7 @@ export default function TaxReconciliationPage() {
         withholding_credits: parseFloat(createForm.withholding_credits) || 0,
         advance_tax_credits: parseFloat(createForm.advance_tax_credits) || 0,
         other_tax_credits: parseFloat(createForm.other_tax_credits) || 0,
+        created_by: user?.id || '',
       },
       {
         onSuccess: () => {
@@ -117,6 +153,7 @@ export default function TaxReconciliationPage() {
         amount: parseFloat(adjForm.amount),
         source_account_id: adjForm.source_account_id || null,
         evidence_notes: adjForm.evidence_notes || null,
+        created_by: user?.id || '',
       },
       {
         onSuccess: () =>

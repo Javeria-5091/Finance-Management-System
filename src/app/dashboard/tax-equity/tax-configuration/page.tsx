@@ -1,14 +1,15 @@
 'use client';
 import { useState, useEffect } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@/context/AuthContext';
+import { supabase } from '@/lib/supabase';
+import * as taxEquityService from '@/services/tax-equity.service';
 import { usePermissions } from "@/context/PermissionContext";
 import {
   useTaxpayerProfile,
   useUpdateTaxpayerProfile,
   useTaxRuleSets,
-  useCreateTaxRuleSet,
   useUpdateRuleSetStatus,
-  useSaveTaxSlabs,
   useDeleteTaxSlab,
 } from '@/hooks/useTaxEquity';
 import {
@@ -88,8 +89,26 @@ interface Toast {
 /* ═══════════════════════════════════════════════════════
    COMPONENT
    ═══════════════════════════════════════════════════════ */
+async function getOrganizationId(): Promise<string> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Authentication required');
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('organization_id')
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  if (error || !data?.organization_id) {
+    throw new Error('Organization context is required');
+  }
+
+  return data.organization_id;
+}
+
 export default function TaxConfigurationPage() {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const { hasPermission, isLoading: permLoading } = usePermissions();
 
   // ── Toast state ──
@@ -123,9 +142,21 @@ export default function TaxConfigurationPage() {
     isLoading: loadingRules,
     refetch: refetchRuleSets,
   } = useTaxRuleSets();
-  const createRuleSet = useCreateTaxRuleSet();
+  const createRuleSet = useMutation({
+    mutationFn: async (payload: Parameters<typeof taxEquityService.createTaxRuleSet>[1]) => {
+      const orgId = await getOrganizationId();
+      return taxEquityService.createTaxRuleSet(orgId, payload);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tax_rule_sets'] }),
+  });
   const updateRuleStatus = useUpdateRuleSetStatus();
-  const saveTaxSlabs = useSaveTaxSlabs();
+  const saveTaxSlabs = useMutation({
+    mutationFn: async (slabs: Parameters<typeof taxEquityService.saveTaxSlabs>[1]) => {
+      const orgId = await getOrganizationId();
+      return taxEquityService.saveTaxSlabs(orgId, slabs);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tax_slabs'] }),
+  });
   const deleteTaxSlab = useDeleteTaxSlab();
 
   // ── Profile state ──
@@ -209,6 +240,7 @@ export default function TaxConfigurationPage() {
           jurisdiction: ruleForm.jurisdiction,
           status: 'DRAFT',
           version: 1,
+          created_by: user?.id || '',
         });
 
         if (error) throw new Error(error.message);

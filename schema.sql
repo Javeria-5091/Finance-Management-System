@@ -263,31 +263,42 @@ CREATE OR REPLACE FUNCTION "audit"."log_action"("p_user_id" "uuid", "p_user_emai
 DECLARE
   v_id UUID;
   v_role TEXT;
+  v_org UUID;
+  v_effective_user_id UUID;
   v_prev_hash TEXT;
   v_hash TEXT;
 BEGIN
+  -- Only service_role (no auth.uid(), acting on behalf of the system,
+  -- e.g. edge functions) may log on behalf of an arbitrary user. Any
+  -- authenticated caller may only log actions as themselves.
+  IF auth.uid() IS NOT NULL AND p_user_id IS DISTINCT FROM auth.uid() THEN
+    RAISE EXCEPTION 'audit.log_action: p_user_id must match the calling user';
+  END IF;
+  v_effective_user_id := COALESCE(p_user_id, auth.uid());
+
   SELECT r.name INTO v_role
-  FROM core.user_roles ur
-  JOIN core.roles r ON r.id = ur.role_id
-  WHERE ur.user_id = p_user_id AND ur.is_active = true
+  FROM core.user_roles ur JOIN core.roles r ON r.id = ur.role_id
+  WHERE ur.user_id = v_effective_user_id AND ur.is_active = true
     AND (ur.effective_to IS NULL OR ur.effective_to >= CURRENT_DATE)
   ORDER BY ur.effective_from DESC LIMIT 1;
 
-  -- Integrity chain (8.3): link to the hash of the most recent entry
+  SELECT organization_id INTO v_org
+  FROM public.profiles WHERE user_id = v_effective_user_id;
+
   SELECT entry_hash INTO v_prev_hash
   FROM audit.audit_log ORDER BY created_at DESC, id DESC LIMIT 1;
 
   v_hash := encode(
     sha256(
       COALESCE(v_prev_hash, '') ||
-      COALESCE(p_user_id::TEXT, '') || COALESCE(p_action, '') ||
+      COALESCE(v_effective_user_id::TEXT, '') || COALESCE(p_action, '') ||
       COALESCE(p_entity_type, '') || COALESCE(p_entity_id::TEXT, '') ||
       COALESCE(p_description, '') || COALESCE(p_severity, 'info') || NOW()::TEXT
     ), 'hex'
   );
 
   INSERT INTO audit.audit_log (
-    user_id, user_email, user_name, role_snapshot, session_id, auth_method,
+    user_id, user_email, user_name, role_snapshot, organization_id, session_id, auth_method,
     action, entity_type, entity_id, status, severity,
     ip_address, user_agent, request_id,
     description, old_values, new_values, reason, approval_comments,
@@ -296,7 +307,7 @@ BEGIN
     project_id, amount, amount_currency,
     source_module, error_message, prev_hash, entry_hash
   ) VALUES (
-    p_user_id, p_user_email, p_user_name, v_role, p_session_id, p_auth_method,
+    v_effective_user_id, p_user_email, p_user_name, v_role, v_org, p_session_id, p_auth_method,
     p_action, p_entity_type, p_entity_id, p_status, p_severity,
     p_ip_address, p_user_agent, p_request_id,
     p_description, p_old_values, p_new_values, p_reason, p_approval_comments,
@@ -471,17 +482,11 @@ BEGIN
     );
 
     IF v_user_id IS NOT NULL THEN
-        SELECT email, full_name INTO v_user_email, v_user_name
-        FROM public.profiles WHERE id = v_user_id;
-
-        -- Migration 039: organization_id, looked up correctly via user_id
-        -- (the pre-existing email/full_name lookup above uses `id =
-        -- v_user_id`, which is a separate known issue -- public.profiles.id
-        -- is not the same column as public.profiles.user_id -- left
-        -- unchanged here since fixing it is outside this migration's scope
-        -- and is not something Finding 4.1/4.5 asked for; flagged in the
-        -- accompanying report as a manual follow-up item).
-        SELECT organization_id INTO v_organization_id
+        -- FIX (DB-022): was `WHERE id = v_user_id`; profiles.id is the
+        -- profile row's own PK, not the auth user id. Must join on
+        -- user_id, exactly as the organization_id lookup below already
+        -- (correctly) does.
+        SELECT email, full_name, organization_id INTO v_user_email, v_user_name, v_organization_id
         FROM public.profiles WHERE user_id = v_user_id;
 
         SELECT r.name INTO v_role
@@ -535,10 +540,8 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN v_project_id := NULL;
     END;
 
-    -- Migration 039: prefer the audited row's own organization_id when the
-    -- table being audited has one (now true for invoices/expenses/projects/
-    -- budgets/clients per migration 036, and already true for most finance.*
-    -- tables) -- falls back to the acting user's organization otherwise.
+    -- (unchanged from migration 039): prefer the audited row's own
+    -- organization_id when the table being audited has one.
     BEGIN
         IF v_row ? 'organization_id' AND v_row->>'organization_id' IS NOT NULL THEN
             v_organization_id := (v_row->>'organization_id')::UUID;
@@ -1032,6 +1035,9 @@ CREATE OR REPLACE FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "te
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'public'
     AS $_$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_rows int;
 BEGIN
   IF p_schema NOT IN ('finance', 'public') OR
      p_table NOT IN ('chart_of_accounts', 'vendors', 'clients', 'projects',
@@ -1039,23 +1045,32 @@ BEGIN
     RAISE EXCEPTION 'core.soft_delete: table %.% is not an approved soft-delete target', p_schema, p_table;
   END IF;
 
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'core.soft_delete: caller has no resolvable organization';
+  END IF;
+
   IF p_schema = 'public' AND p_table = 'financial_accounts' THEN
     UPDATE public.financial_accounts
     SET deleted_at = now(), deleted_by = auth.uid(), status = 'INACTIVE'
-    WHERE id = p_id AND deleted_at IS NULL;
+    WHERE id = p_id AND deleted_at IS NULL AND organization_id = v_org;
   ELSIF p_schema = 'public' AND p_table = 'projects' THEN
     UPDATE public.projects
     SET deleted_at = now(), deleted_by = auth.uid()
-    WHERE id = p_id AND deleted_at IS NULL;
+    WHERE id = p_id AND deleted_at IS NULL AND organization_id = v_org;
   ELSIF p_schema = 'public' AND p_table = 'clients' THEN
     UPDATE public.clients
     SET deleted_at = now(), deleted_by = auth.uid(), status = 'INACTIVE'
-    WHERE id = p_id AND deleted_at IS NULL;
+    WHERE id = p_id AND deleted_at IS NULL AND organization_id = v_org;
   ELSE
     EXECUTE format(
-      'UPDATE %I.%I SET deleted_at = now(), deleted_by = auth.uid(), is_active = false WHERE id = $1 AND deleted_at IS NULL',
+      'UPDATE %I.%I SET deleted_at = now(), deleted_by = auth.uid(), is_active = false WHERE id = $1 AND deleted_at IS NULL AND organization_id = $2',
       p_schema, p_table
-    ) USING p_id;
+    ) USING p_id, v_org;
+  END IF;
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  IF v_rows = 0 THEN
+    RAISE EXCEPTION 'core.soft_delete: no matching row % in %.% for caller''s organization (already deleted, wrong org, or does not exist)', p_id, p_schema, p_table;
   END IF;
 END;
 $_$;
@@ -1300,6 +1315,8 @@ DECLARE
   v_total_credit numeric(18,2);
   v_total_base_debit numeric(18,2);
   v_total_base_credit numeric(18,2);
+  v_line_count integer;
+  v_status text;
 BEGIN
   v_journal_id := COALESCE(NEW.journal_entry_id, OLD.journal_entry_id);
 
@@ -1307,12 +1324,10 @@ BEGIN
     COALESCE(SUM(debit_amount), 0),
     COALESCE(SUM(credit_amount), 0),
     COALESCE(SUM(COALESCE(base_debit, debit_amount)), 0),
-    COALESCE(SUM(COALESCE(base_credit, credit_amount)), 0)
+    COALESCE(SUM(COALESCE(base_credit, credit_amount)), 0),
+    COUNT(*)
   INTO
-    v_total_debit,
-    v_total_credit,
-    v_total_base_debit,
-    v_total_base_credit
+    v_total_debit, v_total_credit, v_total_base_debit, v_total_base_credit, v_line_count
   FROM finance.journal_lines
   WHERE journal_entry_id = v_journal_id;
 
@@ -1327,6 +1342,16 @@ BEGIN
     RAISE EXCEPTION
       'Journal entry % is unbalanced in base (PKR) currency: base debit % != base credit %',
       v_journal_id, v_total_base_debit, v_total_base_credit
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- Only require >= 2 lines once the entry is (or is being) POSTED --
+  -- DRAFT entries are allowed to be built up line by line.
+  SELECT status INTO v_status FROM finance.journal_entries WHERE id = v_journal_id;
+  IF v_status = 'POSTED' AND v_line_count < 2 THEN
+    RAISE EXCEPTION
+      'Journal entry % cannot be POSTED with fewer than 2 lines (has %)',
+      v_journal_id, v_line_count
       USING ERRCODE = 'check_violation';
   END IF;
 
@@ -1620,6 +1645,24 @@ END;
 
 
 ALTER FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."enforce_base_amounts_on_post"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM finance.journal_entries je
+    WHERE je.id = NEW.journal_entry_id AND je.status = 'POSTED'
+  ) AND (NEW.base_debit IS NULL OR NEW.base_credit IS NULL) THEN
+    RAISE EXCEPTION 'journal_lines.base_debit/base_credit must be set before a journal entry can be POSTED (line %)', NEW.id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."enforce_base_amounts_on_post"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."enforce_expense_line_org"() RETURNS "trigger"
@@ -3518,13 +3561,18 @@ CREATE OR REPLACE FUNCTION "finance"."validate_ownership_percentage_total"() RET
 DECLARE
   v_check_date DATE;
   v_total_pct  NUMERIC(6,2);
+  v_org        uuid;
 BEGIN
   v_check_date := COALESCE(NEW.effective_from, CURRENT_DATE);
+
+  SELECT o.organization_id INTO v_org
+  FROM finance.owners o WHERE o.id = NEW.owner_id;
 
   SELECT COALESCE(SUM(oh.ownership_percentage), 0) INTO v_total_pct
   FROM finance.ownership_history oh
   JOIN finance.owners o ON o.id = oh.owner_id
   WHERE o.status = 'ACTIVE'
+    AND o.organization_id = v_org
     AND oh.effective_from <= v_check_date
     AND (oh.effective_to IS NULL OR oh.effective_to >= v_check_date)
     AND oh.id IS DISTINCT FROM NEW.id;
@@ -3532,7 +3580,7 @@ BEGIN
   v_total_pct := v_total_pct + NEW.ownership_percentage;
 
   IF v_total_pct > 100.00 THEN
-        RAISE EXCEPTION 'Ownership percentages for effective date % would total %% (Current Total: %), which exceeds 100%%. Adjust or end-date an existing ownership record first.', v_check_date, v_total_pct;
+    RAISE EXCEPTION 'Ownership percentages for effective date % would total %% (Current Total: %), which exceeds 100%%. Adjust or end-date an existing ownership record first.', v_check_date, v_total_pct;
   END IF;
 
   RETURN NEW;
@@ -3548,27 +3596,45 @@ CREATE OR REPLACE FUNCTION "finance"."validate_payment_allocation"() RETURNS "tr
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
-  v_invoice_total     NUMERIC(18,2);
-  v_already_allocated NUMERIC(18,2);
+  v_invoice_total       NUMERIC(18,2);
+  v_invoice_allocated   NUMERIC(18,2);
+  v_receipt_total       NUMERIC(18,2);
+  v_receipt_allocated   NUMERIC(18,2);
 BEGIN
   SELECT total_amount INTO v_invoice_total
-  FROM public.invoices
-  WHERE id = NEW.invoice_id
-  FOR UPDATE;
+  FROM public.invoices WHERE id = NEW.invoice_id FOR UPDATE;
 
   IF v_invoice_total IS NULL THEN
     RAISE EXCEPTION 'Cannot allocate payment: invoice % does not exist', NEW.invoice_id;
   END IF;
 
-  SELECT COALESCE(SUM(allocated_amount), 0) INTO v_already_allocated
+  SELECT COALESCE(SUM(allocated_amount), 0) INTO v_invoice_allocated
   FROM finance.payment_allocations
-  WHERE invoice_id = NEW.invoice_id
-    AND id IS DISTINCT FROM NEW.id;
+  WHERE invoice_id = NEW.invoice_id AND id IS DISTINCT FROM NEW.id;
 
-  IF (v_already_allocated + NEW.allocated_amount) > v_invoice_total THEN
+  IF (v_invoice_allocated + NEW.allocated_amount) > v_invoice_total THEN
     RAISE EXCEPTION
       'Payment allocation of % exceeds invoice outstanding balance (already allocated %, invoice total %)',
-      NEW.allocated_amount, v_already_allocated, v_invoice_total;
+      NEW.allocated_amount, v_invoice_allocated, v_invoice_total;
+  END IF;
+
+  -- NEW CHECK: don't let the sum of allocations against one payment
+  -- receipt exceed what that receipt actually received.
+  SELECT amount INTO v_receipt_total
+  FROM finance.payment_receipts WHERE id = NEW.payment_receipt_id FOR UPDATE;
+
+  IF v_receipt_total IS NULL THEN
+    RAISE EXCEPTION 'Cannot allocate payment: payment receipt % does not exist', NEW.payment_receipt_id;
+  END IF;
+
+  SELECT COALESCE(SUM(allocated_amount), 0) INTO v_receipt_allocated
+  FROM finance.payment_allocations
+  WHERE payment_receipt_id = NEW.payment_receipt_id AND id IS DISTINCT FROM NEW.id;
+
+  IF (v_receipt_allocated + NEW.allocated_amount) > v_receipt_total THEN
+    RAISE EXCEPTION
+      'Payment allocation of % exceeds the payment receipt''s own total (already allocated %, receipt total %)',
+      NEW.allocated_amount, v_receipt_allocated, v_receipt_total;
   END IF;
 
   RETURN NEW;
@@ -3793,41 +3859,36 @@ COMMENT ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") IS 'O
 
 
 
-CREATE OR REPLACE FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text" DEFAULT 'User'::"text", "p_full_name" "text" DEFAULT ''::"text") RETURNS json
+CREATE OR REPLACE FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text" DEFAULT 'EMPLOYEE'::"text", "p_full_name" "text" DEFAULT ''::"text") RETURNS json
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'public'
-    AS $$ DECLARE
+    AS $$
+DECLARE
   v_new_user_id UUID;
 BEGIN
-  -- 1. Check karo ke jo call kar raha hai wo Admin hai ya nahi
-  IF NOT EXISTS (
-    SELECT 1 FROM public.profiles 
-    WHERE user_id = auth.uid() AND role = 'Admin'
-  ) THEN
-    RETURN json_build_object('error', 'Only admins can create users')::JSON;
+  IF NOT core.has_permission(auth.uid(), 'ADMIN_USERS') THEN
+    RETURN json_build_object('error', 'Only users with ADMIN_USERS permission can create users')::JSON;
   END IF;
 
-  -- 2. auth.users mein naya account banao (Direct database insert)
   INSERT INTO auth.users (
-    instance_id, id, email, encrypted_password, email_confirmed_at, 
-    raw_user_meta_data, created_at, updated_at, aud, role, 
+    instance_id, id, email, encrypted_password, email_confirmed_at,
+    raw_user_meta_data, created_at, updated_at, aud, role,
     confirmation_token, recovery_token, email_change_token_new, email_change, invited_at
   ) VALUES (
-    '00000000-0000-0000-0000-000000000000', 
-    gen_random_uuid(), 
-    p_email, 
-    crypt(p_password, gen_salt('bf')), -- Password securely hash ho raha hai
-    NOW(), -- Email auto confirm
-    jsonb_build_object('full_name', p_full_name), 
-    NOW(), NOW(), 
-    'authenticated', 'authenticated', 
+    '00000000-0000-0000-0000-000000000000',
+    gen_random_uuid(),
+    p_email,
+    crypt(p_password, gen_salt('bf')),
+    NOW(),
+    jsonb_build_object('full_name', p_full_name),
+    NOW(), NOW(),
+    'authenticated', 'authenticated',
     '', '', '', '', NULL
   )
   RETURNING id INTO v_new_user_id;
 
-  -- 3. Public profiles table mein entry banao (Trigger skip ho jayega isliye manually)
-  INSERT INTO public.profiles (user_id, email, full_name, role)
-  VALUES (v_new_user_id, p_email, p_full_name, p_role);
+  INSERT INTO public.profiles (user_id, email, full_name, role, organization_id)
+  VALUES (v_new_user_id, p_email, p_full_name, p_role, core.current_user_org_id());
 
   RETURN json_build_object('success', true, 'message', 'User created successfully')::JSON;
 
@@ -3837,7 +3898,7 @@ EXCEPTION
   WHEN OTHERS THEN
     RETURN json_build_object('error', SQLERRM)::JSON;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text", "p_full_name" "text") OWNER TO "postgres";
@@ -3851,21 +3912,23 @@ DECLARE
   v_profile_id UUID;
   v_email TEXT;
 BEGIN
-  -- Check if profile already exists
+  -- Self-service only: a user may only ensure their OWN profile exists.
+  -- (Admin-initiated user creation is a separate, permission-gated path.)
+  IF auth.uid() IS NULL OR auth.uid() <> target_user_id THEN
+    RAISE EXCEPTION 'Access denied: ensure_profile_exists may only be called for the current user';
+  END IF;
+
   SELECT id INTO v_profile_id FROM public.profiles WHERE user_id = target_user_id;
-  
   IF v_profile_id IS NOT NULL THEN
     RETURN v_profile_id;
   END IF;
-  
-  -- Get email from auth.users
+
   SELECT email INTO v_email FROM auth.users WHERE id = target_user_id;
-  
-  -- Create profile
+
   INSERT INTO public.profiles (user_id, email, full_name, role)
   VALUES (target_user_id, v_email, '', 'EMPLOYEE')
   RETURNING id INTO v_profile_id;
-  
+
   RETURN v_profile_id;
 END;
 $$;
@@ -4011,7 +4074,8 @@ BEGIN
     p.role AS profile_role,
     (p.id IS NOT NULL) AS has_profile
   FROM auth.users u
-  LEFT JOIN public.profiles p ON p.user_id = u.id
+  JOIN public.profiles p ON p.user_id = u.id
+  WHERE p.organization_id = core.current_user_org_id()
   ORDER BY COALESCE(p.full_name, u.email);
 END;
 $$;
@@ -4076,10 +4140,20 @@ ALTER FUNCTION "public"."get_my_user_roles"() OWNER TO "postgres";
 CREATE OR REPLACE FUNCTION "public"."get_user_permissions"("p_user_id" "uuid") RETURNS TABLE("code" "text", "module" "text", "action" "text", "data_scope" "text", "amount_limit" numeric)
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'public'
-    AS $$ BEGIN
+    AS $$
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Access denied: authentication required';
+  END IF;
+  -- A caller may fetch their own permission set, or an ADMIN_USERS
+  -- holder may look up someone else's -- both still resolved via
+  -- core.get_user_permissions, which is itself org/user scoped.
+  IF p_user_id <> auth.uid() AND NOT core.has_permission(auth.uid(), 'ADMIN_USERS') THEN
+    RAISE EXCEPTION 'Access denied: cannot read another user''s permissions';
+  END IF;
   RETURN QUERY SELECT * FROM core.get_user_permissions(p_user_id);
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "public"."get_user_permissions"("p_user_id" "uuid") OWNER TO "postgres";
@@ -5775,6 +5849,7 @@ CREATE TABLE IF NOT EXISTS "audit"."data_access_events" (
     "access_granted" boolean DEFAULT true,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "request_id" "text",
+    "organization_id" "uuid",
     CONSTRAINT "data_access_events_access_type_check" CHECK (("access_type" = ANY (ARRAY['read'::"text", 'export'::"text", 'print'::"text", 'download'::"text"])))
 );
 
@@ -5796,6 +5871,7 @@ CREATE TABLE IF NOT EXISTS "audit"."export_events" (
     "ip_address" "inet",
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "request_id" "text",
+    "organization_id" "uuid",
     CONSTRAINT "export_events_format_check" CHECK (("format" = ANY (ARRAY['csv'::"text", 'pdf'::"text", 'xlsx'::"text", 'json'::"text"])))
 );
 
@@ -5814,6 +5890,7 @@ CREATE TABLE IF NOT EXISTS "audit"."security_events" (
     "success" boolean DEFAULT true,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "request_id" "text",
+    "organization_id" "uuid",
     CONSTRAINT "security_events_event_type_check" CHECK (("event_type" = ANY (ARRAY['LOGIN_SUCCESS'::"text", 'LOGIN_FAILURE'::"text", 'MFA_ENABLED'::"text", 'MFA_DISABLED'::"text", 'MFA_VERIFICATION_SUCCESS'::"text", 'MFA_VERIFICATION_FAILURE'::"text", 'PASSWORD_RESET_REQUEST'::"text", 'PASSWORD_RESET_SUCCESS'::"text", 'PASSWORD_RESET_FAILURE'::"text", 'SESSION_TERMINATED'::"text", 'SUSPICIOUS_ACCESS'::"text", 'LOCKOUT'::"text", 'PERMISSION_CHANGE'::"text", 'ROLE_CHANGE'::"text", 'DATA_SCOPE_CHANGE'::"text", 'NEW_DEVICE'::"text"])))
 );
 
@@ -5821,7 +5898,7 @@ CREATE TABLE IF NOT EXISTS "audit"."security_events" (
 ALTER TABLE "audit"."security_events" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "audit"."v_unsafe_security_definer_functions" AS
+CREATE OR REPLACE VIEW "audit"."v_unsafe_security_definer_functions" WITH ("security_invoker"='true') AS
  SELECT "n"."nspname" AS "schema_name",
     "p"."proname" AS "function_name",
     "pg_get_function_identity_arguments"("p"."oid") AS "arguments"
@@ -6009,7 +6086,8 @@ CREATE TABLE IF NOT EXISTS "core"."idempotency_keys" (
     "key" "text" NOT NULL,
     "request_hash" "text",
     "response_snapshot" "jsonb",
-    "created_at" timestamp with time zone DEFAULT "now"()
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "organization_id" "uuid" NOT NULL
 );
 
 
@@ -9056,7 +9134,7 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
     "organization_id" "uuid",
     "department_id" "uuid",
     "manager_id" "uuid",
-    CONSTRAINT "profiles_role_check" CHECK (("role" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'ACCOUNTANT'::"text", 'PROJECT_MANAGER'::"text", 'EMPLOYEE'::"text", 'VIEWER'::"text"])))
+    CONSTRAINT "profiles_role_check" CHECK (("role" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'ACCOUNTANT'::"text", 'PROJECT_MANAGER'::"text", 'EMPLOYEE'::"text", 'VIEWER'::"text", 'Admin'::"text", 'AUDITOR'::"text", 'HOD'::"text", 'TECHNICAL_ADMIN'::"text"])))
 );
 
 
@@ -10328,12 +10406,12 @@ ALTER TABLE ONLY "core"."idempotency_keys"
 
 
 ALTER TABLE ONLY "core"."idempotency_keys"
-    ADD CONSTRAINT "idempotency_keys_unique" UNIQUE ("scope", "key");
+    ADD CONSTRAINT "idempotency_keys_unique" UNIQUE ("scope", "key", "organization_id");
 
 
 
 ALTER TABLE ONLY "core"."integration_events"
-    ADD CONSTRAINT "integration_events_idempotency_unique" UNIQUE ("source_module", "event_type", "idempotency_key");
+    ADD CONSTRAINT "integration_events_idempotency_unique" UNIQUE ("organization_id", "source_module", "event_type", "idempotency_key");
 
 
 
@@ -10379,11 +10457,6 @@ ALTER TABLE ONLY "core"."permissions"
 
 ALTER TABLE ONLY "core"."role_permissions"
     ADD CONSTRAINT "role_permissions_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE ONLY "core"."roles"
-    ADD CONSTRAINT "roles_name_key" UNIQUE ("name");
 
 
 
@@ -10664,6 +10737,11 @@ ALTER TABLE ONLY "finance"."journal_entries"
 
 ALTER TABLE ONLY "finance"."journal_lines"
     ADD CONSTRAINT "journal_lines_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "finance"."numbering_sequences"
+    ADD CONSTRAINT "numbering_sequences_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11160,11 +11238,23 @@ CREATE INDEX "idx_data_access_entity" ON "audit"."data_access_events" USING "btr
 
 
 
+CREATE INDEX "idx_data_access_events_org" ON "audit"."data_access_events" USING "btree" ("organization_id");
+
+
+
 CREATE INDEX "idx_data_access_user" ON "audit"."data_access_events" USING "btree" ("user_id", "created_at" DESC);
 
 
 
+CREATE INDEX "idx_export_events_org" ON "audit"."export_events" USING "btree" ("organization_id");
+
+
+
 CREATE INDEX "idx_export_events_user" ON "audit"."export_events" USING "btree" ("user_id", "created_at" DESC);
+
+
+
+CREATE INDEX "idx_security_events_org" ON "audit"."security_events" USING "btree" ("organization_id");
 
 
 
@@ -11261,6 +11351,14 @@ CREATE INDEX "idx_ur_role" ON "core"."user_roles" USING "btree" ("role_id");
 
 
 CREATE INDEX "idx_ur_user" ON "core"."user_roles" USING "btree" ("user_id");
+
+
+
+CREATE UNIQUE INDEX "roles_name_org_unique" ON "core"."roles" USING "btree" ("organization_id", "name") WHERE ("organization_id" IS NOT NULL);
+
+
+
+CREATE UNIQUE INDEX "roles_name_system_unique" ON "core"."roles" USING "btree" ("name") WHERE ("organization_id" IS NULL);
 
 
 
@@ -11536,7 +11634,7 @@ CREATE INDEX "idx_ns_type" ON "finance"."numbering_sequences" USING "btree" ("se
 
 
 
-CREATE UNIQUE INDEX "idx_ns_type_fy_unique" ON "finance"."numbering_sequences" USING "btree" ("sequence_type", COALESCE(("fiscal_year_id")::"text", 'GLOBAL'::"text"));
+CREATE UNIQUE INDEX "idx_ns_type_fy_org_unique" ON "finance"."numbering_sequences" USING "btree" ("organization_id", "sequence_type", COALESCE(("fiscal_year_id")::"text", 'GLOBAL'::"text"));
 
 
 
@@ -12447,6 +12545,10 @@ CREATE OR REPLACE TRIGGER "trg_depreciation_schedule_ts" BEFORE UPDATE ON "finan
 
 
 
+CREATE CONSTRAINT TRIGGER "trg_enforce_base_amounts_on_post" AFTER INSERT OR UPDATE ON "finance"."journal_lines" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_base_amounts_on_post"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_enforce_postable_account" BEFORE INSERT OR UPDATE OF "account_id" ON "finance"."journal_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_postable_account"();
 
 
@@ -12959,6 +13061,21 @@ ALTER TABLE ONLY "audit"."audit_log"
 
 
 
+ALTER TABLE ONLY "audit"."data_access_events"
+    ADD CONSTRAINT "data_access_events_org_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "audit"."export_events"
+    ADD CONSTRAINT "export_events_org_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "audit"."security_events"
+    ADD CONSTRAINT "security_events_org_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "core"."approval_actions"
     ADD CONSTRAINT "approval_actions_approval_step_id_fkey" FOREIGN KEY ("approval_step_id") REFERENCES "core"."approval_steps"("id") ON DELETE CASCADE;
 
@@ -13006,6 +13123,11 @@ ALTER TABLE ONLY "core"."delegations"
 
 ALTER TABLE ONLY "core"."employee_links"
     ADD CONSTRAINT "employee_links_shared_person_id_fkey" FOREIGN KEY ("shared_person_id") REFERENCES "core"."shared_people"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."idempotency_keys"
+    ADD CONSTRAINT "idempotency_keys_org_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
 
 
 
@@ -14410,33 +14532,35 @@ CREATE POLICY "delete_own_conversations" ON "ai"."ai_conversations" FOR DELETE U
 
 
 
-CREATE POLICY "read_ai_conversations" ON "ai"."ai_conversations" FOR SELECT USING ((("user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
+CREATE POLICY "read_ai_conversations" ON "ai"."ai_conversations" FOR SELECT USING (((("user_id" = "auth"."uid"()) AND "core"."same_org"("organization_id")) OR ((EXISTS ( SELECT 1
    FROM ("core"."user_roles" "ur"
      JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
-  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'Admin'::"text"])) AND ("ur"."effective_from" <= "now"()) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= "now"())))))));
+  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'Admin'::"text"])) AND ("ur"."effective_from" <= "now"()) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= "now"()))))) AND "core"."same_org"("organization_id"))));
 
 
 
-CREATE POLICY "read_ai_messages" ON "ai"."ai_messages" FOR SELECT USING ((("conversation_id" IN ( SELECT "ai_conversations"."id"
-   FROM "ai"."ai_conversations"
-  WHERE ("ai_conversations"."user_id" = "auth"."uid"()))) OR (EXISTS ( SELECT 1
+CREATE POLICY "read_ai_messages" ON "ai"."ai_messages" FOR SELECT USING ((("conversation_id" IN ( SELECT "c"."id"
+   FROM "ai"."ai_conversations" "c"
+  WHERE (("c"."user_id" = "auth"."uid"()) AND "core"."same_org"("c"."organization_id")))) OR ((EXISTS ( SELECT 1
    FROM ("core"."user_roles" "ur"
      JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
-  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'Admin'::"text"])) AND ("ur"."effective_from" <= "now"()) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= "now"())))))));
+  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'Admin'::"text"])) AND ("ur"."effective_from" <= "now"()) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= "now"()))))) AND ("conversation_id" IN ( SELECT "c"."id"
+   FROM "ai"."ai_conversations" "c"
+  WHERE "core"."same_org"("c"."organization_id"))))));
 
 
 
-CREATE POLICY "read_ai_query_audit" ON "ai"."ai_query_audit" FOR SELECT USING ((("user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
+CREATE POLICY "read_ai_query_audit" ON "ai"."ai_query_audit" FOR SELECT USING (((("user_id" = "auth"."uid"()) AND "core"."same_org"("organization_id")) OR ((EXISTS ( SELECT 1
    FROM ("core"."user_roles" "ur"
      JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
-  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'Admin'::"text"])) AND ("ur"."effective_from" <= "now"()) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= "now"())))))));
+  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'Admin'::"text"])) AND ("ur"."effective_from" <= "now"()) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= "now"()))))) AND "core"."same_org"("organization_id"))));
 
 
 
-CREATE POLICY "read_ai_tool_calls" ON "ai"."ai_tool_calls" FOR SELECT USING ((("user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
+CREATE POLICY "read_ai_tool_calls" ON "ai"."ai_tool_calls" FOR SELECT USING (((("user_id" = "auth"."uid"()) AND "core"."same_org"("organization_id")) OR ((EXISTS ( SELECT 1
    FROM ("core"."user_roles" "ur"
      JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
-  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'Admin'::"text"])) AND ("ur"."effective_from" <= "now"()) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= "now"())))))));
+  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'Admin'::"text"])) AND ("ur"."effective_from" <= "now"()) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= "now"()))))) AND "core"."same_org"("organization_id"))));
 
 
 
@@ -14523,7 +14647,7 @@ CREATE POLICY "audit_log_service_all" ON "audit"."audit_log" TO "service_role" U
 ALTER TABLE "audit"."data_access_events" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "data_access_insert" ON "audit"."data_access_events" FOR INSERT TO "authenticated" WITH CHECK (true);
+CREATE POLICY "data_access_insert" ON "audit"."data_access_events" FOR INSERT TO "authenticated" WITH CHECK (((("user_id" IS NULL) OR ("user_id" = "auth"."uid"())) AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))));
 
 
 
@@ -14535,10 +14659,10 @@ CREATE POLICY "data_access_no_update" ON "audit"."data_access_events" FOR UPDATE
 
 
 
-CREATE POLICY "data_access_select" ON "audit"."data_access_events" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
+CREATE POLICY "data_access_select" ON "audit"."data_access_events" FOR SELECT TO "authenticated" USING (((EXISTS ( SELECT 1
    FROM ("core"."user_roles" "ur"
      JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
-  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("ur"."is_active" = true) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text"])) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= CURRENT_DATE))))));
+  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("ur"."is_active" = true) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text"])) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= CURRENT_DATE))))) AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))));
 
 
 
@@ -14549,7 +14673,7 @@ CREATE POLICY "data_access_service_all" ON "audit"."data_access_events" TO "serv
 ALTER TABLE "audit"."export_events" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "export_events_insert" ON "audit"."export_events" FOR INSERT TO "authenticated" WITH CHECK (true);
+CREATE POLICY "export_events_insert" ON "audit"."export_events" FOR INSERT TO "authenticated" WITH CHECK (((("user_id" IS NULL) OR ("user_id" = "auth"."uid"())) AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))));
 
 
 
@@ -14561,10 +14685,10 @@ CREATE POLICY "export_events_no_update" ON "audit"."export_events" FOR UPDATE TO
 
 
 
-CREATE POLICY "export_events_select" ON "audit"."export_events" FOR SELECT TO "authenticated" USING (((EXISTS ( SELECT 1
+CREATE POLICY "export_events_select" ON "audit"."export_events" FOR SELECT TO "authenticated" USING ((((EXISTS ( SELECT 1
    FROM ("core"."user_roles" "ur"
      JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
-  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("ur"."is_active" = true) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text"])) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= CURRENT_DATE))))) OR ("user_id" = "auth"."uid"())));
+  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("ur"."is_active" = true) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text"])) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= CURRENT_DATE))))) AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))) OR ("user_id" = "auth"."uid"())));
 
 
 
@@ -14584,10 +14708,10 @@ CREATE POLICY "sec_events_no_update" ON "audit"."security_events" FOR UPDATE TO 
 
 
 
-CREATE POLICY "sec_events_select" ON "audit"."security_events" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
+CREATE POLICY "sec_events_select" ON "audit"."security_events" FOR SELECT TO "authenticated" USING (((EXISTS ( SELECT 1
    FROM ("core"."user_roles" "ur"
      JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
-  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("ur"."is_active" = true) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'TECH_ADMIN'::"text"])) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= CURRENT_DATE))))));
+  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("ur"."is_active" = true) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'TECH_ADMIN'::"text"])) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= CURRENT_DATE))))) AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))));
 
 
 
@@ -14792,7 +14916,7 @@ CREATE POLICY "role_manage" ON "core"."roles" USING (("core"."has_permission"("a
 ALTER TABLE "core"."role_permissions" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "role_select" ON "core"."roles" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+CREATE POLICY "role_select" ON "core"."roles" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))));
 
 
 
@@ -14891,7 +15015,7 @@ CREATE POLICY "admin_write_tiers" ON "finance"."fee_tiers" TO "authenticated" US
 
 
 
-CREATE POLICY "ap_insert" ON "finance"."accounting_periods" FOR INSERT WITH CHECK ("core"."is_finance_head"());
+CREATE POLICY "ap_insert" ON "finance"."accounting_periods" FOR INSERT WITH CHECK (("core"."is_finance_head"() AND "core"."same_org"("organization_id")));
 
 
 
@@ -14899,7 +15023,7 @@ CREATE POLICY "ap_select_org_scoped" ON "finance"."accounting_periods" FOR SELEC
 
 
 
-CREATE POLICY "ap_update" ON "finance"."accounting_periods" FOR UPDATE USING ("core"."is_finance_head"());
+CREATE POLICY "ap_update" ON "finance"."accounting_periods" FOR UPDATE USING (("core"."is_finance_head"() AND "core"."same_org"("organization_id"))) WITH CHECK (("core"."is_finance_head"() AND "core"."same_org"("organization_id")));
 
 
 
@@ -15026,7 +15150,7 @@ CREATE POLICY "bt_select_org_scoped" ON "finance"."bank_transfers" FOR SELECT US
 
 
 
-CREATE POLICY "bt_update_restricted" ON "finance"."bank_transfers" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "bt_update_restricted" ON "finance"."bank_transfers" FOR UPDATE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id"))) WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id")));
 
 
 
@@ -15157,7 +15281,7 @@ CREATE POLICY "dimensions_delete" ON "finance"."dimensions" FOR DELETE USING (("
 
 
 
-CREATE POLICY "dimensions_insert" ON "finance"."dimensions" FOR INSERT WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "dimensions_insert" ON "finance"."dimensions" FOR INSERT WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id")));
 
 
 
@@ -15165,7 +15289,7 @@ CREATE POLICY "dimensions_select_org_scoped" ON "finance"."dimensions" FOR SELEC
 
 
 
-CREATE POLICY "dimensions_update" ON "finance"."dimensions" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "dimensions_update" ON "finance"."dimensions" FOR UPDATE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id"))) WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id")));
 
 
 
@@ -15423,11 +15547,31 @@ CREATE POLICY "ownership_history_update_org_scoped" ON "finance"."ownership_hist
 
 
 
-CREATE POLICY "pa_insert" ON "finance"."payment_allocations" FOR INSERT WITH CHECK (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "pa_delete" ON "finance"."payment_allocations" FOR DELETE USING (("core"."is_finance_head"() AND (EXISTS ( SELECT 1
+   FROM "public"."invoices" "i"
+  WHERE (("i"."id" = "payment_allocations"."invoice_id") AND "core"."same_org"("i"."organization_id"))))));
 
 
 
-CREATE POLICY "pa_select" ON "finance"."payment_allocations" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
+CREATE POLICY "pa_insert" ON "finance"."payment_allocations" FOR INSERT WITH CHECK ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND (EXISTS ( SELECT 1
+   FROM "public"."invoices" "i"
+  WHERE (("i"."id" = "payment_allocations"."invoice_id") AND "core"."same_org"("i"."organization_id")))) AND (EXISTS ( SELECT 1
+   FROM "finance"."payment_receipts" "pr"
+  WHERE (("pr"."id" = "payment_allocations"."payment_receipt_id") AND "core"."same_org"("pr"."organization_id"))))));
+
+
+
+CREATE POLICY "pa_select" ON "finance"."payment_allocations" FOR SELECT USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")) AND (EXISTS ( SELECT 1
+   FROM "public"."invoices" "i"
+  WHERE (("i"."id" = "payment_allocations"."invoice_id") AND "core"."same_org"("i"."organization_id"))))));
+
+
+
+CREATE POLICY "pa_update" ON "finance"."payment_allocations" FOR UPDATE USING (("core"."is_finance_head"() AND (EXISTS ( SELECT 1
+   FROM "public"."invoices" "i"
+  WHERE (("i"."id" = "payment_allocations"."invoice_id") AND "core"."same_org"("i"."organization_id")))))) WITH CHECK (("core"."is_finance_head"() AND (EXISTS ( SELECT 1
+   FROM "public"."invoices" "i"
+  WHERE (("i"."id" = "payment_allocations"."invoice_id") AND "core"."same_org"("i"."organization_id"))))));
 
 
 
@@ -15571,7 +15715,7 @@ CREATE POLICY "ta_select_org_scoped" ON "finance"."tax_adjustments" FOR SELECT U
 
 
 
-CREATE POLICY "ta_update_restricted" ON "finance"."tax_adjustments" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "ta_update_restricted" ON "finance"."tax_adjustments" FOR UPDATE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id"))) WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id")));
 
 
 
@@ -15717,7 +15861,7 @@ CREATE POLICY "tr_select_org_scoped" ON "finance"."tax_reconciliations" FOR SELE
 
 
 
-CREATE POLICY "tr_update_restricted" ON "finance"."tax_reconciliations" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "tr_update_restricted" ON "finance"."tax_reconciliations" FOR UPDATE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id"))) WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id")));
 
 
 
@@ -15745,7 +15889,7 @@ CREATE POLICY "tsl_select_org_scoped" ON "finance"."tax_slabs" FOR SELECT USING 
 
 
 
-CREATE POLICY "tsl_update_restricted" ON "finance"."tax_slabs" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "tsl_update_restricted" ON "finance"."tax_slabs" FOR UPDATE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id"))) WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id")));
 
 
 
@@ -16129,6 +16273,12 @@ CREATE POLICY "invoices_update_org_scoped" ON "public"."invoices" FOR UPDATE TO 
 ALTER TABLE "public"."notification_deliveries" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "notification_deliveries_insert_own" ON "public"."notification_deliveries" FOR INSERT TO "authenticated" WITH CHECK ((EXISTS ( SELECT 1
+   FROM "public"."notifications" "n"
+  WHERE (("n"."id" = "notification_deliveries"."notification_id") AND ("n"."user_id" = "auth"."uid"())))));
+
+
+
 CREATE POLICY "notification_deliveries_select_own" ON "public"."notification_deliveries" FOR SELECT TO "authenticated" USING ((EXISTS ( SELECT 1
    FROM "public"."notifications" "n"
   WHERE (("n"."id" = "notification_deliveries"."notification_id") AND ("n"."user_id" = "auth"."uid"())))));
@@ -16416,13 +16566,13 @@ GRANT USAGE ON SCHEMA "audit" TO "authenticated";
 
 
 
-GRANT ALL ON SCHEMA "core" TO "authenticated";
+GRANT USAGE ON SCHEMA "core" TO "authenticated";
 GRANT ALL ON SCHEMA "core" TO "service_role";
 GRANT USAGE ON SCHEMA "core" TO "anon";
 
 
 
-GRANT ALL ON SCHEMA "finance" TO "authenticated";
+GRANT USAGE ON SCHEMA "finance" TO "authenticated";
 GRANT ALL ON SCHEMA "finance" TO "service_role";
 GRANT USAGE ON SCHEMA "finance" TO "anon";
 
@@ -16444,6 +16594,8 @@ GRANT ALL ON SCHEMA "reporting" TO "authenticated";
 GRANT ALL ON SCHEMA "reporting" TO "service_role";
 GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
+
+
 
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
 GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
@@ -16511,14 +16663,12 @@ REVOKE ALL ON FUNCTION "finance"."prevent_posted_capital_transaction_edit"() FRO
 
 
 REVOKE ALL ON FUNCTION "public"."balance_sheet"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."balance_sheet"() TO "anon";
 GRANT ALL ON FUNCTION "public"."balance_sheet"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."balance_sheet"() TO "service_role";
 
 
 
 REVOKE ALL ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") TO "anon";
 GRANT ALL ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") TO "service_role";
 
@@ -16529,7 +16679,6 @@ GRANT ALL ON FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_passw
 
 
 
-GRANT ALL ON FUNCTION "public"."ensure_profile_exists"("target_user_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."ensure_profile_exists"("target_user_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."ensure_profile_exists"("target_user_id" "uuid") TO "service_role";
 
@@ -16556,19 +16705,16 @@ GRANT ALL ON FUNCTION "public"."get_all_system_users"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."get_my_permissions"() TO "anon";
 GRANT ALL ON FUNCTION "public"."get_my_permissions"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_my_permissions"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."get_my_user_roles"() TO "anon";
 GRANT ALL ON FUNCTION "public"."get_my_user_roles"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_my_user_roles"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."get_user_permissions"("p_user_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."get_user_permissions"("p_user_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."get_user_permissions"("p_user_id" "uuid") TO "service_role";
 
@@ -16579,74 +16725,62 @@ GRANT ALL ON FUNCTION "public"."get_user_roles_by_id"("p_target_user_id" "uuid")
 
 
 
-GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "anon";
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."is_admin"() TO "anon";
 GRANT ALL ON FUNCTION "public"."is_admin"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."is_admin"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."payroll_generate_employee_code"() TO "anon";
 GRANT ALL ON FUNCTION "public"."payroll_generate_employee_code"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."payroll_generate_employee_code"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."payroll_update_timestamp"() TO "anon";
 GRANT ALL ON FUNCTION "public"."payroll_update_timestamp"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."payroll_update_timestamp"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."prevent_posted_invoice_deletion"() TO "anon";
 GRANT ALL ON FUNCTION "public"."prevent_posted_invoice_deletion"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."prevent_posted_invoice_deletion"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."prevent_posted_invoice_edit"() TO "anon";
 GRANT ALL ON FUNCTION "public"."prevent_posted_invoice_edit"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."prevent_posted_invoice_edit"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."prevent_posted_payroll_run_edit"() TO "anon";
 GRANT ALL ON FUNCTION "public"."prevent_posted_payroll_run_edit"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."prevent_posted_payroll_run_edit"() TO "service_role";
 
 
 
 REVOKE ALL ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date") TO "anon";
 GRANT ALL ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date") TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "anon";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."sync_invoice_client_name"() TO "anon";
 GRANT ALL ON FUNCTION "public"."sync_invoice_client_name"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."sync_invoice_client_name"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."update_updated_at"() TO "anon";
 GRANT ALL ON FUNCTION "public"."update_updated_at"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."update_updated_at"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."user_has_role"("p_role_name" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."user_has_role"("p_role_name" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."user_has_role"("p_role_name" "text") TO "service_role";
 
@@ -16777,7 +16911,6 @@ GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
 
 
 
-
 GRANT SELECT,INSERT ON TABLE "audit"."audit_log" TO "authenticated";
 GRANT ALL ON TABLE "audit"."audit_log" TO "service_role";
 
@@ -16898,6 +17031,11 @@ GRANT ALL ON TABLE "core"."user_roles" TO "service_role";
 
 
 
+
+
+
+
+
 GRANT ALL ON TABLE "finance"."chart_of_accounts" TO "authenticated";
 GRANT ALL ON TABLE "finance"."chart_of_accounts" TO "service_role";
 
@@ -16905,7 +17043,6 @@ GRANT ALL ON TABLE "finance"."chart_of_accounts" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."account_type_summary" TO "authenticated";
 GRANT ALL ON TABLE "finance"."account_type_summary" TO "service_role";
-GRANT SELECT ON TABLE "finance"."account_type_summary" TO "anon";
 
 
 
@@ -16971,7 +17108,6 @@ GRANT ALL ON TABLE "finance"."capital_transactions" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."coa_tree" TO "authenticated";
 GRANT ALL ON TABLE "finance"."coa_tree" TO "service_role";
-GRANT SELECT ON TABLE "finance"."coa_tree" TO "anon";
 
 
 
@@ -17097,7 +17233,6 @@ GRANT ALL ON TABLE "finance"."platforms" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."postable_accounts" TO "authenticated";
 GRANT ALL ON TABLE "finance"."postable_accounts" TO "service_role";
-GRANT SELECT ON TABLE "finance"."postable_accounts" TO "anon";
 
 
 
@@ -17222,13 +17357,11 @@ GRANT ALL ON TABLE "legacy"."tax_returns" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."budgets" TO "anon";
 GRANT ALL ON TABLE "public"."budgets" TO "authenticated";
 GRANT ALL ON TABLE "public"."budgets" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."chart_of_accounts" TO "anon";
 GRANT ALL ON TABLE "public"."chart_of_accounts" TO "authenticated";
 GRANT ALL ON TABLE "public"."chart_of_accounts" TO "service_role";
 
@@ -17239,37 +17372,31 @@ GRANT ALL ON TABLE "public"."clients" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."coa_tree" TO "anon";
 GRANT ALL ON TABLE "public"."coa_tree" TO "authenticated";
 GRANT ALL ON TABLE "public"."coa_tree" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."commissions" TO "anon";
 GRANT ALL ON TABLE "public"."commissions" TO "authenticated";
 GRANT ALL ON TABLE "public"."commissions" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."contractors" TO "anon";
 GRANT ALL ON TABLE "public"."contractors" TO "authenticated";
 GRANT ALL ON TABLE "public"."contractors" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."credit_notes" TO "anon";
 GRANT ALL ON TABLE "public"."credit_notes" TO "authenticated";
 GRANT ALL ON TABLE "public"."credit_notes" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."exchange_rates" TO "anon";
 GRANT ALL ON TABLE "public"."exchange_rates" TO "authenticated";
 GRANT ALL ON TABLE "public"."exchange_rates" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."expenses" TO "anon";
 GRANT ALL ON TABLE "public"."expenses" TO "authenticated";
 GRANT ALL ON TABLE "public"."expenses" TO "service_role";
 
@@ -17281,97 +17408,81 @@ GRANT SELECT ON TABLE "reporting"."general_ledger" TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "public"."general_ledger" TO "anon";
 GRANT ALL ON TABLE "public"."general_ledger" TO "authenticated";
 GRANT ALL ON TABLE "public"."general_ledger" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."incomes" TO "anon";
 GRANT ALL ON TABLE "public"."incomes" TO "authenticated";
 GRANT ALL ON TABLE "public"."incomes" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."invoices" TO "anon";
 GRANT ALL ON TABLE "public"."invoices" TO "authenticated";
 GRANT ALL ON TABLE "public"."invoices" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."journal_entries" TO "anon";
 GRANT ALL ON TABLE "public"."journal_entries" TO "authenticated";
 GRANT ALL ON TABLE "public"."journal_entries" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."journal_lines" TO "anon";
 GRANT ALL ON TABLE "public"."journal_lines" TO "authenticated";
 GRANT ALL ON TABLE "public"."journal_lines" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."notification_deliveries" TO "anon";
 GRANT ALL ON TABLE "public"."notification_deliveries" TO "authenticated";
 GRANT ALL ON TABLE "public"."notification_deliveries" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."notification_preferences" TO "anon";
 GRANT ALL ON TABLE "public"."notification_preferences" TO "authenticated";
 GRANT ALL ON TABLE "public"."notification_preferences" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."notifications" TO "anon";
 GRANT ALL ON TABLE "public"."notifications" TO "authenticated";
 GRANT ALL ON TABLE "public"."notifications" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."organization_config" TO "anon";
 GRANT ALL ON TABLE "public"."organization_config" TO "authenticated";
 GRANT ALL ON TABLE "public"."organization_config" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payment_allocations" TO "anon";
 GRANT ALL ON TABLE "public"."payment_allocations" TO "authenticated";
 GRANT ALL ON TABLE "public"."payment_allocations" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payment_receipts" TO "anon";
 GRANT ALL ON TABLE "public"."payment_receipts" TO "authenticated";
 GRANT ALL ON TABLE "public"."payment_receipts" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payments" TO "anon";
 GRANT ALL ON TABLE "public"."payments" TO "authenticated";
 GRANT ALL ON TABLE "public"."payments" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payroll_advances" TO "anon";
 GRANT ALL ON TABLE "public"."payroll_advances" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_advances" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payroll_commissions" TO "anon";
 GRANT ALL ON TABLE "public"."payroll_commissions" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_commissions" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payroll_compensation" TO "anon";
 GRANT ALL ON TABLE "public"."payroll_compensation" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_compensation" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payroll_deductions" TO "anon";
 GRANT ALL ON TABLE "public"."payroll_deductions" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_deductions" TO "service_role";
 
@@ -17383,80 +17494,67 @@ GRANT ALL ON SEQUENCE "public"."payroll_employee_code_seq" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payroll_employees" TO "anon";
 GRANT ALL ON TABLE "public"."payroll_employees" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_employees" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payroll_lines" TO "anon";
 GRANT ALL ON TABLE "public"."payroll_lines" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_lines" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payroll_reimbursements" TO "anon";
 GRANT ALL ON TABLE "public"."payroll_reimbursements" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_reimbursements" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payroll_runs" TO "anon";
 GRANT ALL ON TABLE "public"."payroll_runs" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_runs" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."permissions" TO "anon";
 GRANT ALL ON TABLE "public"."permissions" TO "authenticated";
 GRANT ALL ON TABLE "public"."permissions" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."policy_documents" TO "anon";
 GRANT ALL ON TABLE "public"."policy_documents" TO "authenticated";
 GRANT ALL ON TABLE "public"."policy_documents" TO "service_role";
 GRANT SELECT ON TABLE "public"."policy_documents" TO "ai_readonly_role";
 
 
 
-GRANT ALL ON TABLE "public"."postable_accounts" TO "anon";
 GRANT ALL ON TABLE "public"."postable_accounts" TO "authenticated";
 GRANT ALL ON TABLE "public"."postable_accounts" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."profiles" TO "anon";
 GRANT ALL ON TABLE "public"."profiles" TO "authenticated";
 GRANT ALL ON TABLE "public"."profiles" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."projects" TO "anon";
 GRANT ALL ON TABLE "public"."projects" TO "authenticated";
 GRANT ALL ON TABLE "public"."projects" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."role_permissions" TO "anon";
 GRANT ALL ON TABLE "public"."role_permissions" TO "authenticated";
 GRANT ALL ON TABLE "public"."role_permissions" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."roles" TO "anon";
 GRANT ALL ON TABLE "public"."roles" TO "authenticated";
 GRANT ALL ON TABLE "public"."roles" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."subscriptions" TO "anon";
 GRANT ALL ON TABLE "public"."subscriptions" TO "authenticated";
 GRANT ALL ON TABLE "public"."subscriptions" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."user_mfa" TO "anon";
 GRANT ALL ON TABLE "public"."user_mfa" TO "authenticated";
 GRANT ALL ON TABLE "public"."user_mfa" TO "service_role";
 
@@ -17467,91 +17565,76 @@ GRANT ALL ON TABLE "public"."user_roles" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_audit_log" TO "anon";
 GRANT ALL ON TABLE "public"."v_audit_log" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_audit_log" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_commission_by_person" TO "anon";
 GRANT ALL ON TABLE "public"."v_commission_by_person" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_commission_by_person" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_commission_by_project" TO "anon";
 GRANT ALL ON TABLE "public"."v_commission_by_project" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_commission_by_project" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_commission_by_type" TO "anon";
 GRANT ALL ON TABLE "public"."v_commission_by_type" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_commission_by_type" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_commission_status_summary" TO "anon";
 GRANT ALL ON TABLE "public"."v_commission_status_summary" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_commission_status_summary" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_contractor_costs" TO "anon";
 GRANT ALL ON TABLE "public"."v_contractor_costs" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_contractor_costs" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_contractor_expirations" TO "anon";
 GRANT ALL ON TABLE "public"."v_contractor_expirations" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_contractor_expirations" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_contractor_project_costs" TO "anon";
 GRANT ALL ON TABLE "public"."v_contractor_project_costs" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_contractor_project_costs" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_payroll_summary" TO "anon";
 GRANT ALL ON TABLE "public"."v_payroll_summary" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_payroll_summary" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_permissions" TO "anon";
 GRANT ALL ON TABLE "public"."v_permissions" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_permissions" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_role_permissions" TO "anon";
 GRANT ALL ON TABLE "public"."v_role_permissions" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_role_permissions" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_roles" TO "anon";
 GRANT ALL ON TABLE "public"."v_roles" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_roles" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_subscription_renewals" TO "anon";
 GRANT ALL ON TABLE "public"."v_subscription_renewals" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_subscription_renewals" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_subscription_spend" TO "anon";
 GRANT ALL ON TABLE "public"."v_subscription_spend" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_subscription_spend" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."v_user_roles" TO "anon";
 GRANT ALL ON TABLE "public"."v_user_roles" TO "authenticated";
 GRANT ALL ON TABLE "public"."v_user_roles" TO "service_role";
 
@@ -17653,7 +17736,6 @@ GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 
-
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "service_role";
 
@@ -17700,4 +17782,3 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
-

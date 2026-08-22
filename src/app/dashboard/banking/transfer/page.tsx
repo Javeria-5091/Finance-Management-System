@@ -116,6 +116,7 @@ export default function TransfersPage() {
         fx_rate_date: form.fx_rate_date || null,
         transfer_date: form.transfer_date,
         status: 'DRAFT',
+        created_by: user?.id || '',
       },
       {
         onSuccess: () => {
@@ -284,7 +285,7 @@ export default function TransfersPage() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       {['DRAFT', 'SUBMITTED', 'APPROVED'].includes(t.status) && (
-                        <StatusActions record={t} module="banking" onAction={handleAction} />
+                        <StatusActions record={t} module="banking" onAction={handleAction} isPosting={postTransfer.isPending} />
                       )}
                     </td>
                   </tr>

@@ -1,26 +1,35 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '@/context/AuthContext';
 import * as bankService from '../services/bank.service';
+
+const useOrgId = () => useAuth().profile?.organization_id ?? null;
 
 // ==================== ACCOUNTS ====================
 
 export const useFinancialAccounts = () => {
+  const orgId = useOrgId();
   return useQuery({
-    queryKey: ['financial_accounts'],
-    queryFn: () => bankService.getFinancialAccounts().then(r => r.data),
+    queryKey: ['financial_accounts', orgId],
+    queryFn: () => bankService.getFinancialAccounts(orgId!).then(r => r.data),
+    enabled: !!orgId,
   });
 };
 
 export const useReconciliationSummary = () => {
+  const orgId = useOrgId();
   return useQuery({
-    queryKey: ['reconciliation_summary'],
-    queryFn: () => bankService.getReconciliationSummary().then(r => r.data),
+    queryKey: ['reconciliation_summary', orgId],
+    queryFn: () => bankService.getReconciliationSummary(orgId!).then(r => r.data),
+    enabled: !!orgId,
   });
 };
 
 export const useAssetAccounts = () => {
+  const orgId = useOrgId();
   return useQuery({
-    queryKey: ['asset_accounts'],
-    queryFn: () => bankService.getAssetAccounts().then(r => r.data),
+    queryKey: ['asset_accounts', orgId],
+    queryFn: () => bankService.getAssetAccounts(orgId!).then(r => r.data),
+    enabled: !!orgId,
   });
 };
 
@@ -38,18 +47,20 @@ export const useCreateAccount = () => {
 // ==================== STATEMENTS ====================
 
 export const useBankStatements = (accountId: string) => {
+  const orgId = useOrgId();
   return useQuery({
     queryKey: ['bank_statements', accountId],
-    queryFn: () => bankService.getBankStatements(accountId).then(r => r.data),
-    enabled: !!accountId,
+    queryFn: () => bankService.getBankStatements(orgId!, accountId).then(r => r.data),
+    enabled: !!accountId && !!orgId,
   });
 };
 
 export const useStatementLines = (statementId: string) => {
+  const orgId = useOrgId();
   return useQuery({
     queryKey: ['statement_lines', statementId],
-    queryFn: () => bankService.getStatementLines(statementId).then(r => r.data),
-    enabled: !!statementId,
+    queryFn: () => bankService.getStatementLines(orgId!, statementId).then(r => r.data),
+    enabled: !!statementId && !!orgId,
   });
 };
 
@@ -136,9 +147,11 @@ export const useExcludeLine = () => {
 // ==================== TRANSFERS ====================
 
 export const useBankTransfers = () => {
+  const orgId = useOrgId();
   return useQuery({
-    queryKey: ['bank_transfers'],
-    queryFn: () => bankService.getBankTransfers().then(r => r.data),
+    queryKey: ['bank_transfers', orgId],
+    queryFn: () => bankService.getBankTransfers(orgId!).then(r => r.data),
+    enabled: !!orgId,
   });
 };
 
@@ -176,9 +189,11 @@ export const usePostTransfer = () => {
 };
 
 export const useOpenPeriod = () => {
+  const orgId = useOrgId();
   return useQuery({
-    queryKey: ['open_period'],
-    queryFn: () => bankService.getOpenPeriod().then(r => r.data),
+    queryKey: ['open_period', orgId],
+    queryFn: () => bankService.getOpenPeriod(orgId!).then(r => r.data),
+    enabled: !!orgId,
     staleTime: 5 * 60 * 1000,
   });
 };

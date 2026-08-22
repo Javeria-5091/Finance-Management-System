@@ -5,16 +5,22 @@
 // =============================================================================
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '@/context/AuthContext';
 import * as S from '@/services/commission.service';
+
+const useOrgId = () => useAuth().profile?.organization_id ?? null;
 
 // ─── Queries ─────────────────────────────────────────────────────────────────
 
-export const useCommissionStats = () =>
-  useQuery({
-    queryKey: ['commission-stats'],
-    queryFn: S.fetchCommissionStats,
+export const useCommissionStats = () => {
+  const orgId = useOrgId();
+  return useQuery({
+    queryKey: ['commission-stats', orgId],
+    queryFn: () => S.fetchCommissionStats(orgId!),
+    enabled: !!orgId,
     staleTime: 30000,
   });
+};
 
 export const useCommissions = (filters?: {
     search?: string;
@@ -23,10 +29,12 @@ export const useCommissions = (filters?: {
     person_type?: string;
     project_id?: string;
     contractor_id?: string;
-  }) =>
-  useQuery({
+  }) => {
+  const orgId = useOrgId();
+  return useQuery({
     queryKey: [
       'commissions',
+      orgId,
       filters?.search,
       filters?.status,
       filters?.commission_type,
@@ -34,37 +42,51 @@ export const useCommissions = (filters?: {
       filters?.project_id,
       filters?.contractor_id,
     ],
-    queryFn: () => S.fetchCommissions(filters),
+    queryFn: () => S.fetchCommissions(orgId!, filters),
+    enabled: !!orgId,
     staleTime: 15000,
   });
+};
 
-export const useCommissionByPerson = () =>
-  useQuery({
-    queryKey: ['commission-by-person'],
-    queryFn: S.fetchCommissionByPerson,
+export const useCommissionByPerson = () => {
+  const orgId = useOrgId();
+  return useQuery({
+    queryKey: ['commission-by-person', orgId],
+    queryFn: () => S.fetchCommissionByPerson(orgId!),
+    enabled: !!orgId,
     staleTime: 30000,
   });
+};
 
-export const useCommissionByProject = () =>
-  useQuery({
-    queryKey: ['commission-by-project'],
-    queryFn: S.fetchCommissionByProject,
+export const useCommissionByProject = () => {
+  const orgId = useOrgId();
+  return useQuery({
+    queryKey: ['commission-by-project', orgId],
+    queryFn: () => S.fetchCommissionByProject(orgId!),
+    enabled: !!orgId,
     staleTime: 30000,
   });
+};
 
-export const useCommissionByType = () =>
-  useQuery({
-    queryKey: ['commission-by-type'],
-    queryFn: S.fetchCommissionByType,
+export const useCommissionByType = () => {
+  const orgId = useOrgId();
+  return useQuery({
+    queryKey: ['commission-by-type', orgId],
+    queryFn: () => S.fetchCommissionByType(orgId!),
+    enabled: !!orgId,
     staleTime: 30000,
   });
+};
 
-export const useCommissionStatusSummary = () =>
-  useQuery({
-    queryKey: ['commission-status-summary'],
-    queryFn: S.fetchCommissionStatusSummary,
+export const useCommissionStatusSummary = () => {
+  const orgId = useOrgId();
+  return useQuery({
+    queryKey: ['commission-status-summary', orgId],
+    queryFn: () => S.fetchCommissionStatusSummary(orgId!),
+    enabled: !!orgId,
     staleTime: 30000,
   });
+};
 
 // ─── Mutations ───────────────────────────────────────────────────────────────
 
@@ -85,8 +107,9 @@ export const useCreateCommission = () => {
 
 export const useUpdateCommission = () => {
   const qc = useQueryClient();
+  const orgId = useOrgId();
   return useMutation({
-    mutationFn: ({ id, updates }: { id: string; updates: any }) => S.updateCommission(id, updates),
+    mutationFn: ({ id, updates }: { id: string; updates: any }) => S.updateCommission(orgId!, id, updates),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['commissions'] });
       qc.invalidateQueries({ queryKey: ['commission-stats'] });

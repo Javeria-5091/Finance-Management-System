@@ -52,6 +52,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           user_id: authUser.id,
           full_name: "",
           role: "User",
+          organization_id: null,
           created_at: "",
           email: authUser.email || "",
           can_create_project: false, can_edit_project: false, can_delete_project: false,
@@ -65,6 +66,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           user_id: data.user_id || authUser.id,
           full_name: data.full_name || "",
           role: data.role || "User",
+          organization_id: data.organization_id || null,
           created_at: data.created_at || "",
           email: data.email || authUser.email || "",
           can_create_project: Boolean(data.can_create_project),
@@ -89,6 +91,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           user_id: authUser.id,
           full_name: "",
           role: "Viewer",
+          organization_id: null,
           created_at: "",
           email: authUser.email || "",
           can_create_project: false, can_edit_project: false, can_delete_project: false,
@@ -148,12 +151,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [fetchProfile, sessionChecked]);
 
   const role = profile?.role || 'User';
-  // Security: client-side role strings are never an authorization bypass.
-  // Server-side permission checks remain authoritative for protected actions.
-  const isAdmin = false;
+  const isAdmin = role === 'Admin' || role === 'CEO';
 
   const hasPermission = (permission: keyof UserProfile): boolean => {
     if (!profile) return false;
+    if (isAdmin) return true;
     return Boolean(profile[permission]);
   };
 

@@ -1,8 +1,11 @@
 'use client';
 import { useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@/context/AuthContext';
+import { supabase } from '@/lib/supabase';
+import * as bankService from '@/services/bank.service';
 import { usePermissions } from "@/context/PermissionContext";
-import { useFinancialAccounts, useReconciliationSummary, useAssetAccounts, useCreateAccount } from '@/hooks/useBanking';
+import { useFinancialAccounts, useReconciliationSummary, useAssetAccounts } from '@/hooks/useBanking';
 import AccountCard from '@/components/banking/AccountCard';
 import ReasonModal from '@/components/finance/ReasonModal';
 import { Plus, Building2, Loader2, X, Pencil, Trash2 } from 'lucide-react';
@@ -55,13 +58,43 @@ const EMPTY_FORM = {
   notes: '',
 };
 
+async function getOrganizationId(): Promise<string> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Authentication required');
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('organization_id')
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  if (error || !data?.organization_id) {
+    throw new Error('Organization context is required');
+  }
+
+  return data.organization_id;
+}
+
 export default function AccountsPage() {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const { hasPermission, isLoading: permLoading } = usePermissions();
   const { data: summaries, isLoading: loadingSummary } = useReconciliationSummary();
   const { data: accounts, isLoading: loadingAccounts } = useFinancialAccounts();
   const { data: assetAccounts } = useAssetAccounts();
-  const createAccount = useCreateAccount();
+  const createAccount = useMutation({
+    mutationFn: async (payload: Parameters<typeof bankService.createFinancialAccount>[0]) => {
+      const organizationId = await getOrganizationId();
+      return bankService.createFinancialAccount({
+        ...payload,
+        organization_id: organizationId,
+      } as Parameters<typeof bankService.createFinancialAccount>[0]);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['financial_accounts'] });
+      queryClient.invalidateQueries({ queryKey: ['reconciliation_summary'] });
+    },
+  });
 
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
@@ -121,6 +154,7 @@ export default function AccountsPage() {
         min_dual_approval_amount: form.min_dual_approval_amount ? parseFloat(form.min_dual_approval_amount) : null,
         is_default: form.is_default,
         notes: form.notes.trim() || null,
+        created_by: user?.id || '',
       },
       {
         onSuccess: () => {

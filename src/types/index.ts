@@ -193,6 +193,7 @@ export interface UserProfile {
   email: string;
   full_name: string;
   role: string;
+  organization_id?: string | null;
   can_create_project: boolean;
   can_edit_project: boolean;  
   can_delete_project: boolean;
