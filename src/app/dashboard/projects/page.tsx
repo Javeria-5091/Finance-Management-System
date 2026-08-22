@@ -2,13 +2,15 @@
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
+import { usePermissions } from "@/context/PermissionContext";
 import { Project, ProjectFormData, Budget, Expense } from "@/types";
 import ProjectForm from "@/components/sections/ProjectForm";
 import { Plus, Pencil, Trash2, AlertTriangle } from "lucide-react";
 import { logAction } from "@/lib/logAction";
 
 export default function ProjectsPage() {
-  const { user, hasPermission, isAdmin } = useAuth();
+  const { user, hasPermission: legacyPermission } = useAuth();
+  const { hasPermission } = usePermissions();
   const [projects, setProjects] = useState<Project[]>([]);
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -19,7 +21,7 @@ export default function ProjectsPage() {
   const [editingData, setEditingData] = useState<Project | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  const canModify = hasPermission("can_create_project") || isAdmin;
+  const canModify = hasPermission("PROJECT_CREATE") || legacyPermission("can_create_project");
 
   const fetchProjects = useCallback(async () => {
     if (!user) return;

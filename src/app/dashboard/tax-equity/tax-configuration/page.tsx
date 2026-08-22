@@ -209,7 +209,6 @@ export default function TaxConfigurationPage() {
           jurisdiction: ruleForm.jurisdiction,
           status: 'DRAFT',
           version: 1,
-          created_by: user?.id || '',
         });
 
         if (error) throw new Error(error.message);

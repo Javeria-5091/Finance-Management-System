@@ -192,6 +192,7 @@ export async function POST(req: NextRequest) {
         .select('id, code, name')
         .eq('account_type', 'OPERATING_EXPENSE')
         .eq('is_active', true)
+        .eq('organization_id', auth.orgId)
         .ilike('name', escapedCategory) // exact match, case-insensitive, no wildcards
         .order('code', { ascending: true })).data ?? [];
 
@@ -206,6 +207,7 @@ export async function POST(req: NextRequest) {
           .select('id, code, name')
           .eq('account_type', 'OPERATING_EXPENSE')
           .eq('is_active', true)
+          .eq('organization_id', auth.orgId)
           .ilike('name', `%${escapedCategory}%`)
           .order('code', { ascending: true })).data ?? [];
 
@@ -226,6 +228,7 @@ export async function POST(req: NextRequest) {
         .select('id, code, name')
         .eq('account_type', 'OPERATING_EXPENSE')
         .eq('is_active', true)
+        .eq('organization_id', orgId)
         .order('code', { ascending: true })
         .limit(1)
         .maybeSingle());
@@ -241,6 +244,7 @@ export async function POST(req: NextRequest) {
       .select('id, code, name')
       .eq('account_type', 'LIABILITY')
       .eq('is_active', true)
+      .eq('organization_id', auth.orgId)
       .like('code', '21%')
       .limit(1)
       .single());
@@ -252,6 +256,7 @@ export async function POST(req: NextRequest) {
         .select('id, code, name')
         .eq('account_type', 'LIABILITY')
         .eq('is_active', true)
+        .eq('organization_id', auth.orgId)
         .limit(1)
         .single());
     }
@@ -296,7 +301,6 @@ export async function POST(req: NextRequest) {
       p_source_type: 'EXPENSE',
       p_source_id: expenseId,
       p_project_id: expense.project_id || null,
-      p_department_id: expense.department || null,
     });
  
     if (postErr || !journalId) {
@@ -314,19 +318,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
     }
     const reference = journal.reference || `JE-EX-${journalId}`;
- 
-    // 10. Update expense status
-    const { error: statusErr } = await supabase.from("expenses").update({
-      status: 'POSTED',
-      posted_at: new Date().toISOString(),
-      journal_entry_id: journalId,
-      posted_by: auth.userId,
-    }).eq("id", expenseId);
- 
-    if (statusErr) {
-      console.error('Expense status update failed after GL post:', statusErr.message);
-      // GL entry exists but expense status not updated — manual reconciliation needed
-    }
  
     // FIX: Use RPC for correct audit columns
     try {

@@ -9,7 +9,7 @@
 import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
-import { getAuthSupabase, isSqlSafe } from '@/lib/api-auth';
+import { getAuthSupabase, isSqlSafe, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
@@ -29,6 +29,8 @@ const FiscalCloseRequestSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const permissionCheck = await requirePermission('REPORT_READ');
+  if (permissionCheck instanceof Response) return permissionCheck;
   const requestId = generateRequestId();
   const requestMetadata = extractRequestMetadata(req);
   const startTime = Date.now();
@@ -44,6 +46,8 @@ export async function POST(req: Request) {
     const orgId = profile?.organization_id;
     const userRole = profile?.role || 'EMPLOYEE';
     if (!orgId) return NextResponse.json({ error: 'Organization context missing.' }, { status: 400 });
+    const aiLimitCheck = await enforceAiRequestLimits(supabase, user.id, orgId);
+    if (aiLimitCheck) return aiLimitCheck;
 
     // 2. Parse request
     const body = await req.json();
@@ -80,43 +84,37 @@ export async function POST(req: Request) {
     if (!reconSafety.safe) {
       return NextResponse.json({ error: 'Query safety check failed', reason: reconSafety.reason }, { status: 500 });
     }
-    const { data: reconStatus } = await supabase.rpc('execute_ai_readonly_query', {
-      query_string: reconQuery,
-    });
+    const { data: reconStatus } = await supabase.rpc('execute_ai_readonly_query', { query_string: reconQuery, p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false });
 
     // Check open periods
     const periodsQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
-        SELECT period_number, name, start_date, end_date, status
-        FROM finance.accounting_periods
+        SELECT DISTINCT period_id, period_number, period_name, start_date, end_date, period_status
+        FROM reporting.ai_fiscal_close_context
         WHERE fiscal_year_id = '${fiscal_year_id}'
         AND organization_id = '${orgId}'
-        AND status != 'HARD_CLOSED'
+        AND period_status != 'HARD_CLOSED'
         ORDER BY period_number
       ) t`;
     const periodsSafety = await isSqlSafe(periodsQuery);
     if (!periodsSafety.safe) {
       return NextResponse.json({ error: 'Query safety check failed', reason: periodsSafety.reason }, { status: 500 });
     }
-    const { data: openPeriods } = await supabase.rpc('execute_ai_readonly_query', {
-      query_string: periodsQuery,
-    });
+    const { data: openPeriods } = await supabase.rpc('execute_ai_readonly_query', { query_string: periodsQuery, p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false });
 
     // Check pending journal entries
     const journalsQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
-        SELECT reference, description, transaction_date, status, source_type
-        FROM finance.journal_entries
+        SELECT journal_entry_id, reference, description, transaction_date, journal_status AS status, source_type
+        FROM reporting.ai_fiscal_close_context
         WHERE fiscal_year_id = '${fiscal_year_id}'
         AND organization_id = '${orgId}'
-        AND status = 'DRAFT'
+        AND journal_status = 'DRAFT'
         LIMIT 50
       ) t`;
     const journalsSafety = await isSqlSafe(journalsQuery);
     if (!journalsSafety.safe) {
       return NextResponse.json({ error: 'Query safety check failed', reason: journalsSafety.reason }, { status: 500 });
     }
-    const { data: pendingJournals } = await supabase.rpc('execute_ai_readonly_query', {
-      query_string: journalsQuery,
-    });
+    const { data: pendingJournals } = await supabase.rpc('execute_ai_readonly_query', { query_string: journalsQuery, p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false });
 
     contextData = `
 FISCAL YEAR: ${fiscalYear.name} (${fiscalYear.start_date} to ${fiscalYear.end_date})

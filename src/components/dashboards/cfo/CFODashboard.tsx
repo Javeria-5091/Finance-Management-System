@@ -105,10 +105,16 @@ export function CFODashboard() {
   const { isDark } = useTheme();
 
   // Reconciliation data (direct query for real-time status)
+  // FIX: financial_accounts, journal_entries, vendor_bills, and
+  // accounting_periods all live in the `finance` schema (not `public`) —
+  // these calls now go through `.schema('finance')` so they actually find
+  // the tables instead of erroring/returning nothing. `invoices` genuinely
+  // is in `public`, so it is left unqualified.
   const { data: financialAccounts, isLoading: faLoading } = useQuery({
     queryKey: ['cfo-financial-accounts'],
     queryFn: async () => {
       const { data, error } = await supabase
+        .schema('finance')
         .from('financial_accounts')
         .select('id, account_name, institution_type, currency, masked_identifier, opening_balance, is_active')
         .eq('is_active', true)
@@ -126,6 +132,7 @@ export function CFODashboard() {
     queryKey: ['cfo-pending-journals'],
     queryFn: async () => {
       const { count } = await supabase
+        .schema('finance')
         .from('journal_entries')
         .select('id', { count: 'exact', head: true })
         .in('status', ['DRAFT', 'SUBMITTED', 'VERIFIED']);
@@ -140,7 +147,7 @@ export function CFODashboard() {
     queryFn: async () => {
       const [invRes, billRes] = await Promise.all([
         supabase.from('invoices').select('id, invoice_number, total_amount, client_name, due_date, status').in('status', ['SUBMITTED', 'VERIFIED']).order('due_date'),
-        supabase.from('vendor_bills').select('id, bill_number, total_amount, vendor_name, due_date, status').in('status', ['SUBMITTED', 'VERIFIED']).order('due_date'),
+        supabase.schema('finance').from('vendor_bills').select('id, bill_number, total_amount, vendor_name, due_date, status').in('status', ['SUBMITTED', 'VERIFIED']).order('due_date'),
       ]);
       return [
         ...(invRes.data || []).map((i: any) => ({ ...i, source_type: 'INVOICE' })),
@@ -162,6 +169,7 @@ export function CFODashboard() {
     queryKey: ['cfo-periods'],
     queryFn: async () => {
       const { data, error } = await supabase
+        .schema('finance')
         .from('accounting_periods')
         .select('id, name, start_date, end_date, status')
         .order('start_date');

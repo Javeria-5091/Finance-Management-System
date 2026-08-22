@@ -1,64 +1,74 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
-import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/context/PermissionContext";
+import { supabase } from "@/lib/supabase";
+import * as bankService from "@/services/bank.service";
+import type { FinancialAccount } from "@/services/bank.service";
 import { Plus, Pencil, Landmark, Trash2, X, Loader2, Search, Wallet, CreditCard, Globe, CheckCircle2 } from "lucide-react";
 import toast from "react-hot-toast";
 import ReasonModal from "@/components/finance/ReasonModal";
 
-interface FinancialAccount {
-  id: string;
-  account_name: string;
-  account_type: string;
-  currency: string;
-  bank_name: string | null;
-  account_number: string | null;
-  routing_number: string | null;
-  platform_name: string | null;
-  ledger_account_id: string | null;
-  current_balance: number | null;
-  pkr_equivalent: number | null;
-  is_active: boolean;
-  last_reconciled: string | null;
-  notes: string | null;
-  created_at: string;
-}
+// FIX (bug: "table not found" on this page):
+// This page used to query `public.financial_accounts` directly with a field
+// model (bank_name, account_number, routing_number, platform_name,
+// ledger_account_id, current_balance, pkr_equivalent, last_reconciled) that
+// does not match the real, canonical `finance.financial_accounts` table
+// (institution_name, institution_type, masked_identifier, opening_balance,
+// linked_ledger_account_id, reconciliation_method, ...). That real table --
+// with the correct columns and full CRUD RLS policies -- is already wired
+// up correctly in src/services/bank.service.ts (used by the working Banking
+// module), so this page now goes through that service instead of querying
+// the table directly, and its form fields match the real columns.
+
+const ACCOUNT_TYPES = [
+  { value: "CURRENT", label: "Current Account" },
+  { value: "SAVINGS", label: "Savings Account" },
+  { value: "DIGITAL_WALLET", label: "Digital Wallet" },
+  { value: "PLATFORM_BALANCE", label: "Platform Balance" },
+  { value: "PETTY_CASH", label: "Petty Cash" },
+  { value: "CLEARING", label: "Clearing Account" },
+];
+
+const INSTITUTION_TYPES = [
+  { value: "BANK", label: "Bank", icon: Landmark },
+  { value: "CASH", label: "Cash", icon: Wallet },
+  { value: "WALLET", label: "Wallet", icon: CreditCard },
+  { value: "PLATFORM", label: "Platform", icon: Globe },
+  { value: "PAYMENT_GATEWAY", label: "Payment Gateway", icon: CreditCard },
+  { value: "CARD", label: "Card", icon: CreditCard },
+  { value: "CLEARING", label: "Clearing", icon: CheckCircle2 },
+];
+
+const CURRENCIES = ["PKR", "USD", "EUR", "GBP", "AUD", "CAD", "AED"];
 
 interface AccountForm {
   account_name: string;
+  institution_name: string;
+  institution_type: string;
   account_type: string;
   currency: string;
-  bank_name: string;
-  account_number: string;
-  routing_number: string;
-  platform_name: string;
-  ledger_account_id: string;
+  masked_identifier: string;
+  opening_balance: string;
+  opening_date: string;
+  linked_ledger_account_id: string;
+  reconciliation_method: string;
   notes: string;
 }
 
 const emptyForm: AccountForm = {
   account_name: "",
-  account_type: "bank",
+  institution_name: "",
+  institution_type: "BANK",
+  account_type: "CURRENT",
   currency: "PKR",
-  bank_name: "",
-  account_number: "",
-  routing_number: "",
-  platform_name: "",
-  ledger_account_id: "",
+  masked_identifier: "",
+  opening_balance: "0",
+  opening_date: "",
+  linked_ledger_account_id: "",
+  reconciliation_method: "MANUAL",
   notes: "",
 };
-
-const ACCOUNT_TYPES = [
-  { value: "bank", label: "Bank Account", icon: Landmark },
-  { value: "cash", label: "Cash", icon: Wallet },
-  { value: "wallet", label: "Digital Wallet", icon: CreditCard },
-  { value: "platform", label: "Platform Balance", icon: Globe },
-  { value: "gateway", label: "Payment Gateway", icon: CreditCard },
-  { value: "clearing", label: "Clearing Account", icon: CheckCircle2 },
-];
-
-const CURRENCIES = ["PKR", "USD", "EUR", "GBP", "AUD", "CAD", "AED"];
 
 export default function FinancialAccountsPage() {
   const { user } = useAuth();
@@ -68,6 +78,8 @@ export default function FinancialAccountsPage() {
   const canDelete = hasPermission("SETTINGS_MANAGE");
 
   const [accounts, setAccounts] = useState<FinancialAccount[]>([]);
+  const [ledgerAccounts, setLedgerAccounts] = useState<{ id: string; code: string; name: string }[]>([]);
+  const [orgId, setOrgId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("");
@@ -80,12 +92,16 @@ export default function FinancialAccountsPage() {
 
   const fetchAccounts = useCallback(async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("financial_accounts")
-      .select("*")
-      .order("account_name", { ascending: true });
-    if (!error && data) setAccounts(data as FinancialAccount[]);
+    const [{ data, error }, { data: coa }, { data: ctx }] = await Promise.all([
+      bankService.getFinancialAccounts(),
+      bankService.getAssetAccounts(),
+      supabase.rpc("get_my_org_context"),
+    ]);
+    if (!error && data) setAccounts(data);
     else if (error) toast.error("Failed to load: " + error.message);
+    if (coa) setLedgerAccounts(coa as any);
+    const myOrgId = Array.isArray(ctx) ? ctx[0]?.organization_id : (ctx as any)?.organization_id;
+    setOrgId(myOrgId || null);
     setLoading(false);
   }, []);
 
@@ -95,27 +111,46 @@ export default function FinancialAccountsPage() {
     const q = search.toLowerCase();
     const matchesSearch =
       a.account_name.toLowerCase().includes(q) ||
-      (a.bank_name || "").toLowerCase().includes(q) ||
-      (a.account_number || "").toLowerCase().includes(q);
-    const matchesType = !filterType || a.account_type === filterType;
+      (a.institution_name || "").toLowerCase().includes(q) ||
+      (a.masked_identifier || "").toLowerCase().includes(q);
+    const matchesType = !filterType || a.institution_type === filterType;
     return matchesSearch && matchesType;
   });
 
   const handleSave = async () => {
     if (!form.account_name.trim()) { toast.error("Account name is required"); return; }
+    if (!form.institution_name.trim()) { toast.error("Institution / platform name is required"); return; }
+    if (!form.linked_ledger_account_id) { toast.error("Please select a linked ledger (GL) account"); return; }
     setSaving(true);
-    const payload: Record<string, any> = {
-      ...form,
+
+    const payload: any = {
       account_name: form.account_name.trim(),
-      updated_by: user?.id,
+      institution_name: form.institution_name.trim(),
+      institution_type: form.institution_type,
+      account_type: form.account_type,
+      currency: form.currency,
+      masked_identifier: form.masked_identifier || null,
+      opening_balance: Number(form.opening_balance) || 0,
+      opening_date: form.opening_date || null,
+      linked_ledger_account_id: form.linked_ledger_account_id,
+      reconciliation_method: form.reconciliation_method,
+      notes: form.notes || null,
     };
+
     if (editing) {
-      const { error } = await supabase.from("financial_accounts").update(payload).eq("id", editing.id);
+      const { error } = await bankService.updateFinancialAccount(editing.id, payload);
       if (error) toast.error("Update failed: " + error.message); else toast.success("Account updated");
     } else {
-      payload.created_by = user?.id;
-      payload.current_balance = 0;
-      const { error } = await supabase.from("financial_accounts").insert(payload);
+      if (!orgId) {
+        toast.error("Could not determine your organization — please reload and try again.");
+        setSaving(false);
+        return;
+      }
+      const { error } = await bankService.createFinancialAccount({
+        ...payload,
+        organization_id: orgId,
+        created_by: user?.id!,
+      } as any);
       if (error) toast.error("Create failed: " + error.message); else toast.success("Account created");
     }
     setSaving(false);
@@ -127,10 +162,10 @@ export default function FinancialAccountsPage() {
 
   const handleDeleteConfirm = async (reason: string) => {
     if (!deleteTarget || !reason.trim()) return;
-    const { error } = await supabase
-      .from("financial_accounts")
-      .update({ is_active: false, notes: `[DEACTIVATED] ${reason}`, updated_by: user?.id })
-      .eq("id", deleteTarget.id);
+    const { error } = await bankService.updateFinancialAccount(deleteTarget.id, {
+      is_active: false,
+      notes: `[DEACTIVATED] ${reason}`,
+    } as any);
     if (error) toast.error("Deactivation failed: " + error.message);
     else toast.success("Account deactivated");
     setShowDeleteModal(false);
@@ -142,31 +177,33 @@ export default function FinancialAccountsPage() {
     setEditing(acc);
     setForm({
       account_name: acc.account_name,
+      institution_name: acc.institution_name,
+      institution_type: acc.institution_type,
       account_type: acc.account_type,
       currency: acc.currency || "PKR",
-      bank_name: acc.bank_name || "",
-      account_number: acc.account_number || "",
-      routing_number: acc.routing_number || "",
-      platform_name: acc.platform_name || "",
-      ledger_account_id: acc.ledger_account_id || "",
+      masked_identifier: acc.masked_identifier || "",
+      opening_balance: String(acc.opening_balance ?? 0),
+      opening_date: acc.opening_date || "",
+      linked_ledger_account_id: acc.linked_ledger_account_id || "",
+      reconciliation_method: acc.reconciliation_method || "MANUAL",
       notes: acc.notes || "",
     });
     setShowForm(true);
   };
 
   const formatPKR = (amount: number | null) => {
-    if (amount === null) return "—";
+    if (amount === null || amount === undefined) return "\u2014";
     return new Intl.NumberFormat("en-PK", { style: "currency", currency: "PKR", minimumFractionDigits: 0 }).format(amount);
   };
 
   const getTypeConfig = (type: string) =>
-    ACCOUNT_TYPES.find((t) => t.value === type) || ACCOUNT_TYPES[0];
+    INSTITUTION_TYPES.find((t) => t.value === type) || INSTITUTION_TYPES[0];
 
   const inputCls =
     "w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors";
   const labelCls = "block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1";
 
-  const totalPKR = accounts.filter((a) => a.is_active).reduce((s, a) => s + (a.pkr_equivalent || 0), 0);
+  const totalPKR = accounts.filter((a) => a.is_active && a.currency === "PKR").reduce((s, a) => s + (a.opening_balance || 0), 0);
   const activeCount = accounts.filter((a) => a.is_active).length;
 
   return (
@@ -178,7 +215,7 @@ export default function FinancialAccountsPage() {
           <div>
             <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Financial Accounts</h2>
             <p className="text-gray-500 dark:text-gray-400 text-sm">
-              Banks, wallets, platforms, clearing accounts — original currency + PKR
+              Banks, wallets, platforms, clearing accounts -- original currency + PKR
             </p>
           </div>
         </div>
@@ -199,7 +236,7 @@ export default function FinancialAccountsPage() {
           <p className="text-xl font-bold text-gray-900 dark:text-white mt-1">{activeCount}</p>
         </div>
         <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4 shadow-sm">
-          <p className="text-xs text-gray-500 dark:text-gray-400">Total PKR Equivalent</p>
+          <p className="text-xs text-gray-500 dark:text-gray-400">Total PKR Opening Balance</p>
           <p className="text-xl font-bold text-green-600 dark:text-green-400 mt-1">{formatPKR(totalPKR)}</p>
         </div>
         <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4 shadow-sm">
@@ -228,7 +265,7 @@ export default function FinancialAccountsPage() {
           className="px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
           <option value="">All Types</option>
-          {ACCOUNT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+          {INSTITUTION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
         </select>
       </div>
 
@@ -240,41 +277,38 @@ export default function FinancialAccountsPage() {
               <tr>
                 <th className="px-4 py-3 font-semibold">Account</th>
                 <th className="px-4 py-3 font-semibold hidden md:table-cell">Type</th>
-                <th className="px-4 py-3 font-semibold hidden lg:table-cell">Bank / Platform</th>
-                <th className="px-4 py-3 font-semibold text-right">Balance (Original)</th>
-                <th className="px-4 py-3 font-semibold text-right">PKR Equivalent</th>
-                <th className="px-4 py-3 font-semibold text-center">Reconciled</th>
+                <th className="px-4 py-3 font-semibold hidden lg:table-cell">Institution</th>
+                <th className="px-4 py-3 font-semibold text-right">Opening Balance</th>
+                <th className="px-4 py-3 font-semibold text-center">Default</th>
                 {canEdit && <th className="px-4 py-3 font-semibold text-center">Actions</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
               {loading ? (
-                <tr><td colSpan={7} className="px-4 py-12 text-center"><Loader2 className="w-6 h-6 animate-spin mx-auto text-blue-500" /></td></tr>
+                <tr><td colSpan={6} className="px-4 py-12 text-center"><Loader2 className="w-6 h-6 animate-spin mx-auto text-blue-500" /></td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-12 text-center text-gray-400">No financial accounts found.</td></tr>
+                <tr><td colSpan={6} className="px-4 py-12 text-center text-gray-400">No financial accounts found.</td></tr>
               ) : (
                 filtered.map((a) => {
-                  const typeCfg = getTypeConfig(a.account_type);
-                  const Icon = typeCfg.icon;
+                  const typeCfg = getTypeConfig(a.institution_type);
                   return (
                     <tr key={a.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
                       <td className="px-4 py-3">
                         <div className="font-medium text-gray-900 dark:text-white">{a.account_name}</div>
-                        <div className="text-xs text-gray-500">{a.account_number || "—"} · {a.currency}</div>
+                        <div className="text-xs text-gray-500">{a.masked_identifier || "\u2014"} \u00b7 {a.currency}</div>
                       </td>
                       <td className="px-4 py-3 hidden md:table-cell">
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold uppercase rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400">
                           {typeCfg.label}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-gray-600 dark:text-gray-400 hidden lg:table-cell">{a.bank_name || a.platform_name || "—"}</td>
-                      <td className="px-4 py-3 text-right font-medium text-gray-900 dark:text-white">{formatPKR(a.current_balance)}</td>
-                      <td className="px-4 py-3 text-right font-semibold text-green-600 dark:text-green-400">{formatPKR(a.pkr_equivalent)}</td>
+                      <td className="px-4 py-3 text-gray-600 dark:text-gray-400 hidden lg:table-cell">{a.institution_name || "\u2014"}</td>
+                      <td className="px-4 py-3 text-right font-medium text-gray-900 dark:text-white">{formatPKR(a.opening_balance)}</td>
                       <td className="px-4 py-3 text-center">
-                        {a.last_reconciled ? (
-                          <span className="text-green-600 dark:text-green-400" title={a.last_reconciled}><CheckCircle2 size={16} /></span>
+                        {a.is_default ? (
+                          <span className="text-green-600 dark:text-green-400" title="Default account"><CheckCircle2 size={16} /></span>
                         ) : (
-                          <span className="text-gray-300 dark:text-gray-600" title="Not reconciled"><CheckCircle2 size={16} /></span>
+                          <span className="text-gray-300 dark:text-gray-600"><CheckCircle2 size={16} /></span>
                         )}
                       </td>
                       {canEdit && (
@@ -307,18 +341,33 @@ export default function FinancialAccountsPage() {
             <div className="p-5 space-y-4">
               <div><label className={labelCls}>Account Name *</label><input className={inputCls} value={form.account_name} onChange={(e) => setForm({ ...form, account_name: e.target.value })} placeholder="e.g. HBL Business Account" /></div>
               <div className="grid grid-cols-2 gap-4">
+                <div><label className={labelCls}>Institution Type</label><select className={inputCls} value={form.institution_type} onChange={(e) => setForm({ ...form, institution_type: e.target.value })}>{INSTITUTION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
                 <div><label className={labelCls}>Account Type</label><select className={inputCls} value={form.account_type} onChange={(e) => setForm({ ...form, account_type: e.target.value })}>{ACCOUNT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</select></div>
-                <div><label className={labelCls}>Currency</label><select className={inputCls} value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })}>{CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
               </div>
-              {(form.account_type === "bank" || form.account_type === "gateway") && (
-                <div className="grid grid-cols-2 gap-4">
-                  <div><label className={labelCls}>Bank Name</label><input className={inputCls} value={form.bank_name} onChange={(e) => setForm({ ...form, bank_name: e.target.value })} placeholder="Habib Bank" /></div>
-                  <div><label className={labelCls}>Account Number</label><input className={inputCls} value={form.account_number} onChange={(e) => setForm({ ...form, account_number: e.target.value })} placeholder="0022-XXXXXXX-XXX" /></div>
-                </div>
-              )}
-              {(form.account_type === "platform" || form.account_type === "wallet" || form.account_type === "gateway") && (
-                <div><label className={labelCls}>Platform Name</label><input className={inputCls} value={form.platform_name} onChange={(e) => setForm({ ...form, platform_name: e.target.value })} placeholder="e.g. Payoneer, Wise, Stripe" /></div>
-              )}
+              <div><label className={labelCls}>Institution / Platform Name *</label><input className={inputCls} value={form.institution_name} onChange={(e) => setForm({ ...form, institution_name: e.target.value })} placeholder="e.g. Habib Bank, Payoneer, Wise" /></div>
+              <div className="grid grid-cols-2 gap-4">
+                <div><label className={labelCls}>Currency</label><select className={inputCls} value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })}>{CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
+                <div><label className={labelCls}>Masked Identifier</label><input className={inputCls} value={form.masked_identifier} onChange={(e) => setForm({ ...form, masked_identifier: e.target.value })} placeholder="****5678" /></div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div><label className={labelCls}>Opening Balance</label><input type="number" className={inputCls} value={form.opening_balance} onChange={(e) => setForm({ ...form, opening_balance: e.target.value })} /></div>
+                <div><label className={labelCls}>Opening Date</label><input type="date" className={inputCls} value={form.opening_date} onChange={(e) => setForm({ ...form, opening_date: e.target.value })} /></div>
+              </div>
+              <div>
+                <label className={labelCls}>Linked Ledger (GL) Account *</label>
+                <select className={inputCls} value={form.linked_ledger_account_id} onChange={(e) => setForm({ ...form, linked_ledger_account_id: e.target.value })}>
+                  <option value="">Select ledger account...</option>
+                  {ledgerAccounts.map((l) => <option key={l.id} value={l.id}>{l.code} \u2014 {l.name}</option>)}
+                </select>
+                <p className="text-[11px] text-gray-400 mt-1">Every financial account must map to a Chart of Accounts asset account so it posts correctly to the general ledger.</p>
+              </div>
+              <div><label className={labelCls}>Reconciliation Method</label>
+                <select className={inputCls} value={form.reconciliation_method} onChange={(e) => setForm({ ...form, reconciliation_method: e.target.value })}>
+                  <option value="MANUAL">Manual</option>
+                  <option value="AUTO">Automatic</option>
+                  <option value="IMPORT">Statement Import</option>
+                </select>
+              </div>
               <div><label className={labelCls}>Notes</label><textarea className={inputCls} rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Internal notes..." /></div>
             </div>
             <div className="flex justify-end gap-3 p-5 border-t border-gray-200 dark:border-gray-700">
@@ -331,7 +380,7 @@ export default function FinancialAccountsPage() {
         </div>
       )}
 
-      {/* DELETE MODAL — uses ReasonModal's actual props: open, title, description, onConfirm(reason), onCancel */}
+      {/* DELETE MODAL -- uses ReasonModal's actual props: open, title, description, onConfirm(reason), onCancel */}
       <ReasonModal
         open={showDeleteModal}
         title="Deactivate Account"

@@ -89,17 +89,16 @@ export async function getAuthUser(): Promise<AuthResult | NextResponse> {
     if (active) role = active.role || active.role_name || role;
   } catch {}
 
-  // Method 2: Profile fallback
-  // NOTE: 'profiles' is confirmed to live in the PUBLIC schema — keep unqualified.
-  if (role === 'VIEWER') {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('role, organization_id')
-      .eq('user_id', session.user.id)
-      .maybeSingle();
-    if (profile?.role) role = profile.role;
-    orgId = profile?.organization_id || null;
-  }
+  // Always fetch the profile for organization context. Role resolution may have
+  // succeeded through the role RPC, but organization_id still comes from the
+  // user's tenant profile and must never be left null for privileged roles.
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('role, organization_id')
+    .eq('user_id', session.user.id)
+    .maybeSingle();
+  if (profile?.role && role === 'VIEWER') role = profile.role;
+  orgId = profile?.organization_id || null;
 
   return { userId: session.user.id, email: session.user.email ?? null, role, orgId };
 }
@@ -617,4 +616,14 @@ export async function recordAiUsage(
   } catch (err: any) {
     console.error('recordAiUsage unexpected error:', err.message);
   }
+}
+
+// AI gateway hard limit helper. Every AI route should call this before invoking
+// a model; it fails closed when usage exceeds either user or organization caps.
+export async function enforceAiRequestLimits(supabase: any, userId: string, orgId: string, userRequests = 100, userCost = 1.5, orgRequests = 2000, orgCost = 30) {
+  const userLimit = await checkAiDailyLimit(supabase, userId, orgId, userRequests, userCost);
+  if (!userLimit.allowed) return NextResponse.json({ error: userLimit.reason || 'Daily AI user limit exceeded' }, { status: 429 });
+  const orgLimit = await checkOrgAiDailyLimit(supabase, orgId, orgRequests, orgCost);
+  if (!orgLimit.allowed) return NextResponse.json({ error: orgLimit.reason || 'Daily AI organization limit exceeded' }, { status: 429 });
+  return null;
 }

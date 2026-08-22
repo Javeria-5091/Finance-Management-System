@@ -26,8 +26,8 @@ export interface ReportHeaderProps {
 }
 
 export default function ReportHeader({
-  organization = "OSYSTIC",
-  basis = "Accrual Basis",
+  organization,
+  basis,
   period,
   currency = "PKR",
   dataAsOf,
@@ -57,14 +57,14 @@ export default function ReportHeader({
       {/* Spec 13.3 Metadata Bar */}
       <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl px-5 py-3">
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
-          <div className="flex items-center gap-1.5 text-gray-600 dark:text-gray-400">
+          {organization && <div className="flex items-center gap-1.5 text-gray-600 dark:text-gray-400">
             <Building2 className="w-3.5 h-3.5" />
             <span className="font-medium text-gray-900 dark:text-white">{organization}</span>
-          </div>
-          <div className="flex items-center gap-1.5 text-gray-600 dark:text-gray-400">
+          </div>}
+          {basis && <div className="flex items-center gap-1.5 text-gray-600 dark:text-gray-400">
             <ShieldCheck className="w-3.5 h-3.5" />
             <span>{basis}</span>
-          </div>
+          </div>}
           {period && (
             <div className="flex items-center gap-1.5 text-gray-600 dark:text-gray-400">
               <CalendarDays className="w-3.5 h-3.5" />

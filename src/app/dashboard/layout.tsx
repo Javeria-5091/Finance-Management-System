@@ -2,6 +2,7 @@
 import { useState, ReactNode } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
+import { usePermissions } from "@/context/PermissionContext";
 import { useTheme } from "@/context/ThemeContext"; // IMPORT KIYA
 import Sidebar from "@/components/sections/Sidebar";
 import TopNavbar from "@/components/sections/TopNavbar";
@@ -15,7 +16,8 @@ const ADMIN_ONLY_ROUTES = [
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { user, isAdmin, loading: authLoading } = useAuth();
+  const { user, loading: authLoading } = useAuth();
+  const { hasPermission, isLoading: permissionsLoading } = usePermissions();
   const { isDark, toggleTheme } = useTheme(); // THEME HOOK
   const router = useRouter();
   const pathname = usePathname();
@@ -28,7 +30,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   // The middleware (src/middleware.ts) is the single source of truth for auth.
 
   // Wait for auth + profile to fully load before checking access
-  if (authLoading || !user) return (
+  if (authLoading || permissionsLoading || !user) return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
       <div className="animate-spin w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full"></div>
     </div>
@@ -36,7 +38,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
   const isAdminRoute = ADMIN_ONLY_ROUTES.some((route) => pathname.startsWith(route));
 
-  if (isAdminRoute && !isAdmin) {
+  if (isAdminRoute && !hasPermission("ADMIN_USERS") && !hasPermission("ADMIN_AUDIT")) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 px-4">
         <div className="max-w-md text-center">

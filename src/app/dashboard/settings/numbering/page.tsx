@@ -8,43 +8,56 @@ import toast from "react-hot-toast";
 
 interface NumberingConfig {
   id: string;
-  document_type: string;
+  sequence_type: string;
   prefix: string;
-  next_number: number;
-  pad_length: number;
+  current_number: number;
+  padding: number;
+  format: string;
+  reset_per_period: boolean;
   updated_at: string;
 }
 
 const DEFAULT_CONFIGS = [
-  { document_type: "INVOICE", prefix: "INV", next_number: 1, pad_length: 5 },
-  { document_type: "EXPENSE", prefix: "EXP", next_number: 1, pad_length: 5 },
-  { document_type: "INCOME", prefix: "INC", next_number: 1, pad_length: 5 },
-  { document_type: "VENDOR_BILL", prefix: "VB", next_number: 1, pad_length: 5 },
-  { document_type: "VENDOR_PAYMENT", prefix: "VP", next_number: 1, pad_length: 5 },
-  { document_type: "PAYMENT_RECEIPT", prefix: "PR", next_number: 1, pad_length: 5 },
-  { document_type: "CREDIT_NOTE", prefix: "CN", next_number: 1, pad_length: 5 },
-  { document_type: "JOURNAL_ENTRY", prefix: "JE", next_number: 1, pad_length: 5 },
-  { document_type: "BUDGET", prefix: "BG", next_number: 1, pad_length: 5 },
+  { sequence_type: "INVOICE", prefix: "INV", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "EXPENSE", prefix: "EXP", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "INCOME", prefix: "INC", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "VENDOR_BILL", prefix: "VB", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "VENDOR_PAYMENT", prefix: "VP", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "PMT-RC", prefix: "PR", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "CN", prefix: "CN", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "JOURNAL_ENTRY", prefix: "JE", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "OBI", prefix: "OBI", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "BANK_TRANSFER", prefix: "BT", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "PRJ", prefix: "PRJ", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
+  { sequence_type: "CLT", prefix: "CLT", current_number: 0, padding: 5, format: "{PREFIX}-{NUMBER}" },
 ];
 
 export default function NumberingPage() {
   const { user } = useAuth();
   const { hasPermission } = usePermissions();
-  const canUpdate = hasPermission("SETTINGS_UPDATE");
+  const canUpdate = hasPermission("SETTINGS_MANAGE");
   const [configs, setConfigs] = useState<NumberingConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   const fetchConfigs = useCallback(async () => {
     if (!user) return;
-    const { data, error } = await supabase.from("numbering_sequences").select("*").order("document_type");
-    if (error) {
-      toast.error("Failed to load: " + error.message);
-      setConfigs(DEFAULT_CONFIGS.map((c, i) => ({ ...c, id: `temp-${i}`, updated_at: "" })));
-    } else {
-      setConfigs(data && data.length > 0 ? data : DEFAULT_CONFIGS.map((c, i) => ({ ...c, id: `temp-${i}`, updated_at: "" })));
+    try {
+      const res = await fetch("/api/admin/numbering-sequences", { cache: "no-store" });
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload?.error || "Failed to load numbering sequences");
+      const data = Array.isArray(payload?.data) ? payload.data : [];
+      setConfigs(data.length ? data : DEFAULT_CONFIGS.map((c, i) => ({
+        ...c, id: `temp-${i}`, reset_per_period: false, updated_at: "",
+      })));
+    } catch (error: any) {
+      toast.error("Failed to load: " + (error?.message || "Unknown error"));
+      setConfigs(DEFAULT_CONFIGS.map((c, i) => ({
+        ...c, id: `temp-${i}`, reset_per_period: false, updated_at: "",
+      })));
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }, [user]);
 
   useEffect(() => { fetchConfigs(); }, [fetchConfigs]);
@@ -54,31 +67,61 @@ export default function NumberingPage() {
   }
 
   function previewNumber(config: NumberingConfig) {
-    const num = String(config.next_number).padStart(config.pad_length, "0");
-    return `${config.prefix}-${num}`;
+    const num = String(config.current_number + 1).padStart(config.padding, "0");
+    return config.format
+      .replaceAll("{PREFIX}", config.prefix)
+      .replaceAll("{NUMBER}", num);
   }
 
   async function handleSave() {
     if (!canUpdate) return;
     setSaving(true);
-    for (const config of configs) {
-      if (config.id.startsWith("temp-")) {
-        const { error } = await supabase.from("numbering_sequences").insert({ document_type: config.document_type, prefix: config.prefix, next_number: config.next_number, pad_length: config.pad_length });
-        if (error) toast.error(`Failed to save ${config.document_type}: ` + error.message);
-      } else {
-        const { error } = await supabase.from("numbering_sequences").update({ prefix: config.prefix, next_number: config.next_number, pad_length: config.pad_length }).eq("id", config.id);
-        if (error) toast.error(`Failed to update ${config.document_type}: ` + error.message);
+    try {
+      for (const config of configs) {
+        const action = config.id.startsWith("temp-") ? "create" : "update";
+        const body = {
+          action,
+          sequence_code: config.sequence_type,
+          prefix: config.prefix,
+          description: `Auto-numbering for ${config.sequence_type}`,
+          current_number: config.current_number,
+          padding: config.padding,
+          reset_period: config.reset_per_period ? "PERIOD" : "YEARLY",
+          format: config.format,
+        };
+        const res = await fetch("/api/admin/numbering-sequences", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const payload = await res.json();
+        if (!res.ok) throw new Error(`${config.sequence_type}: ${payload?.error || "Save failed"}`);
       }
+      toast.success("Numbering sequences saved");
+      await fetchConfigs();
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to save numbering sequences");
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
-    toast.success("Numbering sequences saved");
-    fetchConfigs();
   }
 
-  async function handleReset(id: string, docType: string) {
-    if (!confirm(`Reset ${docType} counter to 1?`)) return;
-    setConfigs((prev) => prev.map((c) => (c.id === id ? { ...c, next_number: 1 } : c)));
-    toast.success(`${docType} counter reset`);
+  async function handleReset(id: string, sequenceType: string) {
+    if (!canUpdate) return;
+    if (!confirm(`Reset ${sequenceType} counter to 0?`)) return;
+    try {
+      const res = await fetch("/api/admin/numbering-sequences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "reset", sequence_code: sequenceType }),
+      });
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload?.error || "Reset failed");
+      setConfigs((prev) => prev.map((c) => (c.id === id ? { ...c, current_number: 0 } : c)));
+      toast.success(`${sequenceType} counter reset`);
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to reset sequence");
+    }
   }
 
   return (
@@ -114,7 +157,7 @@ export default function NumberingPage() {
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
                     <Hash size={14} className="text-gray-400" />
-                    <span className="font-medium text-gray-900 dark:text-white">{c.document_type.replace(/_/g, " ")}</span>
+                    <span className="font-medium text-gray-900 dark:text-white">{c.sequence_type.replace(/_/g, " ")}</span>
                   </div>
                 </td>
                 <td className="px-4 py-3">
@@ -126,16 +169,16 @@ export default function NumberingPage() {
                 </td>
                 <td className="px-4 py-3">
                   {canUpdate ? (
-                    <input type="number" value={c.next_number} onChange={(e) => updateConfig(c.id, "next_number", Number(e.target.value))} className="w-24 px-2 py-1.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white" />
+                    <input type="number" value={c.current_number} onChange={(e) => updateConfig(c.id, "current_number", Number(e.target.value))} className="w-24 px-2 py-1.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white" />
                   ) : (
-                    <span className="text-gray-900 dark:text-white">{c.next_number}</span>
+                    <span className="text-gray-900 dark:text-white">{c.current_number}</span>
                   )}
                 </td>
                 <td className="px-4 py-3 hidden sm:table-cell">
                   {canUpdate ? (
-                    <input type="number" min={1} max={10} value={c.pad_length} onChange={(e) => updateConfig(c.id, "pad_length", Number(e.target.value))} className="w-16 px-2 py-1.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white text-center" />
+                    <input type="number" min={1} max={10} value={c.padding} onChange={(e) => updateConfig(c.id, "padding", Number(e.target.value))} className="w-16 px-2 py-1.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white text-center" />
                   ) : (
-                    <span className="text-gray-500">{c.pad_length}</span>
+                    <span className="text-gray-500">{c.padding}</span>
                   )}
                 </td>
                 <td className="px-4 py-3">
@@ -143,7 +186,7 @@ export default function NumberingPage() {
                 </td>
                 {canUpdate && (
                   <td className="px-4 py-3 text-right">
-                    <button onClick={() => handleReset(c.id, c.document_type)} className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500" title="Reset counter">
+                    <button onClick={() => handleReset(c.id, c.sequence_type)} className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500" title="Reset counter">
                       <RefreshCw size={15} />
                     </button>
                   </td>

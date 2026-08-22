@@ -114,7 +114,6 @@ export default function JournalEntriesPage() {
         project_id: formProjectId,
         total_debit: totalDebit,
         total_credit: totalCredit,
-        created_by: user?.id,
       }).select().single();
       if (jErr) throw jErr;
 

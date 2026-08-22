@@ -143,7 +143,14 @@ export function calculateWithholdingTax(
   const effectiveRate = override?.rate ?? whtConfig.rate;
 
   return distributionLines.map(line => {
-    const grossAmount = Number(line.amount) || 0;
+    // FIN-005 FIX: finance.distribution_lines has no "gross_amount" column.
+    // The canonical pre-WHT amount is final_amount (falls back to
+    // overridden_amount, then calculated_amount for rows computed but not
+    // yet finalized). Reading the non-existent "gross_amount" silently
+    // produced NaN -> 0, so withholding tax was never calculated.
+    const grossAmount = Number(
+      line.gross_amount ?? line.final_amount ?? line.overridden_amount ?? line.calculated_amount
+    ) || 0;
     const isExempt = override?.exempt_owner_ids?.includes(line.owner_id) || line.wht_exempt || false;
 
     let withholdingAmount = 0;
@@ -376,7 +383,7 @@ export async function postDistributionWithWHT(
       source_id: distribution_id,
       total_debit: totalDebit,
       total_credit: totalCredit,
-      currency: distribution.currency || 'PKR',
+      currency: 'PKR',
       exchange_rate: 1,
       created_by: declared_by,
       approved_by: declared_by,
@@ -389,7 +396,7 @@ export async function postDistributionWithWHT(
       total_gross_amount: totalGross,
       total_withholding_tax: totalWHT,
       total_net_payment: totalNet,
-      currency: distribution.currency || 'PKR',
+      currency: 'PKR',
       lines: linesWithWHT,
       effective_rate: whtConfig.enabled ? (withholding_override?.rate ?? whtConfig.rate) : 0,
       reference,
@@ -420,29 +427,22 @@ export async function recordWithholdingForTaxCompliance(
       .filter(l => l.withholding_amount > 0)
       .map(line => ({
         organization_id: organizationId,
-        withholding_type: 'DIVIDEND',
-        tax_year_id: fiscalYearId || null,
+        credit_type: 'WHT_DEDUCTED',
+        fiscal_year_id: fiscalYearId || null,
         source_type: 'PROFIT_DISTRIBUTION',
         source_id: distributionId,
-        journal_id: journalId,
-        payee_type: 'OWNER',
-        payee_id: line.owner_id,
-        payee_name: line.owner_name,
-        payee_cnic: line.cnic || null,
+        counterparty_name: line.owner_name,
+        counterparty_cnic: line.cnic || null,
         gross_amount: line.gross_amount,
-        withholding_rate: line.withholding_rate,
-        withholding_amount: line.withholding_amount,
-        net_payment: line.net_amount,
+        wht_rate: line.withholding_rate,
+        credit_amount: line.withholding_amount,
         currency: whtCalculation.currency,
-        status: 'HELD', // WHT is held until paid to tax authority
-        reference: whtCalculation.reference,
-        withholding_period: new Date().toISOString().split('T')[0],
-        tax_authority_reference: 'FBR', // Federal Board of Revenue, Pakistan
+        status: 'PENDING', // WHT credit remains pending until claimed/adjusted
+        notes: `Dividend WHT ${whtCalculation.reference} — net payment PKR ${Number(line.net_amount).toLocaleString()}`,
         created_by: postedBy,
         metadata: {
           distribution_id: distributionId,
-          journal_id: journalId,
-          ownership_percentage: line.ownership_percentage,
+            ownership_percentage: line.ownership_percentage,
         },
       }));
 

@@ -87,7 +87,6 @@ export default function TaxReconciliationPage() {
         withholding_credits: parseFloat(createForm.withholding_credits) || 0,
         advance_tax_credits: parseFloat(createForm.advance_tax_credits) || 0,
         other_tax_credits: parseFloat(createForm.other_tax_credits) || 0,
-        created_by: user?.id,
       },
       {
         onSuccess: () => {
@@ -118,7 +117,6 @@ export default function TaxReconciliationPage() {
         amount: parseFloat(adjForm.amount),
         source_account_id: adjForm.source_account_id || null,
         evidence_notes: adjForm.evidence_notes || null,
-        created_by: user?.id || '',
       },
       {
         onSuccess: () =>
@@ -376,16 +374,16 @@ export default function TaxReconciliationPage() {
               <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-xl p-5">
                 <h3 className="text-sm font-bold text-gray-900 dark:text-white mb-3">Actions</h3>
                 <div className="flex flex-wrap gap-2">
-                  {detail.status === 'CALCULATED' && hasPermission('TAX_APPROVE') && (
+                  {detail.status === 'CALCULATED' && hasPermission('TAX_MANAGE') && (
                     <button onClick={() => handleStatusChange('UNDER_REVIEW')} className="px-4 py-2 bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 rounded-lg text-sm font-medium hover:bg-yellow-200">Send for Review</button>
                   )}
-                  {detail.status === 'UNDER_REVIEW' && hasPermission('TAX_APPROVE') && (
+                  {detail.status === 'UNDER_REVIEW' && hasPermission('TAX_MANAGE') && (
                     <button onClick={() => handleStatusChange('ACCOUNTANT_APPROVED')} className="px-4 py-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400 rounded-lg text-sm font-medium hover:bg-indigo-200">Accountant Approve</button>
                   )}
-                  {detail.status === 'ACCOUNTANT_APPROVED' && hasPermission('TAX_APPROVE') && (
+                  {detail.status === 'ACCOUNTANT_APPROVED' && hasPermission('TAX_MANAGE') && (
                     <button onClick={() => handleStatusChange('FILED')} className="px-4 py-2 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded-lg text-sm font-medium hover:bg-green-200">Mark as Filed</button>
                   )}
-                  {detail.status === 'FILED' && hasPermission('TAX_APPROVE') && (
+                  {detail.status === 'FILED' && hasPermission('TAX_MANAGE') && (
                     <button onClick={() => handleStatusChange('PAID')} className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700">Mark as Paid</button>
                   )}
                   {['DRAFT', 'CALCULATED', 'UNDER_REVIEW'].includes(detail.status) && hasPermission('TAX_MANAGE') && (

@@ -22,7 +22,8 @@ interface BudgetGLActual {
 }
 
 export default function BudgetsPage() {
-  const { user, hasPermission, isAdmin } = useAuth();
+  const { user } = useAuth();
+  const { hasPermission } = usePermissions();
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -35,7 +36,7 @@ export default function BudgetsPage() {
   const [editingData, setEditingData] = useState<Budget | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  const canModify = hasPermission ? hasPermission("BUDGET_CREATE") : isAdmin;
+  const canModify = hasPermission("BUDGET_CREATE");
 
   const fetchData = useCallback(async () => {
     if (!user) return;

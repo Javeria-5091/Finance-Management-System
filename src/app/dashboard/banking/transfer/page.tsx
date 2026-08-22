@@ -116,7 +116,6 @@ export default function TransfersPage() {
         fx_rate_date: form.fx_rate_date || null,
         transfer_date: form.transfer_date,
         status: 'DRAFT',
-        created_by: user?.id || '',
       },
       {
         onSuccess: () => {

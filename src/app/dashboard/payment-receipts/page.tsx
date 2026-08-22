@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
+import { usePermissions } from "@/context/PermissionContext";
 import { Plus, CheckCircle, Split, Search, ChevronDown } from "lucide-react";
  
 interface ClientOption {
@@ -13,10 +14,12 @@ interface ClientOption {
  
 export default function PaymentReceiptsPage() {
   const { user } = useAuth();
+  const { hasPermission, isLoading: permissionsLoading } = usePermissions();
   const [receipts, setReceipts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [financialAccountId, setFinancialAccountId] = useState("");
   
   const [invoices, setInvoices] = useState<any[]>([]);
   const [allocations, setAllocations] = useState<Record<string, number>>({});
@@ -47,14 +50,16 @@ export default function PaymentReceiptsPage() {
  
   const fetchReceipts = async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from("payment_receipts")
-      .select("*")
-      .order("payment_date", { ascending: false });
-    if (data) setReceipts(data);
-    setLoading(false);
+    try {
+      const res = await fetch('/api/finance/payment-receipts?page=1&pageSize=100', { credentials: 'include' });
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(result.error || 'Failed to load payment receipts');
+      setReceipts(result.data || []);
+    } catch (e: any) {
+      console.error(e);
+    } finally { setLoading(false); }
   };
- 
+
   const fetchClients = async () => {
     const { data } = await supabase
       .from("clients")
@@ -78,6 +83,14 @@ export default function PaymentReceiptsPage() {
  
   const openCreateModal = async () => {
     await fetchClients();
+    const { data: financialAccounts } = await supabase
+      .schema("finance")
+      .from("financial_accounts")
+      .select("id, currency, is_active, is_default")
+      .eq("is_active", true)
+      .order("is_default", { ascending: false })
+      .limit(1);
+    setFinancialAccountId(financialAccounts?.[0]?.id || "");
     const { data: invData } = await supabase
       .from("invoices")
       .select("*")
@@ -111,63 +124,33 @@ export default function PaymentReceiptsPage() {
   };
  
   const handleSubmit = async () => {
-    if (!isBalanced || !form.amount) {
-      return alert("Pura amount invoices k against allocate karna zaroori hai.");
-    }
-    if (!form.client_id) {
-      return alert("Client select karna zaroori hai.");
-    }
- 
+    if (!isBalanced || !form.amount) return alert("Pura amount invoices ke against allocate karna zaroori hai.");
+    if (!form.client_id) return alert("Client select karna zaroori hai.");
+    if (!financialAccountId) return alert("Active bank/cash account configure karna zaroori hai.");
+
     setSaving(true);
     try {
-      const { data: receipt, error: receiptErr } = await supabase
-        .from("payment_receipts")
-        .insert({
-          amount: parseFloat(form.amount),
-          base_amount: parseFloat(form.amount),
-          currency: "PKR",
-          exchange_rate: 1,
+      const response = await fetch('/api/finance/payment-receipts', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           client_id: form.client_id,
+          amount: Number(form.amount),
+          currency: 'PKR',
+          exchange_rate: 1,
+          received_date: form.payment_date,
           payment_method: form.payment_method,
-          reference: form.reference,
-          description: form.description,
-          payment_date: form.payment_date,
-          status: "DRAFT",
-          created_by: user?.id
-        })
-        .select()
-        .single();
- 
-      if (receiptErr) throw receiptErr;
- 
-      const allocInserts = Object.entries(allocations).map(([invId, amount]) => ({
-        payment_receipt_id: receipt.id,
-        invoice_id: invId,
-        allocated_amount: amount,
-        base_allocated_amount: amount,
-        allocated_by: user?.id
-      }));
- 
-      if (allocInserts.length > 0) {
-        await supabase.from("payment_allocations").insert(allocInserts);
-      }
- 
-      const { data: periodId } = await supabase.rpc('get_current_open_period_id');
-      if (!periodId) {
-        alert('No open accounting period found. Please open a period in Fiscal Calendar first.');
-      } else {
-        await supabase.rpc('post_payment_receipt', {
-          p_receipt_id: receipt.id,
-          p_period_id: periodId,
-          p_transaction_date: form.payment_date
-        });
-        await supabase
-          .from('payment_receipts')
-          .update({ status: 'POSTED' })
-          .eq('id', receipt.id);
-      }
- 
-      alert("Payment Received & Allocated Successfully!");
+          reference: form.reference || undefined,
+          financial_account_id: financialAccountId,
+          notes: form.description || undefined,
+          allocations: Object.entries(allocations).map(([invoice_id, amount]) => ({ invoice_id, amount: Number(amount) })),
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || 'Payment receipt could not be posted');
+
+      alert(result.message || 'Payment Received & Allocated Successfully!');
       setShowModal(false);
       fetchReceipts();
     } catch (error: any) {
@@ -177,7 +160,9 @@ export default function PaymentReceiptsPage() {
       setSaving(false);
     }
   };
- 
+
+  if (permissionsLoading || !hasPermission("PAYMENT_RECEIPT_READ")) return <div className="p-6">Access Denied</div>;
+
   return (
     <div className="p-6">
       {/* Header */}
@@ -186,7 +171,7 @@ export default function PaymentReceiptsPage() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Payment Receipts</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400">Receive payments and allocate against invoices</p>
         </div>
-        <button onClick={openCreateModal} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium">
+        <button disabled={!hasPermission("PAYMENT_RECEIPT_CREATE")} onClick={openCreateModal} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium">
           <Plus size={16} /> Record Payment
         </button>
       </div>

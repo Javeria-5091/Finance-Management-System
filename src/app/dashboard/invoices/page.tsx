@@ -92,13 +92,6 @@ export default function InvoicesPage() {
   // ==========================================
   // APPROVAL LIMITS
   // ==========================================
-  const APPROVAL_LIMITS: Record<string, number> = {
-    CEO: Infinity,
-    FINANCE_HEAD: 1000000,
-    ACCOUNTANT: 500000,
-    HOD: 100000,
-    PROJECT_MANAGER: 50000,
-  };
 
   // ==========================================
   // STATUS CHANGE HANDLER with MAKER-CHECKER
@@ -185,8 +178,6 @@ export default function InvoicesPage() {
         result = await supabase.from("invoices")
           .insert({
             ...formData,
-            user_id: user?.id,
-            created_by: user?.id,
             status: 'DRAFT',
             outstanding_amount: formData.total_amount,
             base_outstanding_amount: formData.total_amount,

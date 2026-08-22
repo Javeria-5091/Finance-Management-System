@@ -187,10 +187,13 @@ export const getTrialBalance = async (params: {
   if (!params.fiscalYearId) return [] as TBEntry[];
 
   // Fetch period IDs for the fiscal year
-  const { data: periods, error: pErr } = await financeDb()
+  let periodQuery = financeDb()
     .from('accounting_periods')
     .select('id')
     .eq('fiscal_year_id', params.fiscalYearId);
+  if (!params.includePrior && params.periodStart) periodQuery = periodQuery.gte('start_date', params.periodStart);
+  if (params.periodEnd) periodQuery = periodQuery.lte('end_date', params.periodEnd);
+  const { data: periods, error: pErr } = await periodQuery;
 
   if (pErr) throw new Error(pErr.message);
 
@@ -228,18 +231,31 @@ export const getAccountBalances = async (organization_id?: string) => {
   const accountIds = (accounts || []).map((a: any) => a.id);
   let lineQuery = financeDb()
     .from('journal_lines')
-    .select('account_id, debit_amount, credit_amount');
+    .select('account_id, debit_amount, credit_amount, base_debit, base_credit, journal_entry_id');
   if (accountIds.length > 0) {
     lineQuery = lineQuery.in('account_id', accountIds);
   }
   const { data: allLines } = await lineQuery;
+  const postedEntryIds = new Set<string>();
+  if (allLines?.length) {
+    const ids = [...new Set(allLines.map((l: any) => l.journal_entry_id).filter(Boolean))];
+    if (ids.length) {
+      const { data: postedEntries } = await financeDb()
+        .from('journal_entries')
+        .select('id')
+        .in('id', ids)
+        .eq('status', 'POSTED');
+      for (const e of postedEntries || []) postedEntryIds.add(e.id);
+    }
+  }
 
   // Build a map: account_id → { totalDebit, totalCredit }
   const lineMap = new Map<string, { totalDebit: number; totalCredit: number }>();
   for (const l of allLines || []) {
+    if (l.journal_entry_id && !postedEntryIds.has(l.journal_entry_id)) continue;
     const entry = lineMap.get(l.account_id) || { totalDebit: 0, totalCredit: 0 };
-    entry.totalDebit += Number(l.debit_amount || 0);
-    entry.totalCredit += Number(l.credit_amount || 0);
+    entry.totalDebit += Number(l.base_debit ?? 0);
+    entry.totalCredit += Number(l.base_credit ?? 0);
     lineMap.set(l.account_id, entry);
   }
 
@@ -318,7 +334,7 @@ export const getBudgetVariance = async (fiscalYearId?: string, organization_id?:
   // Fetch journal lines for all referenced accounts in a single query
   let actualsQuery = financeDb()
     .from('journal_lines')
-    .select('account_id, debit_amount, credit_amount');
+    .select('account_id, base_debit, base_credit, journal_entry_id');
   if (allAccountIds.length > 0) {
     actualsQuery = actualsQuery.in('account_id', allAccountIds);
   }
@@ -326,9 +342,13 @@ export const getBudgetVariance = async (fiscalYearId?: string, organization_id?:
 
   // Build account_id → actual amount map
   const actualsMap = new Map<string, number>();
+  const actualIds = [...new Set((allActualLines || []).map((l: any) => l.journal_entry_id).filter(Boolean))];
+  const posted = actualIds.length ? await financeDb().from('journal_entries').select('id').in('id', actualIds).eq('status', 'POSTED') : { data: [] as any[] };
+  const postedSet = new Set((posted.data || []).map((e: any) => e.id));
   for (const l of allActualLines || []) {
+    if (l.journal_entry_id && !postedSet.has(l.journal_entry_id)) continue;
     const current = actualsMap.get(l.account_id) || 0;
-    actualsMap.set(l.account_id, current + Number(l.debit_amount || 0) - Number(l.credit_amount || 0));
+    actualsMap.set(l.account_id, current + Number(l.base_debit ?? 0) - Number(l.base_credit ?? 0));
   }
 
   // Fetch account names for display
@@ -573,14 +593,21 @@ export const getCurrencyExposure = async (organization_id?: string) => {
   for (const currency of currencies) {
     let lineQuery = financeDb()
       .from('journal_lines')
-      .select('debit_amount, credit_amount')
+      .select('debit_amount, credit_amount, base_debit, base_credit, journal_entry_id')
       .eq('currency', currency);
 
     if (organization_id) lineQuery = lineQuery.eq('organization_id', organization_id);
 
     const { data: lines } = await lineQuery;
-    const totalDebit = (lines || []).reduce((s: number, l: any) => s + Number(l.debit_amount || 0), 0);
-    const totalCredit = (lines || []).reduce((s: number, l: any) => s + Number(l.credit_amount || 0), 0);
+    const entryIds = [...new Set((lines || []).map((l: any) => l.journal_entry_id).filter(Boolean))];
+    let postedIds = new Set<string>();
+    if (entryIds.length) {
+      const { data: posted } = await financeDb().from('journal_entries').select('id').in('id', entryIds).eq('status', 'POSTED');
+      postedIds = new Set((posted || []).map((e: any) => e.id));
+    }
+    const postedLines = (lines || []).filter((l: any) => !l.journal_entry_id || postedIds.has(l.journal_entry_id));
+    const totalDebit = postedLines.reduce((s: number, l: any) => s + Number(l.base_debit ?? l.debit_amount ?? 0), 0);
+    const totalCredit = postedLines.reduce((s: number, l: any) => s + Number(l.base_credit ?? l.credit_amount ?? 0), 0);
 
     rows.push({
       currency,

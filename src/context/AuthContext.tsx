@@ -148,11 +148,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [fetchProfile, sessionChecked]);
 
   const role = profile?.role || 'User';
-  const isAdmin = role === 'Admin' || role === 'CEO';
+  // Security: client-side role strings are never an authorization bypass.
+  // Server-side permission checks remain authoritative for protected actions.
+  const isAdmin = false;
 
   const hasPermission = (permission: keyof UserProfile): boolean => {
     if (!profile) return false;
-    if (isAdmin) return true;
     return Boolean(profile[permission]);
   };
 

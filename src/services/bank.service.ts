@@ -333,12 +333,11 @@ export const updateTransferStatus = async (
   id: string,
   updates: Partial<BankTransfer>
 ) => {
-  const { data, error } = await db
-    .from('bank_transfers')
-    .update(updates)
-    .eq('id', id)
-    .select()
-    .single();
+  const { data, error } = await db.rpc('update_bank_transfer_status', {
+    p_transfer_id: id,
+    p_status: updates.status,
+    p_rejection_reason: updates.rejection_reason || null,
+  });
   return { data: data as BankTransfer, error };
 };
 

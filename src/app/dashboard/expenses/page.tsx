@@ -22,13 +22,6 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 // ─── APPROVAL LIMITS (PKR) by role ───
-const APPROVAL_LIMITS: Record<string, number> = {
-  CEO: Infinity,
-  FINANCE_HEAD: 500000,
-  ACCOUNTANT: 100000,
-  HOD: 50000,
-  PROJECT_MANAGER: 25000,
-};
 
 export default function ExpensesPage() {
   const { user } = useAuth();

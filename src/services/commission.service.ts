@@ -21,6 +21,14 @@ function resolveClient(override?: SClient | null): SClient {
 // Backward-compat alias: existing function bodies
 // continue to reference `supabase` directly.
 const supabase = browserSupabase;
+
+async function getCurrentOrgId(): Promise<string> {
+  const { data: { user } } = await browserSupabase.auth.getUser();
+  if (!user) throw new Error('Authentication required');
+  const { data: profile, error } = await browserSupabase.from('profiles').select('organization_id').eq('user_id', user.id).maybeSingle();
+  if (error || !profile?.organization_id) throw new Error('Organization context is required');
+  return profile.organization_id;
+}
 import type {
   CommissionRow,
   CommissionByPersonRow,
@@ -69,7 +77,6 @@ export async function fetchCommissions(orgId: string, filters?: {
   contractor_id?: string;
 }) {
   let query = supabase
-    .schema('finance')
     .from('commissions')
     .select('*')
     .eq('organization_id', orgId)
@@ -103,7 +110,6 @@ export async function fetchCommissions(orgId: string, filters?: {
 // ─── Fetch single commission ───
 export async function fetchCommissionById(orgId: string, id: string) {
   const { data, error } = await supabase
-    .schema('finance')
     .from('commissions')
     .select('*')
     .eq('organization_id', orgId)
@@ -115,9 +121,11 @@ export async function fetchCommissionById(orgId: string, id: string) {
 
 // ─── Create commission ───
 export async function createCommission(commissionData: Record<string, any>) {
+  const orgId = await getCurrentOrgId();
   const cleaned = emptyToNull({
     ...commissionData,
     status: commissionData.status || 'PENDING',
+    organization_id: orgId,
   });
 
   // Parse numerics
@@ -144,7 +152,6 @@ export async function createCommission(commissionData: Record<string, any>) {
   }
 
   const { data, error } = await supabase
-    .schema('finance')
     .from('commissions')
     .insert(cleaned)
     .select('*')
@@ -181,7 +188,6 @@ export async function updateCommission(orgId: string, id: string, updates: Recor
   }
 
   const { data, error } = await supabase
-    .schema('finance')
     .from('commissions')
     .update(cleaned)
     .eq('organization_id', orgId)
@@ -194,49 +200,42 @@ export async function updateCommission(orgId: string, id: string, updates: Recor
 
 // ─── Delete commission ───
 export async function deleteCommission(id: string) {
+  const orgId = await getCurrentOrgId();
   const { error } = await supabase
-    .schema('finance')
     .from('commissions')
     .delete()
+    .eq('organization_id', orgId)
     .eq('id', id);
   if (error) throw new Error(error.message);
 }
 
 // ─── Approve commission ───
 export async function approveCommission(id: string, approvedBy: string) {
-  const { data, error } = await supabase
-    .schema('finance')
-    .from('commissions')
-    .update({
-      status: 'APPROVED',
-      approved_by: approvedBy,
-      approved_at: new Date().toISOString(),
-    })
-    .eq('id', id)
-    .eq('status', 'PENDING')  // Only pending can be approved
-    .select('*')
-    .single();
+  const orgId = await getCurrentOrgId();
+  const { data, error } = await supabase.schema('finance').rpc('post_commission_approval', {
+    p_commission_id: id,
+  });
   if (error) throw new Error(error.message);
-  if (!data) throw new Error('Commission not found or not in PENDING status');
   return data as CommissionRow;
 }
 
 // ─── Mark commission as paid ───
 export async function markCommissionPaid(id: string, paymentDate: string, paymentRef: string) {
-  const { data, error } = await supabase
-    .schema('finance')
-    .from('commissions')
-    .update({
-      status: 'PAID',
-      payment_date: paymentDate,
-      payment_ref: paymentRef || null,
-    })
-    .eq('id', id)
-    .eq('status', 'APPROVED')  // Only approved can be marked paid
-    .select('*')
-    .single();
+  const { data, error } = await supabase.schema('finance').rpc('post_commission_payment', {
+    p_commission_id: id,
+  });
   if (error) throw new Error(error.message);
-  if (!data) throw new Error('Commission not found or not in APPROVED status');
+  // Payment metadata is non-accounting detail; update it after the atomic GL payment.
+  if (paymentDate || paymentRef) {
+    const { data: updated, error: metaError } = await supabase
+      .from('commissions')
+      .update({ payment_date: paymentDate || new Date().toISOString().slice(0,10), payment_ref: paymentRef || null })
+      .eq('id', id)
+      .eq('organization_id', await getCurrentOrgId())
+      .select('*').single();
+    if (metaError) throw new Error(metaError.message);
+    return updated as CommissionRow;
+  }
   return data as CommissionRow;
 }
 
@@ -287,7 +286,6 @@ export async function fetchCommissionStatusSummary(orgId: string) {
 // ─── Fetch commission stats ───
 export async function fetchCommissionStats(orgId: string): Promise<CommissionStats> {
   const { data, error } = await supabase
-    .schema('finance')
     .from('commissions')
     .select('id, commission_amount, tax_withheld, net_amount, status, currency')
     .eq('organization_id', orgId);
@@ -307,6 +305,8 @@ export async function fetchCommissionStats(orgId: string): Promise<CommissionSta
 
   // Currency frequency for top currency
   const curFreq: Record<string, number> = {};
+  for (const r of rows) { const cur = r.currency || 'PKR'; curFreq[cur] = (curFreq[cur] || 0) + 1; }
+  let topCurrency = Object.entries(curFreq).sort((a,b)=>b[1]-a[1])[0]?.[0] || 'PKR';
 
   for (const r of rows) {
     const ca = Number(r.commission_amount) || 0;
@@ -314,8 +314,7 @@ export async function fetchCommissionStats(orgId: string): Promise<CommissionSta
     const na = Number(r.net_amount) || 0;
     const cur = r.currency || 'PKR';
 
-    curFreq[cur] = (curFreq[cur] || 0) + 1;
-
+    if (cur !== topCurrency) continue;
     totalCommission += ca;
     totalTaxWithheld += tw;
 
@@ -336,15 +335,7 @@ export async function fetchCommissionStats(orgId: string): Promise<CommissionSta
     }
   }
 
-  // Find top currency
-  let topCurrency = 'PKR';
-  let maxFreq = 0;
-  for (const [cur, freq] of Object.entries(curFreq)) {
-    if (freq > maxFreq) {
-      maxFreq = freq;
-      topCurrency = cur;
-    }
-  }
+  // Monetary totals are limited to the dominant currency; cross-currency sums are not valid without a base FX amount.
 
   return {
     totalRecords: rows.length,

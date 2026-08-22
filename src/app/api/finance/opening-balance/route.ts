@@ -91,6 +91,7 @@ export async function POST(req: NextRequest) {
         p_type: 'OBI',
       });
       const batchId = numData || `OBI-${Date.now().toString().slice(-6)}`;
+      const batchSourceId = crypto.randomUUID();
  
       // BUG-001 FIX: Build journal lines with CORRECT column names (debit_amount/credit_amount)
       const rpcLines = [];
@@ -127,7 +128,7 @@ export async function POST(req: NextRequest) {
         p_currency: 'PKR',
         p_exchange_rate: 1,
         p_source_type: 'OPENING_BALANCE',
-        p_source_id: batchId,
+        p_source_id: batchSourceId,
       });
  
       if (postErr) {

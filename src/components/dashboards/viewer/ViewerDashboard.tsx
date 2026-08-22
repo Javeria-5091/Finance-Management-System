@@ -17,8 +17,8 @@ export function ViewerDashboard() {
     if (!user) return;
     const fetchData = async () => {
       const [expRes, incRes] = await Promise.all([
-        supabase.from("expenses").select("*").order("expense_date", { ascending: false }).limit(10),
-        supabase.from("incomes").select("*").order("income_date", { ascending: false }).limit(10)
+        supabase.from("expenses").select("*").eq("created_by", user.id).order("expense_date", { ascending: false }).limit(10),
+        supabase.from("incomes").select("*").eq("created_by", user.id).order("income_date", { ascending: false }).limit(10)
       ]);
       if (expRes.data) setMyExpenses(expRes.data);
       if (incRes.data) setMyIncomes(incRes.data);

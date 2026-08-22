@@ -140,11 +140,15 @@ export async function POST(req: NextRequest) {
     // posting to the wrong account.
     const payableAccount = getData(await supabase
       .from('finance.chart_of_accounts').select('id, code, name')
-      .eq('account_type', 'LIABILITY').eq('is_active', true).eq('code', '2110').maybeSingle());
+      .eq('account_type', 'LIABILITY').eq('is_active', true).eq('code', '2110').eq('organization_id', auth.orgId).maybeSingle());
 
-    const taxAccount = getData(await supabase
+    const inputTaxAccount = getData(await supabase
       .from('finance.chart_of_accounts').select('id, code, name')
-      .eq('account_type', 'LIABILITY').eq('is_active', true).eq('code', '2220').maybeSingle());
+      .eq('account_type', 'ASSET').eq('is_active', true).eq('organization_id', auth.orgId).ilike('name', '%input tax%').order('code').limit(1).maybeSingle());
+
+    const withholdingReceivableAccount = getData(await supabase
+      .from('finance.chart_of_accounts').select('id, code, name')
+      .eq('account_type', 'ASSET').eq('is_active', true).eq('code', '1410').eq('organization_id', auth.orgId).maybeSingle());
 
     const creditAccountId = payableAccount?.id;
 
@@ -154,96 +158,75 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // 5-9. Build journal lines and post via GL engine (BUG-001 FIX + BUG-005 FIX)
+    // Build correct AP accounting:
+    // Dr expense subtotal + Dr input tax + Dr withholding-tax receivable
+    // Cr vendor payable for the net amount due to the vendor.
     const totalAmount = Number(bill.total_amount) || 0;
-    const totalTax = Number(bill.tax_amount) || Number(bill.withholding_amount) || 0;
-    const subtotal = totalAmount - totalTax;
+    const totalTax = Number(bill.tax_amount) || 0;
+    const withholdingAmount = Number(bill.withholding_amount) || 0;
+    const subtotal = Number(bill.subtotal) || Math.max(totalAmount - totalTax, 0);
+
+    if (totalTax > 0 && !inputTaxAccount) {
+      return NextResponse.json({ error: 'Vendor bill has tax_amount but no active Input Tax asset account is configured.' }, { status: 400 });
+    }
+    if (withholdingAmount > 0 && !withholdingReceivableAccount) {
+      return NextResponse.json({ error: 'Vendor bill has withholding_amount but withholding-tax receivable account 1410 is not configured.' }, { status: 400 });
+    }
 
     const rpcLines: any[] = [];
-
+    let expenseTotal = 0;
     if (bill.vendor_bill_lines && bill.vendor_bill_lines.length > 0) {
       for (const line of bill.vendor_bill_lines) {
         const lineAmount = Number(line.amount) || 0;
         if (lineAmount <= 0) continue;
-
-        let expenseAccountId: string | null = null;
-        if (line.account_id) {
-          expenseAccountId = line.account_id;
-        } else if (line.category) {
+        let expenseAccountId: string | null = line.account_id || null;
+        if (!expenseAccountId && line.category) {
           const escapedCategory = line.category.replace(/[%_]/g, '\\$&');
-          // NOTE: category text is free-form / dynamic, so it cannot be
-          // resolved to a fixed COA code the way the AP/tax control
-          // accounts above were. .order('code') at least makes the match
-          // deterministic (same category text always resolves to the same
-          // account) instead of depending on unordered row-scan order.
           const matched = getData(await supabase
             .from('finance.chart_of_accounts').select('id')
             .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true)
-            .ilike('name', `%${escapedCategory}%`).order('code', { ascending: true }).limit(1).maybeSingle());
+            .eq('organization_id', auth.orgId)
+            .ilike('name', `%${escapedCategory}%`).order('code').limit(1).maybeSingle());
           expenseAccountId = matched?.id || null;
         }
-
         if (!expenseAccountId) {
           const defaultExp = getData(await supabase
             .from('finance.chart_of_accounts').select('id')
-            .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).limit(1).single());
+            .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).eq('organization_id', auth.orgId).order('code').limit(1).maybeSingle());
           expenseAccountId = defaultExp?.id || null;
         }
-
-        if (expenseAccountId) {
-          rpcLines.push({
-            account_id: expenseAccountId,
-            debit_amount: lineAmount,
-            credit_amount: 0,
-            description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${line.description || line.category || 'Expense'}`,
-          });
-        }
+        if (!expenseAccountId) return NextResponse.json({ error: 'No operating expense account is configured for a vendor bill line.' }, { status: 400 });
+        expenseTotal += lineAmount;
+        rpcLines.push({ account_id: expenseAccountId, debit_amount: lineAmount, credit_amount: 0, description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${line.description || line.category || 'Expense'}` });
       }
-    } else {
+    }
+    if (expenseTotal > 0 && Math.abs(expenseTotal - subtotal) > 0.01) {
+      return NextResponse.json({ error: `Vendor bill line total (${expenseTotal}) does not match subtotal (${subtotal}).` }, { status: 400 });
+    }
+    if (expenseTotal === 0) {
       const expenseAccount = getData(await supabase
         .from('finance.chart_of_accounts').select('id, code, name')
-        .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).limit(1).single());
-
-      if (!expenseAccount) {
-        return NextResponse.json({ error: 'No OPERATING_EXPENSE account found in Chart of Accounts.' }, { status: 400 });
-      }
-
-      rpcLines.push({
-        account_id: expenseAccount.id,
-        debit_amount: subtotal,
-        credit_amount: 0,
-        description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${bill.description || 'Vendor Expense'}`,
-      });
+        .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).eq('organization_id', auth.orgId).order('code').limit(1).maybeSingle());
+      if (!expenseAccount) return NextResponse.json({ error: 'No OPERATING_EXPENSE account found in Chart of Accounts.' }, { status: 400 });
+      expenseTotal = subtotal;
+      rpcLines.push({ account_id: expenseAccount.id, debit_amount: subtotal, credit_amount: 0, description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${bill.description || 'Vendor Expense'}` });
     }
-
-    // BUG-005 FIX: Build CR lines CORRECTLY — no pop(), construct explicitly
-    if (totalTax > 0 && taxAccount) {
-      rpcLines.push({
-        account_id: creditAccountId, debit_amount: 0, credit_amount: subtotal,
-        description: `Payable (net): Vendor Bill ${bill.bill_number || 'N/A'}`,
-      });
-      rpcLines.push({
-        account_id: taxAccount.id, debit_amount: 0, credit_amount: totalTax,
-        description: `Withholding Tax: Vendor Bill ${bill.bill_number || 'N/A'}`,
-      });
-    } else {
-      rpcLines.push({
-        account_id: creditAccountId, debit_amount: 0, credit_amount: totalAmount,
-        description: `Payable: Vendor Bill ${bill.bill_number || 'N/A'} - ${bill.vendor_id || 'Vendor'}`,
-      });
-    }
+    if (totalTax > 0) rpcLines.push({ account_id: inputTaxAccount.id, debit_amount: totalTax, credit_amount: 0, description: `Input tax: ${bill.bill_number || 'N/A'}` });
+    if (withholdingAmount > 0) rpcLines.push({ account_id: withholdingReceivableAccount.id, debit_amount: withholdingAmount, credit_amount: 0, description: `Withholding tax receivable: ${bill.bill_number || 'N/A'}` });
+    const netPayable = totalAmount - withholdingAmount;
+    if (netPayable < 0) return NextResponse.json({ error: 'Withholding amount cannot exceed vendor bill total.' }, { status: 400 });
+    rpcLines.push({ account_id: creditAccountId, debit_amount: 0, credit_amount: netPayable, description: `Vendor payable: ${bill.bill_number || 'N/A'}` });
 
     const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${bill.vendor_id || 'Vendor'} - ${bill.description || ''}`,
       p_transaction_date: bill.bill_date || new Date().toISOString().split('T')[0],
       p_period_id: period.id,
-      p_lines: JSON.stringify(rpcLines),
+      p_lines: rpcLines,
       p_currency: bill.currency || 'PKR',
       p_exchange_rate: bill.exchange_rate || 1,
       p_source_type: 'VENDOR_BILL',
       p_source_id: vendorBillId,
       p_project_id: bill.project_id || null,
-      p_department_id: bill.department || null,
     });
 
     if (postErr || !journalId) {
@@ -261,14 +244,6 @@ export async function POST(req: NextRequest) {
     const reference = journal.reference || `JE-VB-${journalId}`;
     const totalDebit = journal.total_debit || 0;
     const totalCredit = journal.total_credit || 0;
-
-    // 10. Update vendor bill status
-    const { error: statusErr } = await supabase.from('vendor_bills').update({
-      status: 'POSTED', posted_at: new Date().toISOString(),
-      journal_entry_id: journalId, posted_by: auth.userId,
-    }).eq('id', vendorBillId);
-
-    if (statusErr) { console.error('Vendor bill status update failed:', statusErr.message); }
 
     // 11. Audit log
     // BUG-023 FIX: surface a failed audit write via audit_log_warning

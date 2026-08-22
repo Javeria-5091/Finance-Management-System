@@ -4,6 +4,14 @@
 // =============================================================================
 
 import { financeDB, reportingDB } from '@/lib/supabase';
+
+async function getCurrentOrgId(): Promise<string> {
+  const { data: { user } } = await financeDB.auth.getUser();
+  if (!user) throw new Error('Authentication required');
+  const { data: profile, error } = await financeDB.schema('public').from('profiles').select('organization_id').eq('user_id', user.id).maybeSingle();
+  if (error || !profile?.organization_id) throw new Error('Organization context is required');
+  return profile.organization_id;
+}
 import type {
   FixedAsset, FixedAssetFormInput, AssetCategory, AssetCategoryFormInput,
   DepreciationSchedule, AssetVerification, AssetVerificationLine,
@@ -177,23 +185,12 @@ export const updateFixedAsset = async (id: string, input: Partial<FixedAssetForm
 };
 
 export const capitalizeAsset = async (id: string, userId: string): Promise<FixedAsset> => {
-  const { data, error } = await financeDB
-    .from('fixed_assets')
-    .update({
-      status: 'active',
-      approved_by: userId,
-      approved_at: new Date().toISOString()
-    })
-    .eq('id', id)
-    .select()
-    .single();
-
+  const { data, error } = await financeDB.rpc('post_asset_capitalization', {
+    p_asset_id: id,
+    p_posted_by: userId,
+  });
   if (error) throw new Error(`Failed to capitalize asset: ${error.message}`);
-
-  // TODO: Post capitalization journal entry via accounting engine
-  // Debit: Asset Account | Credit: Bank/Cash/Payable
-
-  return data;
+  return data as FixedAsset;
 };
 
 export const disposeAsset = async (
@@ -203,35 +200,15 @@ export const disposeAsset = async (
   disposalCurrencyId: string,
   disposalMethod: string
 ): Promise<FixedAsset> => {
-  const { data: asset } = await financeDB
-    .from('fixed_assets')
-    .select('base_cost, accumulated_depreciation, net_book_value')
-    .eq('id', id)
-    .single();
-
-  if (!asset) throw new Error('Asset not found');
-
-  const gainLoss = disposalValue - asset.net_book_value;
-
-  const { data, error } = await financeDB
-    .from('fixed_assets')
-    .update({
-      status: 'disposed',
-      disposal_date: disposalDate,
-      disposal_value: disposalValue,
-      disposal_currency: disposalCurrencyId,
-      disposal_method: disposalMethod,
-      gain_loss_amount: gainLoss
-    })
-    .eq('id', id)
-    .select()
-    .single();
-
+  const { data, error } = await financeDB.rpc('post_asset_disposal', {
+    p_asset_id: id,
+    p_disposal_date: disposalDate,
+    p_disposal_value: disposalValue,
+    p_disposal_currency: disposalCurrencyId,
+    p_disposal_method: disposalMethod,
+  });
   if (error) throw new Error(`Failed to dispose asset: ${error.message}`);
-
-  // TODO: Post disposal journal entries via accounting engine
-
-  return data;
+  return data as FixedAsset;
 };
 
 // ─── Depreciation ────────────────────────────────────────────────────────────
@@ -304,24 +281,14 @@ export const postDepreciationForPeriod = async (periodId: string): Promise<{
 
   const totalAmount = schedule.reduce((sum, s) => sum + Number(s.depreciation_amount), 0);
 
-  // Mark as posted
-  const ids = schedule.map(s => s.id);
-  const { error: updateError } = await financeDB
-    .from('depreciation_schedule')
-    .update({ status: 'posted', posted_at: new Date().toISOString() })
-    .in('id', ids);
+  // Post the depreciation journal and mark all schedule rows in one DB transaction.
+  const { data: postedCount, error: postError } = await financeDB.rpc('post_depreciation_for_period', {
+    p_period_id: periodId,
+    p_created_by: (await financeDB.auth.getUser()).data.user?.id || null,
+  });
+  if (postError) throw new Error(`Failed to post depreciation: ${postError.message}`);
 
-  if (updateError) throw new Error(`Failed to post depreciation: ${updateError.message}`);
-
-  // Update accumulated depreciation on each asset
-  for (const s of schedule) {
-    await financeDB.rpc('fn_add_accumulated_depreciation', {
-      p_asset_id: s.asset_id,
-      p_amount: s.depreciation_amount
-    });
-  }
-
-  return { posted: schedule.length, total_amount: totalAmount };
+  return { posted: Number(postedCount || 0), total_amount: totalAmount };
 };
 
 // ─── Asset Verifications ─────────────────────────────────────────────────────
@@ -464,9 +431,11 @@ export const getAssetRegister = async (filters?: {
 // ─── KPIs ────────────────────────────────────────────────────────────────────
 
 export const getAssetKPIs = async (): Promise<AssetKPIs> => {
+  const orgId = await getCurrentOrgId();
   const { data: assets, error } = await financeDB
     .from('fixed_assets')
-    .select('status, base_cost, accumulated_depreciation, net_book_value');
+    .select('status, base_cost, accumulated_depreciation, net_book_value')
+    .eq('organization_id', orgId);
 
   if (error) throw new Error(`Failed to fetch asset KPIs: ${error.message}`);
 

@@ -15,7 +15,7 @@
 import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
-import { getAuthSupabase } from '@/lib/api-auth';
+import { getAuthSupabase, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
@@ -52,6 +52,8 @@ const TaxAssistantRequestSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const permissionCheck = await requirePermission('REPORT_READ');
+  if (permissionCheck instanceof Response) return permissionCheck;
   const requestId = generateRequestId();
   const requestMetadata = extractRequestMetadata(req);
   const startTime = Date.now();
@@ -67,6 +69,8 @@ export async function POST(req: Request) {
     const orgId = profile?.organization_id;
     const userRole = profile?.role || 'EMPLOYEE';
     if (!orgId) return NextResponse.json({ error: 'Organization context missing.' }, { status: 400 });
+    const aiLimitCheck = await enforceAiRequestLimits(supabase, user.id, orgId);
+    if (aiLimitCheck) return aiLimitCheck;
 
     // 2. Parse request
     const body = await req.json();
@@ -109,7 +113,8 @@ export async function POST(req: Request) {
       // reporting.v_tax_computation_summary is an organization-level view
       // with no user_id column (per-user filtering would fail closed with
       // an "undefined_column" error from the DB function otherwise).
-      const innerQuery = `SELECT * FROM reporting.v_tax_computation_summary WHERE tax_year = '${tax_year}'`;
+      const safeTaxYear = String(tax_year).replace(/'/g, "''");
+      const innerQuery = `SELECT * FROM reporting.v_tax_computation_summary WHERE tax_year = '${safeTaxYear}'`;
 
       const { data: taxSummary, error: taxErr } = await supabase.rpc('execute_ai_readonly_query', {
         query_string: innerQuery,

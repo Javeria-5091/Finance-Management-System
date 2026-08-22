@@ -89,11 +89,8 @@ interface VendorBill {
   submitted_at: string | null;
   verified_by: string | null;
   verified_at: string | null;
-  approved_by: string | null;
   approved_at: string | null;
-  posted_by: string | null;
   posted_at: string | null;
-  created_by: string;
   created_at: string;
   vendors?: { name: string } | null;
 }
@@ -391,7 +388,6 @@ const handleLineChange = useCallback((newLines: any[]) => {
         amount_paid: 0,
         outstanding_amount: total,
         status: "DRAFT",
-        created_by: user?.id,
       };
 
       let billId: string | null = null;

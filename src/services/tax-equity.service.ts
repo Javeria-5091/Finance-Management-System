@@ -17,6 +17,14 @@ function resolveClient(override?: SClient | null): SClient {
 const supabase = browserSupabase;
 const db = supabase.schema('finance');
 
+async function getCurrentOrgId(): Promise<string> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Authentication required');
+  const { data, error } = await db.from('profiles').select('organization_id').eq('user_id', user.id).maybeSingle();
+  if (error || !data?.organization_id) throw new Error('Organization context is required');
+  return data.organization_id;
+}
+
 // ==================== TYPES ====================
 
 export interface TaxpayerProfile {
@@ -264,7 +272,8 @@ export const saveTaxSlabs = async (orgId: string, slabs: Omit<TaxSlab, 'id' | 'c
 };
 
 export const deleteTaxSlab = async (id: string) => {
-  const { error } = await db.from('tax_slabs').delete().eq('id', id);
+  const orgId = await getCurrentOrgId();
+  const { error } = await db.from('tax_slabs').delete().eq('organization_id', orgId).eq('id', id);
   return { error };
 };
 
@@ -286,12 +295,13 @@ export const createTaxReconciliation = async (orgId: string, payload: any) => {
 };
 
 export const updateTaxReconciliation = async (id: string, payload: any) => {
-  const { data, error } = await db.from('tax_reconciliations').update({ ...payload, updated_at: new Date().toISOString() }).eq('id', id).select().single();
+  const orgId = await getCurrentOrgId();
+  const { data, error } = await db.from('tax_reconciliations').update({ ...payload, updated_at: new Date().toISOString() }).eq('organization_id', orgId).eq('id', id).select().single();
   return { data: data as TaxReconciliation, error };
 };
 
 export const computeTax = async (orgId: string, reconId: string) => {
-  const { data, error } = await db.rpc('compute_tax_liability', { p_tax_recon_id: reconId, p_organization_id: orgId });
+  const { data, error } = await db.rpc('compute_tax_liability', { p_tax_recon_id: reconId });
   return { data, error };
 };
 
@@ -308,12 +318,14 @@ export const addTaxAdjustment = async (orgId: string, payload: Omit<TaxAdjustmen
 };
 
 export const updateTaxAdjustment = async (id: string, payload: Partial<TaxAdjustment>) => {
-  const { data, error } = await db.from('tax_adjustments').update({ ...payload, updated_at: new Date().toISOString() }).eq('id', id).select().single();
+  const orgId = await getCurrentOrgId();
+  const { data, error } = await db.from('tax_adjustments').update({ ...payload, updated_at: new Date().toISOString() }).eq('organization_id', orgId).eq('id', id).select().single();
   return { data: data as TaxAdjustment, error };
 };
 
 export const deleteTaxAdjustment = async (id: string) => {
-  const { error } = await db.from('tax_adjustments').delete().eq('id', id);
+  const orgId = await getCurrentOrgId();
+  const { error } = await db.from('tax_adjustments').delete().eq('organization_id', orgId).eq('id', id);
   return { error };
 };
 
@@ -342,7 +354,8 @@ export const createOwner = async (orgId: string, payload: any) => {
 };
 
 export const updateOwner = async (id: string, payload: any) => {
-  const { data, error } = await db.from('owners').update({ ...payload, updated_at: new Date().toISOString() }).eq('id', id).select().single();
+  const orgId = await getCurrentOrgId();
+  const { data, error } = await db.from('owners').update({ ...payload, updated_at: new Date().toISOString() }).eq('organization_id', orgId).eq('id', id).select().single();
   return { data: data as Owner, error };
 };
 
@@ -371,7 +384,8 @@ export const createReservePolicy = async (orgId: string, payload: any) => {
 };
 
 export const updateReservePolicy = async (id: string, payload: any) => {
-  const { data, error } = await db.from('reserve_policies').update({ ...payload, updated_at: new Date().toISOString() }).eq('id', id).select().single();
+  const orgId = await getCurrentOrgId();
+  const { data, error } = await db.from('reserve_policies').update({ ...payload, updated_at: new Date().toISOString() }).eq('organization_id', orgId).eq('id', id).select().single();
   return { data: data as ReservePolicy, error };
 };
 
@@ -398,7 +412,8 @@ export const createProfitDistribution = async (orgId: string, payload: any) => {
 };
 
 export const updateProfitDistribution = async (id: string, payload: any) => {
-  const { data, error } = await db.from('profit_distributions').update({ ...payload, updated_at: new Date().toISOString() }).eq('id', id).select().single();
+  const orgId = await getCurrentOrgId();
+  const { data, error } = await db.from('profit_distributions').update({ ...payload, updated_at: new Date().toISOString() }).eq('organization_id', orgId).eq('id', id).select().single();
   return { data: data as ProfitDistribution, error };
 };
 
@@ -409,7 +424,7 @@ export const saveDistributionLines = async (orgId: string, lines: any[]) => {
 };
 
 export const postProfitDistribution = async (orgId: string, distId: string, periodId: string, date: string) => {
-  const { data, error } = await db.rpc('post_profit_distribution', { p_distribution_id: distId, p_period_id: periodId, p_transaction_date: date, p_organization_id: orgId });
+  const { data, error } = await db.rpc('post_profit_distribution', { p_distribution_id: distId, p_period_id: periodId, p_transaction_date: date });
   return { data, error };
 };
 

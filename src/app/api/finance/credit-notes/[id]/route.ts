@@ -180,6 +180,7 @@ export async function POST(
       .select('id, code, name')
       .eq('account_type', 'ASSET')
       .eq('is_active', true)
+      .eq('organization_id', auth.orgId)
       .eq('code', '1210')
       .maybeSingle());
 
@@ -188,6 +189,7 @@ export async function POST(
       .select('id, code, name')
       .eq('account_type', 'REVENUE')
       .eq('is_active', true)
+      .eq('organization_id', auth.orgId)
       .eq('code', '4110')
       .maybeSingle());
 

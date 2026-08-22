@@ -23,6 +23,18 @@ function resolveClient(override?: SClient | null): SClient {
 // Backward-compat alias: existing function bodies
 // continue to reference `supabase` directly.
 const supabase = browserSupabase;
+
+async function getCurrentOrgId(): Promise<string> {
+  const { data: { user } } = await browserSupabase.auth.getUser();
+  if (!user) throw new Error('Authentication required');
+  const { data: profile, error } = await browserSupabase
+    .from('profiles')
+    .select('organization_id')
+    .eq('user_id', user.id)
+    .maybeSingle();
+  if (error || !profile?.organization_id) throw new Error('Organization context is required');
+  return profile.organization_id;
+}
 // ─── Types (snake_case from Supabase) ───
 export interface PayrollEmployeeRow {
   id: string;
@@ -141,10 +153,11 @@ function emptyToNull(obj: Record<string, any>): Record<string, any> {
 // ─── Employee Services ───
 
 export async function fetchEmployees(search?: string) {
+  const orgId = await getCurrentOrgId();
   let query = supabase
-    .schema('finance')
     .from("payroll_employees")
     .select("*")
+    .eq("organization_id", orgId)
     .order("created_at", { ascending: false });
 
   if (search) {
@@ -159,11 +172,12 @@ export async function fetchEmployees(search?: string) {
 }
 
 export async function fetchEmployeeWithCompensation(employeeId: string) {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await supabase
-    .schema('finance')
     .from("payroll_employees")
     .select("*, payroll_compensation(*)")
     .eq("id", employeeId)
+    .eq("organization_id", orgId)
     .single();
 
   if (error) throw new Error(error.message);
@@ -171,6 +185,7 @@ export async function fetchEmployeeWithCompensation(employeeId: string) {
 }
 
 export async function createEmployee(employeeData: any) {
+  const orgId = await getCurrentOrgId();
   // Generate employee code
   const { data: codeData } = await supabase
     .schema('finance')
@@ -181,12 +196,12 @@ export async function createEmployee(employeeData: any) {
   // ★ FIX: Clean empty strings to null before insert
   const cleanedData = emptyToNull({
     ...employeeData,
+    organization_id: orgId,
     employee_code: employeeCode,
     status: "ACTIVE",
   });
 
   const { data, error } = await supabase
-    .schema('finance')
     .from("payroll_employees")
     .insert(cleanedData)
     .select("*")
@@ -197,14 +212,15 @@ export async function createEmployee(employeeData: any) {
 }
 
 export async function updateEmployee(id: string, updates: any) {
+  const orgId = await getCurrentOrgId();
   // ★ FIX: Clean empty strings to null before update
   const cleanedUpdates = emptyToNull(updates);
 
   const { data, error } = await supabase
-    .schema('finance')
     .from("payroll_employees")
     .update(cleanedUpdates)
     .eq("id", id)
+    .eq("organization_id", orgId)
     .select("*")
     .single();
 
@@ -215,28 +231,11 @@ export async function updateEmployee(id: string, updates: any) {
 // ─── Compensation Services ───
 
 export async function setCompensation(employeeId: string, compData: any) {
-  // Deactivate old active compensation
-  await supabase
-    .schema('finance')
-    .from("payroll_compensation")
-    .update({ is_active: false })
-    .eq("employee_id", employeeId)
-    .eq("is_active", true);
-
-  // ★ FIX: Clean empty strings to null
-  const cleanedData = emptyToNull({
-    employee_id: employeeId,
-    ...compData,
-    is_active: true,
+  const cleanedData = emptyToNull({ ...compData });
+  const { data, error } = await supabase.rpc('set_payroll_compensation_atomic', {
+    p_employee_id: employeeId,
+    p_compensation: cleanedData,
   });
-
-  const { data, error } = await supabase
-    .schema('finance')
-    .from("payroll_compensation")
-    .insert(cleanedData)
-    .select("*")
-    .single();
-
   if (error) throw new Error(error.message);
   return data as PayrollCompensationRow;
 }
@@ -244,15 +243,16 @@ export async function setCompensation(employeeId: string, compData: any) {
 // ─── Deduction Services ───
 
 export async function setDeduction(employeeId: string, dedData: any) {
+  const orgId = await getCurrentOrgId();
   // ★ FIX: Clean empty strings to null
   const cleanedData = emptyToNull({
     employee_id: employeeId,
+    organization_id: orgId,
     ...dedData,
     is_active: true,
   });
 
   const { data, error } = await supabase
-    .schema('finance')
     .from("payroll_deductions")
     .insert(cleanedData)
     .select("*")
@@ -263,11 +263,12 @@ export async function setDeduction(employeeId: string, dedData: any) {
 }
 
 export async function fetchDeductions(employeeId: string) {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await supabase
-    .schema('finance')
     .from("payroll_deductions")
     .select("*")
     .eq("employee_id", employeeId)
+    .eq("organization_id", orgId)
     .eq("is_active", true);
 
   if (error) throw new Error(error.message);
@@ -277,10 +278,11 @@ export async function fetchDeductions(employeeId: string) {
 // ─── Payroll Run Services ───
 
 export async function fetchPayrollRuns() {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await supabase
-    .schema('finance')
     .from("payroll_runs")
     .select("*")
+    .eq("organization_id", orgId)
     .order("created_at", { ascending: false });
 
   if (error) throw new Error(error.message);
@@ -288,23 +290,34 @@ export async function fetchPayrollRuns() {
 }
 
 export async function fetchPayrollLines(runId: string) {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await supabase
-    .schema('finance')
     .from("payroll_lines")
     .select("*")
-    .eq("payroll_run_id", runId);
+    .eq("payroll_run_id", runId)
+    .eq("organization_id", orgId);
 
   if (error) throw new Error(error.message);
   return (data as PayrollLineRow[]) || [];
 }
 
+// ─── Payroll Posting ───
+export async function postPayrollRun(payrollRunId: string) {
+  const { data: journalId, error } = await supabase.schema('finance').rpc('post_payroll_run', {
+    p_payroll_run_id: payrollRunId,
+  });
+  if (error) throw new Error(error.message);
+  return journalId as string;
+}
+
 // ─── Advance Services ───
 
 export async function fetchAdvances() {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await supabase
-    .schema('finance')
     .from("payroll_advances")
     .select("*, payroll_employees(id, name, employee_code, department)")
+    .eq("organization_id", orgId)
     .order("request_date", { ascending: false });
 
   if (error) throw new Error(error.message);
@@ -314,10 +327,11 @@ export async function fetchAdvances() {
 // ─── Commission Services ───
 
 export async function fetchCommissions() {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await supabase
-    .schema('finance')
     .from("payroll_commissions")
     .select("*, payroll_employees(id, name, employee_code, department)")
+    .eq("organization_id", orgId)
     .order("created_at", { ascending: false });
 
   if (error) throw new Error(error.message);
@@ -327,16 +341,19 @@ export async function fetchCommissions() {
 // ─── Payroll Stats (for dashboard) ───
 
 export async function fetchPayrollStats() {
+  const orgId = await getCurrentOrgId();
   const [empRes, runRes, advRes] = await Promise.all([
     supabase
       .schema('finance')
       .from("payroll_employees")
       .select("id", { count: "exact" })
+      .eq("organization_id", orgId)
       .eq("status", "ACTIVE"),
     supabase
       .schema('finance')
       .from("payroll_runs")
       .select("total_net_pay")
+      .eq("organization_id", orgId)
       .eq("status", "POSTED")
       .order("created_at", { ascending: false })
       .limit(1),
@@ -344,6 +361,7 @@ export async function fetchPayrollStats() {
       .schema('finance')
       .from("payroll_advances")
       .select("remaining_balance")
+      .eq("organization_id", orgId)
       .in("approval_status", ["APPROVED", "PARTIALLY_RECOVERED"]),
   ]);
 

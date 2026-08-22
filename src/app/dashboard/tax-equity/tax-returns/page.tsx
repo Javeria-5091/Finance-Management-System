@@ -13,14 +13,14 @@ interface TaxReturn {
   period_to: string;
   filing_date: string;
   status: string;
-  total_tax: number;
-  total_income: number;
-  total_deductions: number;
+  declared_tax: number;
+  declared_income: number;
+  declared_taxable: number;
   remarks: string;
   created_at: string;
 }
 
-const TAX_TYPES = ["Income Tax", "Sales Tax", "FBR", "PRA", "SECP"];
+const TAX_TYPES = ["corporate", "sales", "withholding", "presumptive"];
 const STATUS_STYLES: Record<string, string> = {
   DRAFT: "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
   FILED: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
@@ -38,13 +38,13 @@ export default function TaxReturnsPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ tax_type: "Income Tax", period_from: "", period_to: "", filing_date: "", total_tax: 0, total_income: 0, total_deductions: 0, remarks: "" });
+  const [form, setForm] = useState({ tax_type: "corporate", period_from: "", period_to: "", filing_date: "", total_tax: 0, total_income: 0, total_deductions: 0, remarks: "" });
   const [saving, setSaving] = useState(false);
   const [viewItem, setViewItem] = useState<TaxReturn | null>(null);
 
   const fetchReturns = useCallback(async () => {
     if (!user) return;
-    const { data, error } = await supabase.from("tax_returns").select("*").order("created_at", { ascending: false });
+    const { data, error } = await supabase.schema("finance").from("tax_returns").select("*").eq("organization_id", (await supabase.from("profiles").select("organization_id").eq("user_id", user.id).single()).data?.organization_id || "").order("created_at", { ascending: false });
     if (error) toast.error("Failed to load tax returns: " + error.message);
     else setReturns(data || []);
     setLoading(false);
@@ -64,7 +64,23 @@ export default function TaxReturnsPage() {
   async function handleSave() {
     if (!form.period_from || !form.period_to) { toast.error("Period dates are required"); return; }
     setSaving(true);
-    const { error } = await supabase.from("tax_returns").insert({ ...form, user_id: user?.id, status: "DRAFT" });
+    const { data: profile } = await supabase.from("profiles").select("organization_id").eq("user_id", user?.id || "").single();
+    if (!profile?.organization_id) { toast.error("Organization context missing"); setSaving(false); return; }
+    const { error } = await supabase.schema("finance").from("tax_returns").insert({
+      organization_id: profile.organization_id,
+      tax_type: form.tax_type,
+      tax_year: form.period_from.slice(0, 4),
+      period_start: form.period_from,
+      period_end: form.period_to,
+      declared_income: Number(form.total_income),
+      declared_taxable: Math.max(Number(form.total_income) - Number(form.total_deductions), 0),
+      declared_tax: Number(form.total_tax),
+      status: "DRAFT",
+      created_by: user?.id,
+      prepared_by: user?.id,
+      prepared_at: new Date().toISOString(),
+      notes: form.remarks || null,
+    });
     if (error) toast.error("Save failed: " + error.message);
     else { toast.success("Tax return created"); setShowForm(false); fetchReturns(); }
     setSaving(false);
@@ -116,7 +132,7 @@ export default function TaxReturnsPage() {
                 <td className="px-4 py-3 hidden md:table-cell text-gray-600 dark:text-gray-400 text-xs">
                   {r.period_from} to {r.period_to}
                 </td>
-                <td className="px-4 py-3 text-right font-semibold text-gray-900 dark:text-white">{formatCurrency(r.total_tax)}</td>
+                <td className="px-4 py-3 text-right font-semibold text-gray-900 dark:text-white">{formatCurrency(r.declared_tax)}</td>
                 <td className="px-4 py-3 text-center">
                   <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_STYLES[r.status] || STATUS_STYLES.DRAFT}`}>{r.status}</span>
                 </td>
@@ -187,9 +203,9 @@ export default function TaxReturnsPage() {
             <div className="space-y-3 text-sm">
               <div className="flex justify-between"><span className="text-gray-500">Tax Type</span><span className="font-medium text-gray-900 dark:text-white">{viewItem.tax_type}</span></div>
               <div className="flex justify-between"><span className="text-gray-500">Period</span><span className="text-gray-900 dark:text-white">{viewItem.period_from} to {viewItem.period_to}</span></div>
-              <div className="flex justify-between"><span className="text-gray-500">Total Income</span><span className="text-green-600 font-semibold">{formatCurrency(viewItem.total_income)}</span></div>
-              <div className="flex justify-between"><span className="text-gray-500">Deductions</span><span className="text-red-600 font-semibold">{formatCurrency(viewItem.total_deductions)}</span></div>
-              <div className="flex justify-between"><span className="text-gray-500">Tax Amount</span><span className="text-blue-600 font-bold">{formatCurrency(viewItem.total_tax)}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">Total Income</span><span className="text-green-600 font-semibold">{formatCurrency(viewItem.declared_income)}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">Deductions</span><span className="text-red-600 font-semibold">{formatCurrency(viewItem.declared_income - viewItem.declared_taxable)}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">Tax Amount</span><span className="text-blue-600 font-bold">{formatCurrency(viewItem.declared_tax)}</span></div>
               <div className="flex justify-between"><span className="text-gray-500">Status</span><span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_STYLES[viewItem.status]}`}>{viewItem.status}</span></div>
               {viewItem.remarks && <div><span className="text-gray-500">Remarks</span><p className="text-gray-900 dark:text-white mt-1">{viewItem.remarks}</p></div>}
             </div>

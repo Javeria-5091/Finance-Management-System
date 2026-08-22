@@ -55,7 +55,7 @@ export async function createFiscalYear(input: CreateFiscalYearInput): Promise<vo
   // ✅ FIX: Get user ID BEFORE the RPC call
   const userId = await currentUserId();
 
-  const { error } = await db().schema('finance').rpc('create_fiscal_year_with_periods', {
+  const { error } = await db().rpc('create_fiscal_year_with_periods', {
     p_name: input.name,
     p_start_date: input.start_date,
     p_end_date: input.end_date,
@@ -91,7 +91,7 @@ export async function softCloseFiscalYear(fyId: string, reason: string): Promise
       closed_at: new Date().toISOString(),
       closed_by: userId,  // ✅ FIX
     })
-    .eq('id', fyId);
+    .eq('id', fyId).eq('organization_id', (await db().from('fiscal_years').select('organization_id').eq('id', fyId).single()).data?.organization_id || '');
 
   if (error) throw error;
 }
@@ -127,6 +127,7 @@ export async function hardCloseFiscalYear(fyId: string, reason: string): Promise
   const res = await fetch('/api/year-end-close', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify({ fiscalYearId: fyId, confirm: true }),
   });
 
@@ -154,7 +155,7 @@ export async function getPeriods(fyId: string): Promise<AccountingPeriod[]> {
 export async function openPeriod(input: OpenPeriodInput): Promise<void> {
   const userId = await currentUserId();  // ✅ FIX
 
-  const { error } = await db().schema('finance').rpc('open_period', {
+  const { error } = await db().rpc('open_period', {
     p_period_id: input.period_id,
     p_opened_by: userId,  // ✅ FIX
   });
@@ -179,6 +180,10 @@ export async function closePeriod(input: ClosePeriodInput): Promise<void> {
 }
 
 export async function reopenPeriod(input: ReopenPeriodInput): Promise<void> {
+  const roleResult = await supabase.rpc('get_my_user_roles');
+  const roles = Array.isArray(roleResult.data) ? roleResult.data : [];
+  const allowed = roles.some((r: any) => ['CEO','FINANCE_HEAD'].includes(r.role || r.role_name) && r.is_active !== false);
+  if (!allowed) throw new Error('Only CEO or Finance Head may reopen a fiscal period');
   const { error } = await db()
     .from('accounting_periods')
     .update({

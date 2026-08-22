@@ -83,6 +83,7 @@ export async function POST(req: NextRequest) {
       .select('id, code, name')
       .eq('account_type', 'REVENUE')
       .eq('is_active', true)
+      .eq('organization_id', auth.orgId)
       .eq('code', '4110')
       .maybeSingle());
 
@@ -92,6 +93,7 @@ export async function POST(req: NextRequest) {
       .select('id, code, name')
       .eq('account_type', 'ASSET')
       .eq('is_active', true)
+      .eq('organization_id', auth.orgId)
       .eq('code', '1210')
       .maybeSingle());
 
@@ -148,19 +150,7 @@ export async function POST(req: NextRequest) {
     }
     const reference = journal.reference || `JE-IN-${journalId}`;
 
-    // 10. Update income status
-    const { error: statusErr } = await supabase.from("incomes").update({
-      status: 'POSTED',
-      posted_at: new Date().toISOString(),
-      journal_entry_id: journalId,
-      posted_by: auth.userId,
-    }).eq("id", incomeId);
-
-    if (statusErr) {
-      console.error('Income status update failed after GL post:', statusErr.message);
-    }
-
-        // 11. Audit log
+    // 11. Audit log
     let auditLogFailed = false;
     try {
       await supabase.schema('audit').rpc('log_action', {

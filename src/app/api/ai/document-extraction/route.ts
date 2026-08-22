@@ -16,7 +16,7 @@
 import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
-import { getAuthSupabase } from '@/lib/api-auth';
+import { getAuthSupabase, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
@@ -101,6 +101,8 @@ const ALLOWED_MIME_TYPES = [
 ];
 
 export async function POST(req: Request) {
+  const permissionCheck = await requirePermission('REPORT_READ');
+  if (permissionCheck instanceof Response) return permissionCheck;
   const requestId = generateRequestId();
   const requestMetadata = extractRequestMetadata(req);
   const startTime = Date.now();
@@ -125,6 +127,9 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
+
+    const aiLimitCheck = await enforceAiRequestLimits(supabase, user.id, orgId);
+    if (aiLimitCheck) return aiLimitCheck;
 
     // 2. Parse and validate request
     const body = await req.json();

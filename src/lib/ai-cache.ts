@@ -7,7 +7,7 @@
 // - Only cache successful, high/medium confidence responses
 // - Respect per-tool cacheTtlSeconds from the tool registry
 // - Never cache refused, blocked, or error responses
-// - Cache key = normalized question hash + org_id + tool_used
+// - Cache key = normalized question hash + org_id + user_id + tool_used
 // =============================================================================
 
 interface CacheEntry {
@@ -57,11 +57,12 @@ function simpleHash(str: string): string {
 export function generateCacheKey(
   question: string,
   orgId: string,
+  userId: string,
   toolUsed: string
 ): string {
   const normalized = normalizeQuestion(question);
   const questionHash = simpleHash(normalized);
-  return `${orgId}:${toolUsed}:${questionHash}`;
+  return `${orgId}:${userId}:${toolUsed}:${questionHash}`;
 }
 
 // =============================================================================
@@ -72,9 +73,10 @@ export function generateCacheKey(
 export function getCachedResponse(
   question: string,
   orgId: string,
+  userId: string,
   toolUsed: string
 ): any | null {
-  const key = generateCacheKey(question, orgId, toolUsed);
+  const key = generateCacheKey(question, orgId, userId, toolUsed);
   const entry = cache.get(key);
 
   if (!entry) return null;
@@ -97,6 +99,7 @@ export function getCachedResponse(
 export function setCachedResponse(
   question: string,
   orgId: string,
+  userId: string,
   toolUsed: string,
   response: any,
   confidence: string,
@@ -105,7 +108,7 @@ export function setCachedResponse(
   // Don't cache low confidence, refused, or error responses
   if (confidence === 'low' || !response) return;
 
-  const key = generateCacheKey(question, orgId, toolUsed);
+  const key = generateCacheKey(question, orgId, userId, toolUsed);
 
   // Evict oldest entries if cache is full
   if (cache.size >= MAX_CACHE_SIZE) {

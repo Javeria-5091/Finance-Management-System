@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { NextResponse } from 'next/server';
-import { getAuthSupabase, isSqlSafe } from '@/lib/api-auth';
+import { getAuthSupabase, isSqlSafe, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
@@ -25,6 +25,8 @@ const ReconciliationSuggestionRequestSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const permissionCheck = await requirePermission('REPORT_READ');
+  if (permissionCheck instanceof Response) return permissionCheck;
   const requestId = generateRequestId();
   const requestMetadata = extractRequestMetadata(req);
   const startTime = Date.now();
@@ -39,6 +41,8 @@ export async function POST(req: Request) {
     const { data: profile } = await supabase.from('profiles').select('organization_id, role').eq('user_id', user.id).maybeSingle();
     const orgId = profile?.organization_id;
     if (!orgId) return NextResponse.json({ error: 'Organization context missing.' }, { status: 400 });
+    const aiLimitCheck = await enforceAiRequestLimits(supabase, user.id, orgId);
+    if (aiLimitCheck) return aiLimitCheck;
 
     // 2. Parse request
     const body = await req.json();
@@ -63,6 +67,7 @@ export async function POST(req: Request) {
         ORDER BY amount DESC
         LIMIT ${limit}
       ) t`,
+      p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false,
     });
 
     if (linesError) {
@@ -76,13 +81,11 @@ export async function POST(req: Request) {
         SELECT line_id, journal_description, debit_amount, credit_amount, posting_date, account_name
         FROM reporting.general_ledger
         WHERE organization_id = '${orgId}'
-        AND account_id IN (
-          SELECT linked_ledger_account_id FROM finance.financial_accounts WHERE id = '${financial_account_id}'
-        )
         AND posting_date >= NOW() - INTERVAL '30 days'
         ORDER BY posting_date DESC
         LIMIT 100
       ) t`,
+      p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false,
     });
 
     // 5. Deterministic matching algorithm (Spec 9.4: "Suggest matches — user confirms")

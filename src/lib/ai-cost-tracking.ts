@@ -133,7 +133,7 @@ export async function logAiAuditEvent(
   params: AiAuditEventParams
 ): Promise<string | null> {
   try {
-    const { data, error } = await supabase.rpc('log_ai_event', {
+    const { data, error } = await supabase.schema('audit').rpc('log_ai_event', {
       p_user_id: params.userId,
       p_user_email: params.userEmail || null,
       p_user_name: params.userName || null,

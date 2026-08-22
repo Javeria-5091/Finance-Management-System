@@ -37,7 +37,6 @@ interface CreditNoteRow {
   base_amount: number | null;
   status: string;
   created_at: string;
-  created_by: string | null;
   invoices: {
     invoice_number: string | null;
     client_name: string | null;
@@ -274,7 +273,6 @@ export default function CreditNotesPage() {
           exchange_rate: exchangeRate,
           base_amount: baseAmount,
           status: "DRAFT",
-          created_by: user.id,
         })
         .select("*, invoices(invoice_number, client_name)")
         .single();

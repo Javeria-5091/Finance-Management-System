@@ -12,7 +12,7 @@
 import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
-import { getAuthSupabase } from '@/lib/api-auth';
+import { getAuthSupabase, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
 import { DATABASE_SCHEMA } from '@/lib/schema';
 import {
   logAiAuditEvent,
@@ -62,9 +62,10 @@ interface TransactionSuggestion {
 // ─── Chart of Accounts for AI context (fetched from DB) ───
 async function fetchChartOfAccounts(supabase: any, orgId: string): Promise<string> {
   const { data } = await supabase
-    .from('chart_of_accounts')
+    .schema('finance').from('chart_of_accounts')
     .select('id, code, name, account_type')
     .eq('is_active', true)
+    .eq('organization_id', orgId)
     .order('code');
 
   if (!data || data.length === 0) {
@@ -105,6 +106,8 @@ async function fetchVendors(supabase: any, orgId: string): Promise<string> {
 }
 
 export async function POST(req: Request) {
+  const permissionCheck = await requirePermission('REPORT_READ');
+  if (permissionCheck instanceof Response) return permissionCheck;
   const requestId = generateRequestId();
   const requestMetadata = extractRequestMetadata(req);
   const startTime = Date.now();
@@ -126,6 +129,9 @@ export async function POST(req: Request) {
     if (!orgId) {
       return NextResponse.json({ error: 'Organization context missing.' }, { status: 400 });
     }
+
+    const aiLimitCheck = await enforceAiRequestLimits(supabase, user.id, orgId);
+    if (aiLimitCheck) return aiLimitCheck;
 
     // 2. Parse request
     const body = await req.json();

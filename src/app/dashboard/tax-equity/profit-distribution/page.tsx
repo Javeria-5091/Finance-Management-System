@@ -152,7 +152,6 @@ export default function ProfitDistributionPage() {
         reserve_amount: reserve,
         distributable_amount: profit - reserve,
         status: 'DRAFT',
-        created_by: user?.id,
       },
       {
         onSuccess: () => {

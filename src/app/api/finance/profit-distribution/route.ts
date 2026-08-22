@@ -194,23 +194,6 @@ export async function POST(req: NextRequest) {
     }
     const reference = journal.reference || `JE-PD-${journalId}`;
  
-    // 7. Update distribution status to POSTED
-    const { error: statusErr } = await supabase
-      .from('finance.profit_distributions')
-      .update({
-        status: 'POSTED',
-        posted_at: new Date().toISOString(),
-        journal_entry_id: journalId,
-        posted_by: auth.userId,
-        total_withholding_tax: whtCalculation.total_withholding_tax,
-        total_net_payment: whtCalculation.total_net_payment,
-      })
-      .eq('id', distribution_id);
- 
-    if (statusErr) {
-      console.error('Distribution status update failed:', statusErr.message);
-    }
- 
     // 8. Update distribution lines with WHT amounts
     for (const line of whtCalculation.lines) {
       await supabase

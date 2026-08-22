@@ -9,7 +9,7 @@
 import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
-import { getAuthSupabase, isSqlSafe } from '@/lib/api-auth';
+import { getAuthSupabase, isSqlSafe, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
@@ -30,6 +30,8 @@ const PolicyQaRequestSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const permissionCheck = await requirePermission('REPORT_READ');
+  if (permissionCheck instanceof Response) return permissionCheck;
   const requestId = generateRequestId();
   const requestMetadata = extractRequestMetadata(req);
   const startTime = Date.now();
@@ -44,6 +46,8 @@ export async function POST(req: Request) {
     const { data: profile } = await supabase.from('profiles').select('organization_id, role').eq('user_id', user.id).maybeSingle();
     const orgId = profile?.organization_id;
     if (!orgId) return NextResponse.json({ error: 'Organization context missing.' }, { status: 400 });
+    const aiLimitCheck = await enforceAiRequestLimits(supabase, user.id, orgId);
+    if (aiLimitCheck) return aiLimitCheck;
 
     // 2. Parse request
     const body = await req.json();
@@ -89,9 +93,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: 'Query safety check failed', reason: querySafety.reason }, { status: 500 });
       }
 
-      const { data: documents } = await supabase.rpc('execute_ai_readonly_query', {
-        query_string: fullQuery,
-      });
+      const { data: documents } = await supabase.rpc('execute_ai_readonly_query', { query_string: fullQuery, p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false });
 
       if (documents && Array.isArray(documents) && documents.length > 0) {
         policyContext = documents

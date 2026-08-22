@@ -121,7 +121,6 @@ export default function AccountsPage() {
         min_dual_approval_amount: form.min_dual_approval_amount ? parseFloat(form.min_dual_approval_amount) : null,
         is_default: form.is_default,
         notes: form.notes.trim() || null,
-        created_by: user?.id || '',
       },
       {
         onSuccess: () => {

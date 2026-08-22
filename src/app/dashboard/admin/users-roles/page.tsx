@@ -227,20 +227,20 @@ export default function UsersRolesPage() {
     setError(null);
     
     try {
-      const { data: rolesData, error: rolesErr } = await supabase.from("roles").select("*").order("level", { ascending: false });
+      const { data: rolesData, error: rolesErr } = await supabase.schema("core").from("roles").select("*").order("level", { ascending: false });
       if (rolesErr) throw new Error(`Failed to fetch roles: ${rolesErr.message}`);
 
-      const { data: permsData, error: permsErr } = await supabase.from("permissions").select("*").order("module", { ascending: true });
+      const { data: permsData, error: permsErr } = await supabase.schema("core").from("permissions").select("*").order("module", { ascending: true });
       if (permsErr) throw new Error(`Failed to fetch permissions: ${permsErr.message}`);
 
       const { data: urData, error: urErr } = await supabase
-        .from("user_roles")
+        .schema("core").from("user_roles")
         .select(`id, user_id, effective_from, effective_to, is_active, delegated_from, role_id, roles(display_name)`)
         .order("created_at", { ascending: false });
       if (urErr) throw new Error(`Failed to fetch user roles: ${urErr.message}`);
 
       //  NEW: Fetch ALL role permissions for counts
-      const { data: rpData, error: rpErr } = await supabase.from("role_permissions").select("role_id, permission_id");
+      const { data: rpData, error: rpErr } = await supabase.schema("core").from("role_permissions").select("role_id, permission_id");
       if (rpErr) throw new Error(`Failed to fetch role permissions: ${rpErr.message}`);
 
       // Fetch ALL users (including those without profiles) via RPC
@@ -322,7 +322,7 @@ export default function UsersRolesPage() {
     if (!newRole.display_name.trim()) { addToast("error", "Role name is required"); return; }
     setSaving(true);
     try {
-      const { error } = await supabase.from("roles").insert({
+      const { error } = await supabase.schema("core").from("roles").insert({
         display_name: newRole.display_name,
         name: newRole.display_name.toUpperCase().replace(/\s+/g, '_'),
         description: newRole.description || null,
@@ -355,7 +355,7 @@ export default function UsersRolesPage() {
       variant: "danger",
       onConfirm: async () => {
         try {
-          const { error } = await supabase.from("roles").delete().eq("id", roleId);
+          const { error } = await supabase.schema("core").from("roles").delete().eq("id", roleId);
           if (error) throw error;
           addToast("success", `Role "${roleName}" deleted`);
           fetchInitialData();
@@ -373,7 +373,7 @@ export default function UsersRolesPage() {
     setEditingRoleName(role?.display_name || "");
     setEditingRoleLevel(role?.level || 50); 
     
-    const { data } = await supabase.from("role_permissions").select("*").eq("role_id", roleId);
+    const { data } = await supabase.schema("core").from("role_permissions").select("*").eq("role_id", roleId);
     const initMatrix: Record<string, { scope: string; limit: string }> = {};
     
     if (data) {
@@ -419,14 +419,14 @@ export default function UsersRolesPage() {
       //  NEW: Also update role name and level if changed
       const role = roles.find(r => r.id === editingRoleId);
       if (role && (role.display_name !== editingRoleName || role.level !== editingRoleLevel)) {
-        const { error: updateErr } = await supabase.from("roles").update({
+        const { error: updateErr } = await supabase.schema("core").from("roles").update({
           display_name: editingRoleName,
           level: editingRoleLevel
         }).eq("id", editingRoleId);
         if (updateErr) throw new Error(`Failed to update role: ${updateErr.message}`);
       }
 
-      await supabase.from("role_permissions").delete().eq("role_id", editingRoleId);
+      await supabase.schema("core").from("role_permissions").delete().eq("role_id", editingRoleId);
       
       const inserts = Object.entries(matrix)
         .filter(([_, config]) => config.scope !== 'NONE')
@@ -445,7 +445,7 @@ export default function UsersRolesPage() {
           };
         });
 
-      if (inserts.length > 0) await supabase.from("role_permissions").insert(inserts);
+      if (inserts.length > 0) await supabase.schema("core").from("role_permissions").insert(inserts);
       addToast("success", `Permissions saved for "${editingRoleName}"`);
       setEditingRoleId(null);
       fetchInitialData(); // Refresh data to show updated counts
@@ -471,9 +471,9 @@ export default function UsersRolesPage() {
 
     setTransferring(true);
     try {
-      await supabase.from("user_roles").delete().eq("user_id", user?.id);
-      await supabase.from("user_roles").insert({ user_id: transferTargetUserId, role_id: ceoRole.id, created_by: user?.id });
-      await supabase.from("user_roles").insert({ user_id: user?.id, role_id: transferMyNewRole, created_by: user?.id });
+      await supabase.schema("core").from("user_roles").delete().eq("user_id", user?.id);
+      await supabase.schema("core").from("user_roles").insert({ user_id: transferTargetUserId, role_id: ceoRole.id, created_by: user?.id });
+      await supabase.schema("core").from("user_roles").insert({ user_id: user?.id, role_id: transferMyNewRole, created_by: user?.id });
       await supabase.from("profiles").update({ role: roles.find(r => r.id === transferMyNewRole)?.name || 'EMPLOYEE' }).eq("user_id", user?.id);
       await supabase.from("profiles").update({ role: ceoRole.name }).eq("user_id", transferTargetUserId);
 
@@ -552,10 +552,10 @@ export default function UsersRolesPage() {
 
       // Check if user already has a role
       if (targetUser?.hasRole) {
-        await supabase.from("user_roles").delete().eq("user_id", assignForm.user_id);
+        await supabase.schema("core").from("user_roles").delete().eq("user_id", assignForm.user_id);
       }
 
-      await supabase.from("user_roles").insert({
+      await supabase.schema("core").from("user_roles").insert({
         user_id: assignForm.user_id,
         role_id: assignForm.role_id,
         effective_from: assignForm.effective_from,
@@ -619,10 +619,10 @@ export default function UsersRolesPage() {
           }
 
           if (hasExistingRole) {
-            await supabase.from("user_roles").delete().eq("user_id", userId);
+            await supabase.schema("core").from("user_roles").delete().eq("user_id", userId);
           }
           
-          await supabase.from("user_roles").insert({ 
+          await supabase.schema("core").from("user_roles").insert({ 
             user_id: userId, 
             role_id: newRoleId, 
             effective_from: new Date().toISOString().split('T')[0],

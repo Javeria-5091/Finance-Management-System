@@ -182,7 +182,7 @@ export async function POST(req: Request) {
 
     const nowIso = new Date().toISOString();
     const complianceWarning = 'AI figures are draft. Cross-check with official reports before decisions.';
-    const enforceUserScope = !['CEO', 'FINANCE_HEAD', 'Admin', 'AUDITOR'].includes(userRole);
+    const enforceUserScope = true;
 
     // --- STEP 0: Intent Detection & Tool Routing (Spec 9.4 / 9.5 / 9.11) ---
     // ✅ Gap 6 + 7: prompt and model both come from the DB registry now.

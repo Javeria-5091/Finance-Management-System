@@ -23,8 +23,8 @@ export async function GET(req: NextRequest) {
     const status = searchParams.get('status') || '';
 
     let query = supabase
-      .from('payment_receipts')
-      .select('*, client:clients(id, name, client_code), allocations:payment_allocations(id, invoice_id, amount)', { count: 'exact' })
+      .schema('finance').from('payment_receipts')
+      .select('*, client:clients(id, name, client_code), allocations:payment_allocations(id, invoice_id, allocated_amount)', { count: 'exact' })
       .eq('organization_id', auth.orgId);
 
     if (search) {
@@ -42,7 +42,7 @@ export async function GET(req: NextRequest) {
     const to = from + pageSize - 1;
 
     const { data, error, count } = await query
-      .order('received_date', { ascending: false })
+      .order('payment_date', { ascending: false })
       .range(from, to);
 
     if (error) {
@@ -99,8 +99,8 @@ export async function POST(req: NextRequest) {
 
     // BUG-021 FIX: Validate financial account exists with org isolation
     const finAccount = getData(await supabase
-      .from('finance.financial_accounts')
-      .select('id, name, account_type, currency')
+      .schema('finance').from('financial_accounts')
+      .select('id, account_name, account_type, currency, linked_ledger_account_id')
       .eq('id', financial_account_id)
       .eq('organization_id', auth.orgId)
       .single());
@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
 
     // BUG-020 FIX: Get open period with org filter
     const period = getData(await supabase
-      .from('finance.accounting_periods')
+      .schema('finance').from('accounting_periods')
       .select('id')
       .eq('status', 'OPEN')
       .eq('organization_id', auth.orgId)
@@ -133,46 +133,26 @@ export async function POST(req: NextRequest) {
     // PARENT/SUMMARY account instead of the real 1210 "Client Receivables"
     // control account. Resolve by exact seeded code instead.
     const receivableAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'ASSET')
       .eq('is_active', true)
       .eq('code', '1210')
       .maybeSingle());
 
-    // Get bank/cash account from COA mapped to this financial account.
-    // This primary lookup was already deterministic (FK by
-    // finAccount.coa_account_id) -- left unchanged.
-    const bankCoaAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
-      .select('id, code, name')
-      .eq('account_type', 'ASSET')
-      .eq('is_active', true)
-      .eq('id', finAccount.coa_account_id || '')
-      .maybeSingle());
-
-    // BUG-014 FIX: this fallback (used only when the financial account has
-    // no coa_account_id configured) previously did an unordered fuzzy
-    // ILIKE match, which could resolve to a different bank/cash sub-account
-    // than intended and would silently pick a different one on a re-run if
-    // row order ever changed. If no FK mapping exists, fall back to the
-    // deterministic default cash/bank control account (code 1110, "Bank
-    // Account - PKR") rather than guessing from the financial account's
-    // display name; .order('code') on the name-based attempt keeps it
-    // deterministic if that path is ever reached first.
     const fallbackBankAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'ASSET')
       .eq('is_active', true)
       .eq('code', '1110')
       .maybeSingle());
 
-    const debitAccountId = bankCoaAccount?.id || fallbackBankAccount?.id;
+    const debitAccountId = finAccount.linked_ledger_account_id || fallbackBankAccount?.id;
 
     if (!receivableAccount || !debitAccountId) {
       return NextResponse.json({
-        error: 'Required COA accounts not found. Need Accounts Receivable (code 1210) and a Bank/Cash account (either mapped via financial_accounts.coa_account_id, or the default code 1110 "Bank Account - PKR").',
+        error: 'Required COA accounts not found. Need Accounts Receivable (code 1210) and a Bank/Cash account (mapped via financial_accounts.linked_ledger_account_id, or the default code 1110 "Bank Account - PKR").',
       }, { status: 400 });
     }
 
@@ -208,117 +188,48 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (totalAllocated > paymentAmount) {
+    if (Math.abs(totalAllocated - paymentAmount) > 0.01) {
       return NextResponse.json({
-        error: `Total allocations (${totalAllocated}) exceed payment amount (${paymentAmount})`,
+        error: `Total allocations (${totalAllocated}) must equal payment amount (${paymentAmount})`,
       }, { status: 400 });
     }
 
-    // BUG-001 FIX: Build journal lines for RPC (no manual header/line inserts)
-    // Payment Receipt: DR Bank/Cash, CR Receivable
-    const rpcLines = [
-      {
-        account_id: debitAccountId,
-        debit_amount: paymentAmount,
-        credit_amount: 0,
-        description: `Cash/Bank: Payment from ${client.name} - ${receiptNumber}`,
-      },
-      {
-        account_id: receivableAccount.id,
-        debit_amount: 0,
-        credit_amount: paymentAmount,
-        description: `Receivable reduced: Payment from ${client.name} - ${receiptNumber}`,
-      },
-    ];
-
-    // BUG-001 FIX: Single atomic RPC call with CORRECT signature
-    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
-      p_description: `Payment Receipt: ${receiptNumber} from ${client.name}`,
-      p_transaction_date: received_date || new Date().toISOString().split('T')[0],
-      p_period_id: period.id,
-      p_lines: JSON.stringify(rpcLines),
+    // Atomic DB transaction: receipt + allocations + invoice balances + GL posting.
+    const { data: atomicResult, error: atomicError } = await supabase.schema('finance').rpc('post_payment_receipt_atomic', {
+      p_client_id: client_id,
+      p_amount: paymentAmount,
       p_currency: currency || 'PKR',
       p_exchange_rate: exchange_rate || 1,
-      p_source_type: 'PAYMENT_RECEIPT',
-      p_source_id: receiptNumber,
+      p_payment_date: received_date || new Date().toISOString().split('T')[0],
+      p_payment_method: payment_method === 'ONLINE' ? 'PLATFORM' : (payment_method || 'BANK_TRANSFER'),
+      p_reference: reference || null,
+      p_financial_account_id: financial_account_id,
+      p_notes: notes || null,
+      p_allocations: allocationRecords,
     });
 
-    if (postErr || !journalId) {
-      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
+    if (atomicError || !atomicResult) {
+      return NextResponse.json({ error: 'Payment receipt transaction failed: ' + (atomicError?.message || 'Unknown error') }, { status: 500 });
     }
 
-    // Fetch the created journal to get reference
+    const receiptId = atomicResult.receipt_id;
+    const journalId = atomicResult.journal_id;
+    const postedReceiptNumber = atomicResult.receipt_number;
     const journal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference')
       .eq('id', journalId)
+      .eq('organization_id', auth.orgId)
       .single());
-    // C6 FIX: Null guard
-    if (!journal) {
-      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
-    }
-    const glReference = journal.reference || `JE-PMTR-${journalId}`;
+    if (!journal) return NextResponse.json({ error: 'Payment posted but journal could not be read back.' }, { status: 500 });
 
-    // Create payment receipt record
     const { data: receipt, error: receiptErr } = await supabase
-      .from('payment_receipts')
-      .insert({
-        receipt_number: receiptNumber,
-        client_id,
-        amount: paymentAmount,
-        currency: currency || 'PKR',
-        exchange_rate: exchange_rate || 1,
-        received_date: received_date || new Date().toISOString().split('T')[0],
-        payment_method: payment_method || 'BANK_TRANSFER',
-        reference: reference || null,
-        financial_account_id,
-        notes: notes || null,
-        amount_allocated: totalAllocated,
-        unallocated_amount: paymentAmount - totalAllocated,
-        status: totalAllocated >= paymentAmount ? 'FULLY_ALLOCATED' : 'PARTIALLY_ALLOCATED',
-        journal_entry_id: journalId,
-        organization_id: auth.orgId,
-        created_by: auth.userId,
-      })
-      .select()
+      .schema('finance').from('payment_receipts')
+      .select('*')
+      .eq('id', receiptId)
+      .eq('organization_id', auth.orgId)
       .single();
-
-    if (receiptErr) {
-      console.error('Payment receipt creation failed:', receiptErr.message);
-    }
-
-    // Create allocation records and update invoice amounts
-    if (allocationRecords.length > 0 && receipt) {
-      for (const alloc of allocationRecords) {
-        // Insert allocation
-        await supabase.from('payment_allocations').insert({
-          payment_receipt_id: receipt.id,
-          invoice_id: alloc.invoice_id,
-          amount: alloc.amount,
-          allocated_by: auth.userId,
-          organization_id: auth.orgId,
-        });
-
-        // Update invoice amount_paid
-        const invoice = getData(await supabase
-          .from('invoices')
-          .select('id, total_amount, amount_paid')
-          .eq('id', alloc.invoice_id)
-          .single());
-
-        if (invoice) {
-          const newPaid = Number(invoice.amount_paid || 0) + alloc.amount;
-          const total = Number(invoice.total_amount);
-          const newStatus = newPaid >= total ? 'PAID' : 'PARTIALLY_PAID';
-
-          await supabase.from('invoices').update({
-            amount_paid: newPaid,
-            status: newStatus,
-            payment_date: newPaid >= total ? new Date().toISOString() : null,
-          }).eq('id', alloc.invoice_id);
-        }
-      }
-    }
+    if (receiptErr || !receipt) return NextResponse.json({ error: 'Payment posted but receipt could not be read back.' }, { status: 500 });
 
     // BUG-023 FIX: surface a failed audit write instead of only
     // console-logging it (Spec 8.1).
@@ -328,14 +239,14 @@ export async function POST(req: NextRequest) {
         p_user_id: auth.userId,
         p_action: 'PAYMENT_RECEIVED',
         p_entity_type: 'payment_receipt',
-        p_entity_id: receipt?.id || receiptNumber,
-        p_description: `Payment received: ${receiptNumber} from ${client.name} - ${currency || 'PKR'} ${paymentAmount}`,
+        p_entity_id: receipt?.id || postedReceiptNumber,
+        p_description: `Payment received: ${postedReceiptNumber} from ${client.name} - ${currency || 'PKR'} ${paymentAmount}`,
         p_previous_status: null,
         p_new_status: receipt?.status || 'RECEIVED',
         p_source_module: 'invoice',
         p_severity: 'high',
         p_new_values: {
-          receipt_number: receiptNumber,
+          receipt_number: postedReceiptNumber,
           amount: paymentAmount,
           client_id,
           allocated: totalAllocated,
@@ -349,13 +260,15 @@ export async function POST(req: NextRequest) {
       auditLogFailed = true;
     }
 
+    const glReference = journal.reference;
+
     return NextResponse.json({
       success: true,
       receipt,
       journalId: journal.id,
       glReference,
       allocations: allocationRecords.length,
-      message: `Payment receipt ${receiptNumber} recorded and posted to GL`,
+      message: `Payment receipt ${postedReceiptNumber} recorded and posted to GL`,
       audit_log_warning: auditLogFailed ? 'Payment recorded but the audit log entry failed to write. Please notify an administrator.' : undefined,
     });
   } catch (err: any) {

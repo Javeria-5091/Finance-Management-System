@@ -15,8 +15,8 @@
 import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
-import { getAuthSupabase } from '@/lib/api-auth';
-import { canUserUseTool } from '@/lib/ai-tool-registry';
+import { getAuthSupabase, enforceAiRequestLimits } from '@/lib/api-auth';
+import { requirePermission } from '@/lib/api-auth';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
@@ -94,6 +94,9 @@ export async function POST(req: Request) {
       );
     }
 
+    const aiLimitCheck = await enforceAiRequestLimits(supabase, user.id, orgId);
+    if (aiLimitCheck) return aiLimitCheck;
+
     // 2. Parse and validate request
     const body = await req.json();
     const parsed = ReportNarrativeRequestSchema.safeParse(body);
@@ -106,9 +109,9 @@ export async function POST(req: Request) {
 
     const { report_type, data, filters, period, currency, context } = parsed.data;
 
-    // 3. Permission check
-    const permissionCheck = canUserUseTool('run_saved_report', ['REPORT_READ']);
-    if (!permissionCheck.allowed) {
+    // 3. Permission check — server-side only. Never trust the client role/tool registry.
+    const permissionCheck = await requirePermission('REPORT_READ');
+    if (permissionCheck instanceof NextResponse) {
       await logAiAuditEvent(supabase, {
         userId: user.id,
         userEmail: user.email,

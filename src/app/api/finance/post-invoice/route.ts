@@ -137,6 +137,7 @@ export async function POST(req: NextRequest) {
       .select('id, code, name')
       .eq('account_type', 'ASSET')
       .eq('is_active', true)
+      .eq('organization_id', auth.orgId)
       .eq('code', '1210')
       .maybeSingle());
 
@@ -145,6 +146,7 @@ export async function POST(req: NextRequest) {
       .select('id, code, name')
       .eq('account_type', 'REVENUE')
       .eq('is_active', true)
+      .eq('organization_id', auth.orgId)
       .eq('code', '4110')
       .maybeSingle());
 
@@ -153,6 +155,7 @@ export async function POST(req: NextRequest) {
       .select('id, code, name')
       .eq('account_type', 'LIABILITY')
       .eq('is_active', true)
+      .eq('organization_id', auth.orgId)
       .eq('code', '2220')
       .maybeSingle());
 
@@ -222,18 +225,6 @@ export async function POST(req: NextRequest) {
     const reference = journal.reference || `JE-INV-${journalId}`;
     const totalDebit = journal.total_debit || totalAmount;
     const totalCredit = journal.total_credit || totalAmount;
-
-    // 10. Update invoice status
-    const { error: statusErr } = await supabase.from('invoices').update({
-      status: 'POSTED',
-      posted_at: new Date().toISOString(),
-      journal_entry_id: journalId,
-      posted_by: auth.userId,
-    }).eq('id', invoiceId);
-
-    if (statusErr) {
-      console.error('Invoice status update failed:', statusErr.message);
-    }
 
     // 11. Audit log
     let auditLogFailed = false;

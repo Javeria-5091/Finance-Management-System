@@ -25,7 +25,7 @@ export default function ExportManager({
   getCsvData,
   getPdfData,
   activeFilters = {},
-  hasPermission = true,
+  hasPermission = false,
 }: ExportManagerProps) {
   const [open, setOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -35,7 +35,8 @@ export default function ExportManager({
     setExporting(true);
     try {
       const csv = getCsvData();
-      const rowCount = csv.split('\n').length - 1; // approximate row count
+      const rowCount = csv.split('\n').length - 1;
+      if (rowCount > 10000) throw new Error('Export is limited to 10,000 rows. Apply filters and try again.');
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
       downloadBlob(blob, `${reportName.replace(/\s+/g, "_")}_${dateStamp()}.csv`);
       // ✅ FIX: Use logExportEvent RPC (writes to audit.export_events per Spec 8.2)

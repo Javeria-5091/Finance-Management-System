@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
       await supabase
         .from('finance.accounting_periods')
         .select('id, status, start_date, end_date')
-        .eq('id', journal.fiscal_period_id || journal.accounting_period_id)
+        .eq('id', journal.period_id)
         .eq('organization_id', orgId)   // ← SECURITY FIX
         .maybeSingle()
     );

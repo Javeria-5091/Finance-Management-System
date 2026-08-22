@@ -18,13 +18,13 @@ export async function GET(req: NextRequest) {
     const prefix = searchParams.get('prefix') || '';
  
     let query = supabase
-      .from('core.numbering_sequences')
+      .schema('finance').from('numbering_sequences')
       .select('*')
       .eq('organization_id', auth.orgId)
-      .order('sequence_code', { ascending: true });
+      .order('sequence_type', { ascending: true });
  
     if (prefix) {
-      query = query.ilike('sequence_code', `${sanitizeSearch(prefix)}%`);
+      query = query.ilike('sequence_type', `${sanitizeSearch(prefix)}%`);
     }
  
     const { data, error } = await query;
@@ -41,13 +41,13 @@ export async function GET(req: NextRequest) {
  
 // ─── POST: Create or update numbering sequence ───
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('SETTINGS_UPDATE');
+  const auth = await requirePermission('SETTINGS_MANAGE');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
  
   try {
     const body = await req.json();
-    const { action, sequence_code, prefix, description, current_number, padding, reset_period } = body;
+    const { action, sequence_code, prefix, description, current_number, padding, reset_period, format } = body;
  
     if (action === 'create') {
       if (!sequence_code || !prefix) {
@@ -56,9 +56,9 @@ export async function POST(req: NextRequest) {
  
       // Check if sequence already exists
       const existing = getData(await supabase
-        .from('core.numbering_sequences')
+        .schema('finance').from('numbering_sequences')
         .select('id')
-        .eq('sequence_code', sequence_code)
+        .eq('sequence_type', sequence_code)
         .eq('organization_id', auth.orgId)
         .maybeSingle());
  
@@ -67,15 +67,14 @@ export async function POST(req: NextRequest) {
       }
  
       const { data, error } = await supabase
-        .from('core.numbering_sequences')
+        .schema('finance').from('numbering_sequences')
         .insert({
-          sequence_code,
+          sequence_type: sequence_code,
           prefix,
-          description: description || null,
           current_number: current_number || 0,
           padding: padding || 5,
-          reset_period: reset_period || 'YEARLY',
-          is_active: true,
+          reset_per_period: reset_period === 'PERIOD',
+          format: format || '{PREFIX}{NUMBER}',
           organization_id: auth.orgId,
           created_by: auth.userId,
         })
@@ -109,15 +108,15 @@ export async function POST(req: NextRequest) {
  
       const updates: Record<string, any> = {};
       if (prefix !== undefined) updates.prefix = prefix;
-      if (description !== undefined) updates.description = description;
       if (current_number !== undefined) updates.current_number = current_number;
       if (padding !== undefined) updates.padding = padding;
-      if (reset_period !== undefined) updates.reset_period = reset_period;
+      if (reset_period !== undefined) updates.reset_per_period = reset_period === 'PERIOD';
+      if (format !== undefined) updates.format = format;
  
       const { data, error } = await supabase
-        .from('core.numbering_sequences')
+        .schema('finance').from('numbering_sequences')
         .update(updates)
-        .eq('sequence_code', sequence_code)
+        .eq('sequence_type', sequence_code)
         .eq('organization_id', auth.orgId)
         .select()
         .single();
@@ -148,9 +147,9 @@ export async function POST(req: NextRequest) {
       }
  
       const { data, error } = await supabase
-        .from('core.numbering_sequences')
+        .schema('finance').from('numbering_sequences')
         .update({ current_number: 0 })
-        .eq('sequence_code', sequence_code)
+        .eq('sequence_type', sequence_code)
         .eq('organization_id', auth.orgId)
         .select()
         .single();
