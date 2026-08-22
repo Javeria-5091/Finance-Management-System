@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
-import { postInvoiceSchema, validateBody } from '@/lib/validations';
+import { postInvoiceSchema, validateBody, validateExchangeRate } from '@/lib/validations';
 import { checkBudgetForTransaction, createBudgetAlertNotifications } from '@/services/budget-check.service';
 
 function getData<T = any>(res: any): T | null {
@@ -51,6 +51,12 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
+    // BUG-008 FIX: validate exchange rate for non-PKR currencies
+    const rateError = validateExchangeRate(invoice.currency, invoice.exchange_rate);
+    if (rateError) {
+      return NextResponse.json({ error: rateError }, { status: 400 });
+    }
+
     // 2. Idempotency check
     const existingJournal = getData(await supabase
       .from('finance.journal_entries')
@@ -78,6 +84,8 @@ export async function POST(req: NextRequest) {
         amount: Number(invoice.total_amount) || 0,
         currency: invoice.currency || 'PKR',
         organization_id: orgId,
+        // BUG-007 FIX: pass server-side authenticated supabase client.
+        supabaseClient: supabase,
       });
 
       // Create notifications if budget thresholds are relevant
@@ -86,7 +94,8 @@ export async function POST(req: NextRequest) {
           budgetCheck.notifications,
           orgId,
           auth.userId,
-          invoiceId
+          invoiceId,
+          supabase,
         );
       }
 

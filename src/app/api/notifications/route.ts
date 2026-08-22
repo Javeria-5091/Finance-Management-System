@@ -89,6 +89,31 @@ export async function POST(req: NextRequest) {
     if (targetUserId !== auth.userId && auth.role !== 'CEO' && auth.role !== 'Admin') {
       return NextResponse.json({ error: 'You can only create notifications for yourself' }, { status: 403 });
     }
+
+    // BUG FIX (Audit Finding C-3, Critical): cross-tenant notification
+    // injection. The previous check allowed CEO/Admin to create notifications
+    // for ANY user_id — including users in OTHER organizations. A CEO of
+    // Org A could write notifications into Org B users' inboxes (Spec 4.2
+    // tenant isolation violation + Spec 7 information-leak vector).
+    //
+    // Fix: when targetUserId differs from the caller, verify the target
+    // belongs to the caller's organization before inserting. We do this
+    // by looking up the profile and checking organization_id matches.
+    if (targetUserId !== auth.userId) {
+      const { data: targetProfile } = await supabase
+        .from('profiles')
+        .select('organization_id')
+        .eq('user_id', targetUserId)
+        .maybeSingle();
+
+      if (!targetProfile) {
+        return NextResponse.json({ error: 'Target user not found' }, { status: 404 });
+      }
+      if (auth.orgId && targetProfile.organization_id !== auth.orgId) {
+        // Fail closed — do NOT leak that the user exists in another org.
+        return NextResponse.json({ error: 'Target user not found' }, { status: 404 });
+      }
+    }
  
     const { data, error } = await supabase
       .from('core.notifications')

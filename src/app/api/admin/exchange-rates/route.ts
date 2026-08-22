@@ -64,16 +64,33 @@ export async function POST(req: NextRequest) {
       const results: any[] = [];
  
       for (const rate of rates) {
+        // BUG FIX (Audit Finding C-2, Critical): the previous destructure
+        // was `const { ..., rate:any, ... } = rate;` — JS destructuring
+        // interprets `rate:any` as "rename the `rate` property to a local
+        // variable called `any`", so the `rate` variable was NEVER defined
+        // in this scope. The subsequent `if (!rate)` test was checking the
+        // loop variable (always truthy), and `Number(rate)` at the insert
+        // evaluated `Number(<object>)` → NaN. Exchange rates were silently
+        // stored as NaN, breaking every downstream currency conversion.
+        //
+        // Fix: rename the destructured property to `rateValue` and use that
+        // consistently for both the truthiness check and the insert.
         const {
-          from_currency, to_currency, rate:any, effective_date,
+          from_currency, to_currency, rate: rateValue, effective_date,
           source, valid_until, notes,
         } = rate;
- 
-        if (!from_currency || !to_currency || !rate || !effective_date) {
+
+        if (!from_currency || !to_currency || rateValue === undefined || rateValue === null || !effective_date) {
           results.push({ error: 'from_currency, to_currency, rate, and effective_date are required', rate });
           continue;
         }
- 
+
+        const numericRate = Number(rateValue);
+        if (isNaN(numericRate) || numericRate <= 0) {
+          results.push({ error: 'rate must be a positive number', rate });
+          continue;
+        }
+
         // Spec: Exchange rates are entered manually by authorized user
         // Deactivate previous rates for same currency pair
         await supabase
@@ -83,13 +100,13 @@ export async function POST(req: NextRequest) {
           .eq('to_currency', to_currency)
           .eq('is_active', true)
           .eq('organization_id', auth.orgId);
- 
+
         const { data, error } = await supabase
           .from('core.exchange_rates')
           .insert({
             from_currency,
             to_currency,
-            rate: Number(rate),
+            rate: numericRate,
             effective_date,
             source: source || 'MANUAL',
             valid_until: valid_until || null,
@@ -100,7 +117,7 @@ export async function POST(req: NextRequest) {
           })
           .select()
           .single();
- 
+
         results.push(data || { error: error?.message });
       }
  

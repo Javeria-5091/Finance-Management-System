@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
-import { paymentReceiptSchema, validateBody, sanitizeSearch } from '@/lib/validations';
+import { paymentReceiptSchema, validateBody, sanitizeSearch, validateExchangeRate } from '@/lib/validations';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -79,6 +79,12 @@ export async function POST(req: NextRequest) {
 
     const paymentAmount = Number(amount);
 
+    // BUG-008 FIX: validate exchange rate for non-PKR currencies
+    const rateError = validateExchangeRate(currency, exchange_rate);
+    if (rateError) {
+      return NextResponse.json({ error: rateError }, { status: 400 });
+    }
+
     // Validate client exists
     const client = getData(await supabase
       .from('clients')
@@ -104,7 +110,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Generate receipt number
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'PMT-RC' });
+    const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'PMT-RC' });
     const receiptNumber = numData || `PMT-RC-${Date.now().toString().slice(-6)}`;
 
     // BUG-020 FIX: Get open period with org filter

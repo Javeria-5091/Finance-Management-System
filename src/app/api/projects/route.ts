@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
+import { sanitizeSearch } from '@/lib/validations';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -27,7 +28,9 @@ export async function GET(req: NextRequest) {
       .eq('organization_id', auth.orgId);
  
     if (search) {
-      query = query.or(`name.ilike.%${search}%,project_code.ilike.%${search}%,description.ilike.%${search}%`);
+      // BUG-010 FIX (High): sanitize search term to prevent PostgREST filter injection.
+      const s = sanitizeSearch(search);
+      query = query.or(`name.ilike.%${s}%,project_code.ilike.%${s}%,description.ilike.%${s}%`);
     }
     if (status) {
       query = query.eq('status', status);
@@ -96,7 +99,7 @@ export async function POST(req: NextRequest) {
     }
  
     // Generate project code
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'PRJ' });
+    const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'PRJ' });
     const projectCode = numData || `PRJ-${Date.now().toString().slice(-6)}`;
  
     const { data: project, error } = await supabase

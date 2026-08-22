@@ -87,7 +87,7 @@ export async function POST(req: NextRequest) {
       }
  
       // Get next batch number
-      const { data: numData } = await supabase.rpc('get_next_number', {
+      const { data: numData } = await supabase.schema('finance').rpc('get_next_number', {
         p_type: 'OBI',
       });
       const batchId = numData || `OBI-${Date.now().toString().slice(-6)}`;
@@ -119,7 +119,7 @@ export async function POST(req: NextRequest) {
       }
  
       // BUG-001 FIX: Use `finance.post_journal_entry` (with schema prefix) and CORRECT parameter names
-      const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+      const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
         p_description: 'Opening Balance Import',
         p_transaction_date: new Date().toISOString().split('T')[0],
         p_period_id: periodId,

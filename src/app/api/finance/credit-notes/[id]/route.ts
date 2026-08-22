@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { validateExchangeRate } from '@/lib/validations';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
@@ -140,6 +141,11 @@ export async function POST(
 
     if (!creditNote) {
       return NextResponse.json({ error: 'Credit note not found' }, { status: 404 });
+    }
+    // BUG-008 FIX: validate exchange rate for non-PKR currencies before posting
+    const rateError = validateExchangeRate(creditNote.currency, creditNote.exchange_rate);
+    if (rateError) {
+      return NextResponse.json({ error: rateError }, { status: 400 });
     }
 
     if (creditNote.status !== 'APPROVED') {

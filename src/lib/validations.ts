@@ -146,12 +146,29 @@ export const notificationCreateSchema = z.object({
 });
  
 // ─── H4: Sanitize PostgREST search strings ───
-// Escapes characters that have special meaning in PostgREST filter syntax
+// Escapes characters that have special meaning in PostgREST filter syntax.
+//
+// PostgREST uses '.', ',', '(', ')' as structural separators inside the
+// `.or()` / `.filter()` syntax. A user-supplied search term containing any of
+// those characters could otherwise be parsed as additional filter clauses
+// (PostgREST filter injection), causing either unexpected query results or
+// errors. Single quotes must be doubled for SQL string literals; '%' and '_'
+// are ILIKE wildcards that must be backslash-escaped so a user searching for
+// "100%_done" doesn't match every record.
+//
+// Backslash itself must be escaped FIRST so the later escapes are not
+// double-escaped by an earlier backslash.
 export function sanitizeSearch(input: string): string {
+  if (typeof input !== 'string') return '';
   return input
-    .replace(/%/g, '\%')
-    .replace(/_/g, '\_')
-    .replace(/'/g, "''");
+    .replace(/\\/g, '\\\\')   // backslash first — must escape the escape char itself
+    .replace(/%/g, '\\%')     // ILIKE wildcard
+    .replace(/_/g, '\\_')     // ILIKE single-char wildcard
+    .replace(/'/g, "''")      // SQL string literal escape (doubled quote)
+    .replace(/,/g, '\\,')     // PostgREST or-filter separator
+    .replace(/\./g, '\\.')    // PostgREST operator separator
+    .replace(/\(/g, '\\(')    // PostgREST in()/is() grouping
+    .replace(/\)/g, '\\)');   // PostgREST in()/is() grouping
 }
  
 // ─── Helper: Validate request body and return error or parsed data ───
@@ -165,4 +182,38 @@ export function validateBody<T>(schema: z.ZodSchema<T>, body: unknown): { succes
     success: false,
     error: firstError ? `${firstError.path.join('.')}: ${firstError.message}` : 'Invalid request data',
   };
+}
+
+// ─── Currency / exchange-rate validation helper (BUG-008 FIX) ────────────
+// Spec 11.2 requires explicit input schemas with allowed values; spec 6.1
+// forbids inventing business rules but Section 13.1 requires "Original-currency
+// balances and transactions alongside consolidated PKR equivalents and
+// effective conversion rates". A non-PKR transaction with no exchange rate
+// silently defaults to 1.0 across the posting routes, producing wrong PKR
+// amounts in the GL. This helper is called from every posting route to enforce
+// that:
+//   - PKR transactions may omit the rate (defaults to 1)
+//   - Non-PKR transactions MUST provide a positive exchange_rate > 0
+// The caller is expected to have already fetched the source record
+// (expense / income / invoice / vendor_bill / distribution / journal).
+//
+// Returns null when acceptable, or an error string suitable for
+// NextResponse.json({ error }, { status: 400 }).
+export function validateExchangeRate(
+  currency: string | null | undefined,
+  exchangeRate: number | null | undefined
+): string | null {
+  const cur = (currency || 'PKR').toUpperCase();
+  const rate = Number(exchangeRate);
+  if (cur === 'PKR') {
+    // PKR is the base currency; rate may be omitted or must be 1
+    if (exchangeRate !== undefined && exchangeRate !== null && rate !== 1) {
+      return `Exchange rate for PKR (base currency) must be 1, received ${rate}`;
+    }
+    return null;
+  }
+  if (!exchangeRate || isNaN(rate) || rate <= 0) {
+    return `Exchange rate is required for non-PKR currency ${cur} (received: ${exchangeRate ?? 'undefined'})`;
+  }
+  return null;
 }

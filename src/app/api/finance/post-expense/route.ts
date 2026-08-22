@@ -3,7 +3,7 @@ import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
 import { checkBudgetForTransaction, createBudgetAlertNotifications } from '@/services/budget-check.service';
-import { postExpenseSchema, validateBody } from '@/lib/validations';
+import { postExpenseSchema, validateBody, validateExchangeRate } from '@/lib/validations';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -46,7 +46,15 @@ export async function POST(req: NextRequest) {
     if (expense.status !== 'APPROVED') {
       return NextResponse.json({ error: 'Only APPROVED expenses can be posted. Current: ' + expense.status }, { status: 400 });
     }
- 
+
+    // BUG-008 FIX (High): Spec 13.1 requires correct PKR consolidation. A non-PKR
+    // expense with no exchange rate silently defaults to 1.0 below, producing
+    // wrong PKR amounts in the GL. Reject before posting if rate is missing.
+    const rateError = validateExchangeRate(expense.currency, expense.exchange_rate);
+    if (rateError) {
+      return NextResponse.json({ error: rateError }, { status: 400 });
+    }
+
     // 2. Already posted? (Idempotency check)
     const existingJournal = getData(await supabase
       .from('finance.journal_entries')
@@ -73,6 +81,10 @@ export async function POST(req: NextRequest) {
       amount: expense.amount,
       currency: expense.currency || 'PKR',
       organization_id: orgId,
+      // BUG-007 FIX: pass server-side authenticated supabase client so budget
+      // checks run with the correct RLS context (browser client has no
+      // session in server context).
+      supabaseClient: supabase,
     });
  
     // Create budget threshold alert notifications (Spec 13.4)
@@ -81,7 +93,8 @@ export async function POST(req: NextRequest) {
         budgetCheck.notifications,
         orgId,
         auth.userId,
-        expenseId
+        expenseId,
+        supabase,
       );
     }
  
@@ -269,7 +282,11 @@ export async function POST(req: NextRequest) {
       },
     ];
  
-    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+    // BUG-002 FIX (Critical): use .schema('finance').rpc('post_journal_entry', ...)
+    // — passing 'finance.post_journal_entry' as the rpc() name string is NOT
+    // schema-qualified; PostgREST treats the entire dotted string as the
+    // function name and fails to find it in the default (public) schema.
+    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: `Expense: ${expense.title}${expense.category ? ` [${expense.category}]` : ''}`,
       p_transaction_date: expense.expense_date,
       p_period_id: period.id,

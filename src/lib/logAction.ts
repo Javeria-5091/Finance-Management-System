@@ -1,12 +1,30 @@
 // src/lib/logAction.ts
 // ✅ REVISED: Unified audit logging per Spec v1.3 Section 8, aligned with
 // 01_audit_schema_v1_3_spec.sql (project/amount filters + AI field group).
-import { supabase } from "./supabase";
+//
+// BUG-005 FIX (CRITICAL): logAction previously imported the BROWSER supabase
+// client from @/lib/supabase and called supabase.auth.getUser() to auto-detect
+// the user. When called from an API route, the browser client has no session,
+// getUser() returns null, and EVERY audit log row written from the API layer
+// has user_id = null — losing actor identity for the entire API surface
+// (Spec 8.1: "every action must be attributable to a user").
+//
+// FIX: every function now accepts an optional `supabaseClient` parameter.
+//   - API routes pass their server-side authenticated supabase client
+//     (returned from getAuthSupabase()), so the same request-scoped auth
+//     context that performed the business action also writes the audit row.
+//   - Frontend code (where browser supabase has a real session) continues
+//     to call logAction() with no supabaseClient — backward compatible.
+//   - When supabaseClient is provided, userId/userEmail/userName passed
+//     explicitly by the caller ALWAYS take precedence over auto-detection
+//     (caller is the authoritative source of identity in server context).
+//
+// Schema-qualified RPC calls (`audit.log_action` etc.) are invoked via
+// `.schema('audit').rpc('fn_name', ...)` — passing 'audit.fn_name' as the
+// rpc() name string does not resolve through PostgREST and silently fails.
+import { supabase as browserSupabase } from "./supabase";
+import type { SupabaseClient } from '@supabase/supabase-js';
 
-// ✅ FIX: schema-qualified Postgres functions must be invoked through
-// `.schema('audit').rpc('fn_name', ...)`. Passing 'audit.fn_name' as the
-// rpc() name string (as the previous version did) does not resolve through
-// PostgREST and every call was silently failing.
 const AUDIT_SCHEMA = "audit";
 
 // ═══════════════════════════════════════════════════════════════
@@ -43,6 +61,11 @@ export interface LogActionParams {
   userId?: string | null;
   userEmail?: string | null;
   userName?: string | null;
+  // ✅ BUG-005 FIX: server-side authenticated supabase client.
+  // When passed by an API route, audit logging uses the request-scoped
+  // auth context (correct user identity, correct RLS). When omitted, the
+  // browser supabase client is used (correct for frontend callers).
+  supabaseClient?: SupabaseClient<any, any, any> | null;
 }
 
 export async function logAction({
@@ -73,19 +96,29 @@ export async function logAction({
   userId,
   userEmail,
   userName,
+  supabaseClient = null,
 }: LogActionParams): Promise<void> {
+  // Use the server-side client when provided (API-route caller); otherwise
+  // fall back to the browser client (frontend caller). This is the BUG-005
+  // fix: the browser client has no authenticated session in server context,
+  // so every audit row written from an API route previously had a NULL
+  // user_id, breaking Spec 8.1 actor attribution.
+  const supabase = supabaseClient || browserSupabase;
+
   try {
     let finalUserId: string | null = userId ?? null;
     let finalUserEmail: string | null = userEmail ?? null;
     let finalUserName: string | null = userName ?? null;
 
-    // Auto-detect user if not provided
+    // Auto-detect user if not provided. When the caller passes an explicit
+    // userId (which every API route does — they already have it from
+    // getAuthUser()), we skip this lookup entirely.
     if (!finalUserId || !finalUserEmail) {
       try {
         const { data: { user } } = await supabase.auth.getUser();
         if (user) {
-          finalUserId = user.id;
-          finalUserEmail = user.email ?? null;
+          if (!finalUserId) finalUserId = user.id;
+          if (!finalUserEmail) finalUserEmail = user.email ?? null;
         }
       } catch {
         // Server-side or no auth context — continue without user
@@ -205,7 +238,9 @@ export async function logSecurityEvent(params: {
   details?: Record<string, any>;
   userId?: string | null;
   userEmail?: string | null;
+  supabaseClient?: SupabaseClient<any, any, any> | null;
 }): Promise<void> {
+  const supabase = params.supabaseClient || browserSupabase;
   try {
     let finalUserId = params.userId ?? null;
     let finalUserEmail = params.userEmail ?? null;
@@ -249,19 +284,25 @@ export async function logExportEvent(params: {
   filters?: Record<string, any>;
   rowCount?: number;
   fileSizeBytes?: number;
+  userId?: string | null;
+  userEmail?: string | null;
+  supabaseClient?: SupabaseClient<any, any, any> | null;
 }): Promise<void> {
+  const supabase = params.supabaseClient || browserSupabase;
   try {
-    let finalUserId: string | null = null;
-    let finalUserEmail: string | null = null;
+    let finalUserId: string | null = params.userId ?? null;
+    let finalUserEmail: string | null = params.userEmail ?? null;
     let finalUserName: string | null = null;
 
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        finalUserId = user.id;
-        finalUserEmail = user.email ?? null;
-      }
-    } catch { /* continue */ }
+    if (!finalUserId) {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          finalUserId = user.id;
+          finalUserEmail = user.email ?? null;
+        }
+      } catch { /* continue */ }
+    }
 
     if (finalUserId) {
       const { data: profile } = await supabase
@@ -296,10 +337,10 @@ export async function logExportEvent(params: {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ✅ NEW: AI event logging — fills the Spec 8.1 "AI" field group and
-// Spec 8.2 "AI question, generated query/tool, result access, document
-// extraction, recommendation acceptance/rejection, and detected policy
-// violation" requirement, which had no writer anywhere in the frontend.
+// AI event logging — fills the Spec 8.1 "AI" field group and Spec 8.2
+// "AI question, generated query/tool, result access, document extraction,
+// recommendation acceptance/rejection, and detected policy violation"
+// requirement, which had no writer anywhere in the frontend.
 // The AI gateway (Section 9.3) should call this after every question,
 // tool call, or Text-to-SQL execution — success, refusal, or error alike.
 // ═══════════════════════════════════════════════════════════════
@@ -331,7 +372,9 @@ export async function logAIEvent(params: {
   requestId?: string;
   userId?: string | null;
   userEmail?: string | null;
+  supabaseClient?: SupabaseClient<any, any, any> | null;
 }): Promise<void> {
+  const supabase = params.supabaseClient || browserSupabase;
   try {
     let finalUserId = params.userId ?? null;
     let finalUserEmail = params.userEmail ?? null;
@@ -394,7 +437,9 @@ export async function logAIEvent(params: {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Convenience functions — consistent object-parameter interface
+// Convenience functions — consistent object-parameter interface.
+// Each accepts an optional `supabaseClient` so API routes can pass
+// their server-side authenticated client through to the audit layer.
 // ═══════════════════════════════════════════════════════════════
 export const logAudit = {
   create: (
@@ -402,11 +447,12 @@ export const logAudit = {
     entityId: string,
     description: string,
     newValues?: any,
-    opts?: { projectId?: string; amount?: number; amountCurrency?: string }
+    opts?: { projectId?: string; amount?: number; amountCurrency?: string; userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }
   ) =>
     logAction({
       action: "CREATE", entityType, entityId, description, newValues,
       projectId: opts?.projectId, amount: opts?.amount, amountCurrency: opts?.amountCurrency,
+      userId: opts?.userId, supabaseClient: opts?.supabaseClient,
     }),
 
   update: (
@@ -416,81 +462,85 @@ export const logAudit = {
     oldValues?: any,
     newValues?: any,
     reason?: string,
-    opts?: { projectId?: string; amount?: number; amountCurrency?: string }
+    opts?: { projectId?: string; amount?: number; amountCurrency?: string; userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }
   ) =>
     logAction({
       action: "UPDATE", entityType, entityId, description, oldValues, newValues, reason,
       projectId: opts?.projectId, amount: opts?.amount, amountCurrency: opts?.amountCurrency,
+      userId: opts?.userId, supabaseClient: opts?.supabaseClient,
     }),
 
-  delete: (entityType: string, entityId: string, description: string, oldValues?: any) =>
-    logAction({ action: "DELETE", entityType, entityId, description, oldValues, severity: "high" }),
+  delete: (entityType: string, entityId: string, description: string, oldValues?: any, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAction({ action: "DELETE", entityType, entityId, description, oldValues, severity: "high", userId: opts?.userId, supabaseClient: opts?.supabaseClient }),
 
   approve: (
     entityType: string,
     entityId: string,
     description: string,
     approvalLevel?: string,
-    opts?: { amount?: number; amountCurrency?: string; approvalComments?: string }
+    opts?: { amount?: number; amountCurrency?: string; approvalComments?: string; userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }
   ) =>
     logAction({
       action: "APPROVE", entityType, entityId, description, approvalLevel, severity: "medium",
       amount: opts?.amount, amountCurrency: opts?.amountCurrency, approvalComments: opts?.approvalComments,
+      userId: opts?.userId, supabaseClient: opts?.supabaseClient,
     }),
 
-  reject: (entityType: string, entityId: string, description: string, reason?: string) =>
-    logAction({ action: "REJECT", entityType, entityId, description: description + (reason ? ` - Reason: ${reason}` : ""), reason, severity: "medium" }),
+  reject: (entityType: string, entityId: string, description: string, reason?: string, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAction({ action: "REJECT", entityType, entityId, description: description + (reason ? ` - Reason: ${reason}` : ""), reason, severity: "medium", userId: opts?.userId, supabaseClient: opts?.supabaseClient }),
 
   post: (
     entityType: string,
     entityId: string,
     description: string,
-    opts?: { relatedJournalId?: string; amount?: number; amountCurrency?: string }
+    opts?: { relatedJournalId?: string; amount?: number; amountCurrency?: string; userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }
   ) =>
     logAction({
       action: "POST", entityType, entityId, description, severity: "high",
       relatedJournalId: opts?.relatedJournalId, amount: opts?.amount, amountCurrency: opts?.amountCurrency,
+      userId: opts?.userId, supabaseClient: opts?.supabaseClient,
     }),
 
-  reverse: (entityType: string, entityId: string, description: string, reason?: string) =>
-    logAction({ action: "REVERSE", entityType, entityId, description, reason, severity: "critical" }),
+  reverse: (entityType: string, entityId: string, description: string, reason?: string, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAction({ action: "REVERSE", entityType, entityId, description, reason, severity: "critical", userId: opts?.userId, supabaseClient: opts?.supabaseClient }),
 
-  login: () => {
-    logSecurityEvent({ eventType: "LOGIN_SUCCESS" });
-    logAction({ action: "LOGIN", entityType: "session", description: "User logged in", sourceModule: "auth" });
+  login: (opts?: { supabaseClient?: SupabaseClient<any, any, any> | null }) => {
+    logSecurityEvent({ eventType: "LOGIN_SUCCESS", supabaseClient: opts?.supabaseClient });
+    logAction({ action: "LOGIN", entityType: "session", description: "User logged in", sourceModule: "auth", supabaseClient: opts?.supabaseClient });
   },
 
-  logout: () => {
-    logSecurityEvent({ eventType: "SESSION_TERMINATED" });
-    logAction({ action: "LOGOUT", entityType: "session", description: "User logged out", sourceModule: "auth" });
+  logout: (opts?: { supabaseClient?: SupabaseClient<any, any, any> | null }) => {
+    logSecurityEvent({ eventType: "SESSION_TERMINATED", supabaseClient: opts?.supabaseClient });
+    logAction({ action: "LOGOUT", entityType: "session", description: "User logged out", sourceModule: "auth", supabaseClient: opts?.supabaseClient });
   },
 
-  loginFailed: (email?: string) =>
-    logSecurityEvent({ eventType: "LOGIN_FAILURE", success: false, details: { attempted_email: email } }),
+  loginFailed: (email?: string, opts?: { supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logSecurityEvent({ eventType: "LOGIN_FAILURE", success: false, details: { attempted_email: email }, supabaseClient: opts?.supabaseClient }),
 
-  view: (entityType: string, entityId: string, description: string) =>
-    logAction({ action: "VIEW", entityType, entityId, description, severity: "info" }),
+  view: (entityType: string, entityId: string, description: string, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAction({ action: "VIEW", entityType, entityId, description, severity: "info", userId: opts?.userId, supabaseClient: opts?.supabaseClient }),
 
-  export: (entityType: string, description: string, reportName?: string, rowCount?: number) =>
-    logExportEvent({ reportName: reportName || entityType, reportType: entityType, rowCount }),
+  export: (entityType: string, description: string, reportName?: string, rowCount?: number, opts?: { supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logExportEvent({ reportName: reportName || entityType, reportType: entityType, rowCount, supabaseClient: opts?.supabaseClient }),
 
-  accessDenied: (entityType: string, description: string) =>
+  accessDenied: (entityType: string, description: string, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
     logAction({
       action: "ACCESS_DENIED", entityType, description,
-      status: "denied", severity: "medium", errorMessage: "Permission denied"
+      status: "denied", severity: "medium", errorMessage: "Permission denied",
+      userId: opts?.userId, supabaseClient: opts?.supabaseClient,
     }),
 
-  error: (entityType: string, description: string, errorMessage: string) =>
-    logAction({ action: "ERROR", entityType, description, status: "error", severity: "high", errorMessage }),
+  error: (entityType: string, description: string, errorMessage: string, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAction({ action: "ERROR", entityType, description, status: "error", severity: "high", errorMessage, userId: opts?.userId, supabaseClient: opts?.supabaseClient }),
 
-  periodClose: (periodId: string, reason: string) =>
-    logAction({ action: "PERIOD_CLOSE", entityType: "accounting_period", entityId: periodId, description: `Period closed: ${reason}`, reason, severity: "high", sourceModule: "finance" }),
+  periodClose: (periodId: string, reason: string, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAction({ action: "PERIOD_CLOSE", entityType: "accounting_period", entityId: periodId, description: `Period closed: ${reason}`, reason, severity: "high", sourceModule: "finance", userId: opts?.userId, supabaseClient: opts?.supabaseClient }),
 
-  periodReopen: (periodId: string, reason: string) =>
-    logAction({ action: "PERIOD_REOPEN", entityType: "accounting_period", entityId: periodId, description: `Period reopened: ${reason}`, reason, severity: "critical", sourceModule: "finance" }),
+  periodReopen: (periodId: string, reason: string, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAction({ action: "PERIOD_REOPEN", entityType: "accounting_period", entityId: periodId, description: `Period reopened: ${reason}`, reason, severity: "critical", sourceModule: "finance", userId: opts?.userId, supabaseClient: opts?.supabaseClient }),
 
-  configChange: (entityType: string, entityId: string, description: string, oldValues?: any, newValues?: any) =>
-    logAction({ action: "CONFIG_CHANGE", entityType, entityId, description, oldValues, newValues, severity: "medium", sourceModule: "admin" }),
+  configChange: (entityType: string, entityId: string, description: string, oldValues?: any, newValues?: any, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAction({ action: "CONFIG_CHANGE", entityType, entityId, description, oldValues, newValues, severity: "medium", sourceModule: "admin", userId: opts?.userId, supabaseClient: opts?.supabaseClient }),
 
   // ✅ FIX: `amount` was previously only interpolated into the description
   // string and never reached the structured `amount` column — the 8.3
@@ -504,7 +554,7 @@ export const logAudit = {
     toStatus: string,
     amount?: number,
     reason?: string,
-    opts?: { projectId?: string; amountCurrency?: string; approvalLevel?: string }
+    opts?: { projectId?: string; amountCurrency?: string; approvalLevel?: string; userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }
   ) =>
     logAction({
       action: `WORKFLOW_${action.toUpperCase()}`,
@@ -520,19 +570,21 @@ export const logAudit = {
       projectId: opts?.projectId,
       amountCurrency: opts?.amountCurrency,
       approvalLevel: opts?.approvalLevel,
+      userId: opts?.userId,
+      supabaseClient: opts?.supabaseClient,
     }),
 
   // ✅ NEW: convenience wrappers around logAIEvent for the common cases
   // called out in Spec 8.2.
-  aiQuery: (question: string, selectedTool: string, opts?: { rowCount?: number; model?: string; latencyMs?: number }) =>
+  aiQuery: (question: string, selectedTool: string, opts?: { rowCount?: number; model?: string; latencyMs?: number; userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
     logAIEvent({ action: "AI_QUERY", question, selectedTool, ...opts }),
 
-  aiRefused: (question: string, refusalReason: string) =>
-    logAIEvent({ action: "AI_QUERY", status: "denied", severity: "medium", question, refusalReason }),
+  aiRefused: (question: string, refusalReason: string, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAIEvent({ action: "AI_QUERY", status: "denied", severity: "medium", question, refusalReason, ...opts }),
 
-  aiSuggestionAccepted: (entityType: string, entityId: string, selectedTool: string) =>
-    logAIEvent({ action: "AI_SUGGESTION_ACCEPTED", entityType, entityId, selectedTool }),
+  aiSuggestionAccepted: (entityType: string, entityId: string, selectedTool: string, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAIEvent({ action: "AI_SUGGESTION_ACCEPTED", entityType, entityId, selectedTool, ...opts }),
 
-  aiSuggestionRejected: (entityType: string, entityId: string, selectedTool: string) =>
-    logAIEvent({ action: "AI_SUGGESTION_REJECTED", entityType, entityId, selectedTool }),
+  aiSuggestionRejected: (entityType: string, entityId: string, selectedTool: string, opts?: { userId?: string | null; supabaseClient?: SupabaseClient<any, any, any> | null }) =>
+    logAIEvent({ action: "AI_SUGGESTION_REJECTED", entityType, entityId, selectedTool, ...opts }),
 };

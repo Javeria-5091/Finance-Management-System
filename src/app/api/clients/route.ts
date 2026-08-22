@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { getAuthUser, requirePermission } from '@/lib/api-auth';
+import { sanitizeSearch } from '@/lib/validations';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -26,7 +27,12 @@ export async function GET(req: NextRequest) {
       .eq('organization_id', auth.orgId);
  
     if (search) {
-      query = query.or(`name.ilike.%${search}%,client_code.ilike.%${search}%,email.ilike.%${search}%,phone.ilike.%${search}%,tax_registration.ilike.%${search}%`);
+      // BUG-010 FIX (High): sanitize search term to prevent PostgREST filter
+      // injection. Without sanitization, a search term containing ',', '.', '(',
+      // or ')' could be parsed as additional filter clauses, leaking data or
+      // breaking the query.
+      const s = sanitizeSearch(search);
+      query = query.or(`name.ilike.%${s}%,client_code.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%,tax_registration.ilike.%${s}%`);
     }
     if (isActive !== null && isActive !== undefined) {
       query = query.eq('is_active', isActive === 'true');
@@ -73,7 +79,7 @@ export async function POST(req: NextRequest) {
     }
  
     // Generate client code using DB sequence
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'CLT' });
+    const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'CLT' });
     const clientCode = numData || `CLT-${Date.now().toString().slice(-6)}`;
  
     const { data: client, error } = await supabase
@@ -131,4 +137,3 @@ export async function POST(req: NextRequest) {
   }
 }
  
-

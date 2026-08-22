@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
-import { creditNoteCreateSchema, validateBody, sanitizeSearch } from '@/lib/validations';
+import { creditNoteCreateSchema, validateBody, sanitizeSearch, validateExchangeRate } from '@/lib/validations';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -70,6 +70,12 @@ export async function POST(req: NextRequest) {
       exchange_rate, notes,
     } = validation.data;
 
+  // BUG-008 FIX: validate exchange rate for non-PKR currencies
+  const rateError = validateExchangeRate(currency, exchange_rate);
+  if (rateError) {
+    return NextResponse.json({ error: rateError }, { status: 400 });
+  }
+
     // Validate the referenced invoice exists and belongs to org
     const invoice = getData(await supabase
       .from('invoices')
@@ -83,7 +89,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Generate credit note number
-    const { data: numData } = await supabase.rpc('get_next_number', { p_type: 'CN' });
+    const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'CN' });
     const creditNoteNumber = numData || `CN-${Date.now().toString().slice(-6)}`;
 
     const { data: creditNote, error } = await supabase

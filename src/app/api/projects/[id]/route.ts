@@ -120,10 +120,11 @@ export async function PATCH(
  
     const { project_code, organization_id, created_by, created_at, id: _id, ...updates } = body;
  
-    const { data: updated, error } = await supabase
+        const { data: updated, error } = await supabase
       .from('projects')
       .update(updates)
       .eq('id', id)
+      .eq('organization_id', auth.orgId)
       .select()
       .single();
  

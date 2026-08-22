@@ -1,6 +1,9 @@
-import { supabase } from '@/lib/supabase';
+import { supabase as browserSupabase } from '@/lib/supabase';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+type SClient = SupabaseClient<any, any, any>;
 
 export type BudgetWarningLevel = 'OK' | 'CAUTION' | 'WARNING' | 'BLOCKED';
 export type BudgetEnforcementMode = 'WARN_ONLY' | 'HARD_BLOCK';
@@ -20,6 +23,13 @@ export interface BudgetCheckInput {
   amount: number;
   currency?: string;
   organization_id: string | null;
+  /**
+   * BUG-007 FIX: Optional server-side authenticated supabase client.
+   * API routes pass their server-side client (from getAuthSupabase()) so
+   * budget checks run with the authenticated user's RLS context.
+   * Frontend callers omit this and the browser client is used.
+   */
+  supabaseClient?: SClient | null;
 }
 
 export interface BudgetCheckResult {
@@ -79,6 +89,15 @@ function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
 
+/**
+ * BUG-007 FIX: Resolve which supabase client to use.
+ * - If the caller passes an explicit supabaseClient (API-route caller), use it.
+ * - Otherwise fall back to the browser client (frontend caller).
+ */
+function resolveClient(override?: SClient | null): SClient {
+  return override || (browserSupabase as unknown as SClient);
+}
+
 function computeWarningLevel(
   utilizationAfter: number,
   policy: BudgetPolicyConfig
@@ -92,8 +111,10 @@ function computeWarningLevel(
 // ─── Fetch Budget Policy from DB (configurable per organization) ────────────
 
 export async function getBudgetPolicy(
-  organizationId: string
+  organizationId: string,
+  supabaseClient?: SClient | null
 ): Promise<BudgetPolicyConfig> {
+  const supabase = resolveClient(supabaseClient);
   try {
     // BUG-009 FIX: Changed supabase.from('core.budget_policies') to
     // supabase.schema('core').from('budget_policies').
@@ -220,8 +241,9 @@ function buildNotifications(
 export async function checkBudgetForTransaction(
   input: BudgetCheckInput
 ): Promise<BudgetCheckResponse> {
-  const { budget_id, project_id, department, category, amount, organization_id } = input;
+  const { budget_id, project_id, department, category, amount, organization_id, supabaseClient } = input;
   const transactionAmount = Number(amount);
+  const supabase = resolveClient(supabaseClient);
 
   if (!organization_id) {
     return {
@@ -235,7 +257,7 @@ export async function checkBudgetForTransaction(
     };
   }
 
-  const policy = await getBudgetPolicy(organization_id);
+  const policy = await getBudgetPolicy(organization_id, supabaseClient);
 
   const results: BudgetCheckResult[] = [];
 
@@ -334,10 +356,12 @@ export async function createBudgetAlertNotifications(
   notifications: BudgetAlertNotification[],
   organizationId: string,
   triggeredBy: string,
-  sourceEntityId: string
+  sourceEntityId: string,
+  supabaseClient?: SClient | null
 ): Promise<void> {
   if (!notifications || notifications.length === 0) return;
 
+  const supabase = resolveClient(supabaseClient);
   try {
     const notificationRecords = notifications.map(n => ({
       organization_id: organizationId,

@@ -59,6 +59,7 @@ export async function POST(req: Request) {
       .from('fiscal_years')
       .select('id, name, start_date, end_date, status')
       .eq('id', fiscal_year_id)
+      .eq('organization_id', orgId)
       .maybeSingle();
 
     if (!fiscalYear) {

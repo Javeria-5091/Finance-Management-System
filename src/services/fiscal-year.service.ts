@@ -1,6 +1,22 @@
 // types/services/fiscal-year.service.ts
 
-import { supabase } from '@/lib/supabase';
+import { supabase as browserSupabase } from '@/lib/supabase';
+import type { SupabaseClient } from '@supabase/supabase-js';
+
+// BUG-007 FIX: This service previously imported the browser supabase client
+// directly. When called from an API route, the browser client has no
+// authenticated session, causing RLS to reject queries or return wrong data.
+//
+// Each function below now accepts an optional `supabaseClient` parameter.
+// API routes pass their server-side authenticated client (from getAuthSupabase());
+// frontend code omits it and the browser client is used (with its valid session).
+type SClient = SupabaseClient<any, any, any>;
+function resolveClient(override?: SClient | null): SClient {
+  return override || (browserSupabase as unknown as SClient);
+}
+// Backward-compat alias: existing function bodies
+// continue to reference `supabase` directly.
+const supabase = browserSupabase;
 import type {
   FiscalYearSummary,
   AccountingPeriod,
@@ -39,7 +55,7 @@ export async function createFiscalYear(input: CreateFiscalYearInput): Promise<vo
   // ✅ FIX: Get user ID BEFORE the RPC call
   const userId = await currentUserId();
 
-  const { error } = await db().rpc('create_fiscal_year_with_periods', {
+  const { error } = await db().schema('finance').rpc('create_fiscal_year_with_periods', {
     p_name: input.name,
     p_start_date: input.start_date,
     p_end_date: input.end_date,
@@ -138,7 +154,7 @@ export async function getPeriods(fyId: string): Promise<AccountingPeriod[]> {
 export async function openPeriod(input: OpenPeriodInput): Promise<void> {
   const userId = await currentUserId();  // ✅ FIX
 
-  const { error } = await db().rpc('open_period', {
+  const { error } = await db().schema('finance').rpc('open_period', {
     p_period_id: input.period_id,
     p_opened_by: userId,  // ✅ FIX
   });

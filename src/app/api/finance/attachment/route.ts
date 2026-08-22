@@ -2,9 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requirePermission } from '@/lib/api-auth';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { supabase } from '@/lib/supabase';
- 
+
 // P0: Private attachments with file hash duplicate detection + corrupted file rejection
- 
+
+function getData<T = any>(res: any): T | null {
+  return res?.data ?? null;
+}
+
 const ALLOWED_MIME_TYPES = [
   'application/pdf',
   'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -188,30 +192,102 @@ export async function POST(req: NextRequest) {
       if (!entityId) {
         return NextResponse.json({ error: 'entityId required' }, { status: 400 });
       }
- 
+
+      // BUG-011 FIX (High): Before generating the signed URL, verify the
+      // caller has access to the underlying entity. The entityId parameter
+      // here is actually the storage_path (e.g. "finance/expense/<uuid>/<file>").
+      // The previous implementation just generated a signed URL for any path
+      // the caller supplied, with NO permission check — anyone authenticated
+      // could download any attachment if they knew or guessed the storage
+      // path (Spec 7.5: "An unauthorized user cannot open, enumerate, or
+      // download a finance attachment through the UI, API, or any other
+      // channel").
+      //
+      // Spec 7.2 also requires data-scope enforcement: an HOD with
+      // department-scoped access should not be able to download an
+      // attachment belonging to a different department's expense. The RLS
+      // policy on finance.attachments enforces organization_id scoping
+      // (every query below is scoped via the authenticated supabase client),
+      // and the explicit entity_type check below enforces that the caller
+      // has the matching read permission for the underlying entity.
+      const attachment = getData(
+        await supabase
+          .from('finance.attachments')
+          .select('id, entity_type, entity_id, organization_id, file_name')
+          .eq('storage_path', entityId)
+          .maybeSingle()
+      );
+
+      if (!attachment) {
+        // Either the attachment doesn't exist OR it doesn't belong to the
+        // caller's organization (RLS filters it out). Either way, fail
+        // closed with a 404 — do not leak whether the path exists.
+        return NextResponse.json({ error: 'File not found or access denied' }, { status: 404 });
+      }
+
+      // Verify organization isolation (defense-in-depth on top of RLS).
+      if (auth.orgId && attachment.organization_id && attachment.organization_id !== auth.orgId) {
+        return NextResponse.json({ error: 'File not found or access denied' }, { status: 404 });
+      }
+
+      // Verify the caller has read permission for the underlying entity type.
+      // Map entity_type -> required permission code.
+      const ENTITY_PERM_MAP: Record<string, string> = {
+        expense: 'EXPENSE_READ',
+        income: 'INCOME_READ',
+        invoice: 'INVOICE_READ',
+        vendor_bill: 'VENDOR_BILL_READ',
+        credit_note: 'INVOICE_READ',
+        payment_receipt: 'PAYMENT_READ',
+        payment_reversal: 'PAYMENT_READ',
+        journal_entry: 'JOURNAL_READ',
+        profit_distribution: 'EQUITY_READ',
+        vendor: 'VENDOR_READ',
+        client: 'CLIENT_READ',
+        project: 'PROJECT_READ',
+        budget: 'BUDGET_READ',
+        bank_statement: 'BANK_READ',
+        bank_transfer: 'BANK_READ',
+        asset: 'ASSET_READ',
+        payroll: 'PAYROLL_READ',
+      };
+      const requiredPerm = ENTITY_PERM_MAP[attachment.entity_type?.toLowerCase()] || `${attachment.entity_type?.toUpperCase()}_READ`;
+
+      if (auth.role !== 'CEO') {
+        const { data: perms } = await supabase.rpc('get_my_permissions');
+        let hasPerm = false;
+        if (perms) {
+          if (!Array.isArray(perms) && typeof perms === 'object' && perms[requiredPerm] === true) hasPerm = true;
+          if (Array.isArray(perms) && perms.some((p: any) => (p.permission_code || p.code) === requiredPerm)) hasPerm = true;
+        }
+        if (!hasPerm) {
+          return NextResponse.json({ error: 'Permission denied: cannot download this attachment' }, { status: 403 });
+        }
+      }
+
       const { data, error } = await supabase.storage
         .from('finance-attachments')
         .createSignedUrl(entityId, 300);
- 
+
       if (error) {
         return NextResponse.json({ error: 'File not found or access denied' }, { status: 404 });
       }
- 
+
       try {
         await supabase.schema('audit').rpc('log_action', {
           p_user_id: auth.userId,
           p_action: 'ATTACHMENT_DOWNLOADED',
-          p_entity_type: 'attachment',
-          p_entity_id: entityId,
-          p_description: `Attachment downloaded: ${entityId}`,
+          p_entity_type: attachment.entity_type || 'attachment',
+          p_entity_id: attachment.entity_id || attachment.id,
+          p_description: `Attachment downloaded: ${attachment.file_name || entityId}`,
           p_previous_status: null,
           p_new_status: 'DOWNLOADED',
           p_source_module: 'attachment',
           p_severity: 'info',
-          p_new_values: { path: entityId },
+          p_new_values: { path: entityId, file_name: attachment.file_name, entity_id: attachment.entity_id },
         });
       } catch {}
- 
+
       return NextResponse.json({ downloadUrl: data.signedUrl });
     }
  
@@ -221,4 +297,3 @@ export async function POST(req: NextRequest) {
   }
 }
  
-

@@ -14,6 +14,7 @@ import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
+import { sanitizeSearch } from '@/lib/validations';
 import {
   logAiAuditEvent,
   extractRequestMetadata,
@@ -105,7 +106,7 @@ export async function POST(req: Request) {
         .from('vendor_bills')
         .select('id, bill_number, vendor_id, total_amount, bill_date, status')
         .eq('organization_id', orgId)
-        .ilike('bill_number', `%${reference}%`)
+        .ilike('bill_number', `%${sanitizeSearch(reference)}%`)
         .limit(10);
 
       if (refMatches && refMatches.length > 0) {
@@ -140,7 +141,7 @@ export async function POST(req: Request) {
         .from('vendors')
         .select('id')
         .eq('organization_id', orgId)
-        .ilike('name', `%${vendor_name}%`)
+        .ilike('name', `%${sanitizeSearch(vendor_name)}%`)
         .limit(1);
 
       if (!vendorExists || vendorExists.length === 0) {

@@ -45,6 +45,12 @@ export type AccountType =
 
 export type NormalBalance = 'DEBIT' | 'CREDIT';
 
+export interface COAFilters {
+  search?: string;
+  accountType?: AccountType | 'ALL';
+  status?: 'active' | 'inactive' | 'ALL';
+}
+
 export interface ChartOfAccount {
   id: string;
   code: string;

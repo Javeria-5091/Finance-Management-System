@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { validateExchangeRate } from '@/lib/validations';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
@@ -41,6 +42,16 @@ export async function POST(req: NextRequest) {
 
     if (receipt.status === 'REVERSED') {
       return NextResponse.json({ error: 'Payment receipt is already reversed' }, { status: 400 });
+    }
+
+    // BUG-008 FIX (M-11): validate exchange rate for non-PKR currencies.
+    // Even though the rate comes from the stored receipt (not user input),
+    // a previously-stored bad rate (e.g. from the unfixed payment-receipts
+    // route before H-4) would propagate into the reversal journal here.
+    // Fail closed rather than silently posting wrong PKR amounts.
+    const rateError = validateExchangeRate(receipt.currency, receipt.exchange_rate);
+    if (rateError) {
+      return NextResponse.json({ error: rateError }, { status: 400 });
     }
 
     // BUG-020 FIX: Get open period with org filter

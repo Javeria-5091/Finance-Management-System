@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requirePermission } from '@/lib/api-auth';
+import { requirePermission, getAuthSupabase } from '@/lib/api-auth';
 import {
   checkBudgetForTransaction,
   createBudgetAlertNotifications,
   getBudgetPolicy,
   type BudgetPolicyConfig,
 } from '@/services/budget-check.service';
+import { supabase } from '@/lib/supabase';
  
 // ─── POST: Check budget before posting a transaction ───
 // Spec 5.4: "Warn or block transactions that exceed budget based on configurable policy."
@@ -21,6 +22,8 @@ import {
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('EXPENSE_READ');
   if (auth instanceof NextResponse) return auth;
+  // BUG-007 FIX: pass the server-side authenticated supabase client.
+  const { supabase } = await getAuthSupabase(req);
  
   const orgId = auth.orgId;
   if (!orgId) {
@@ -48,6 +51,8 @@ export async function POST(req: NextRequest) {
       amount: transactionAmount,
       currency,
       organization_id: orgId,
+      // BUG-007 FIX: pass server-side authenticated supabase client.
+      supabaseClient: supabase,
     });
  
     // Handle CEO/Finance Head override with force_allow
@@ -77,7 +82,8 @@ export async function POST(req: NextRequest) {
         result.notifications,
         orgId,
         auth.userId,
-        `budget-check-${Date.now()}`
+        `budget-check-${Date.now()}`,
+        supabase,
       );
     }
  
@@ -114,14 +120,14 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const auth = await requirePermission('EXPENSE_READ');
   if (auth instanceof NextResponse) return auth;
- 
+  const { supabase } = await getAuthSupabase(req);
   const orgId = auth.orgId;
   if (!orgId) {
     return NextResponse.json({ error: 'Organization ID not found in auth context' }, { status: 400 });
   }
  
   try {
-    const policy: BudgetPolicyConfig = await getBudgetPolicy(orgId);
+    const policy: BudgetPolicyConfig = await getBudgetPolicy(orgId, supabase);
  
     return NextResponse.json({
       policy,

@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
     }
  
     // ── 3. Get P&L accounts for the fiscal year ──
-    const { data: revenueAccounts, error: revErr } = await supabase.rpc('finance.get_pnl_accounts', {
+    const { data: revenueAccounts, error: revErr } = await supabase.schema('finance').rpc('get_pnl_accounts', {
       p_fiscal_year_id: fiscal_year_id,
       p_organization_id: orgId,
       p_account_type: 'REVENUE',
@@ -102,7 +102,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to fetch revenue accounts: ' + revErr.message }, { status: 500 });
     }
  
-    const { data: expenseAccounts, error: expErr } = await supabase.rpc('finance.get_pnl_accounts', {
+    const { data: expenseAccounts, error: expErr } = await supabase.schema('finance').rpc('get_pnl_accounts', {
       p_fiscal_year_id: fiscal_year_id,
       p_organization_id: orgId,
       p_account_type: 'EXPENSE',
@@ -207,17 +207,88 @@ export async function POST(req: NextRequest) {
     }
  
     // ── 7. Get reference number ──
-    const { data: refData } = await supabase.rpc('get_next_number', {
+    const { data: refData } = await supabase.schema('finance').rpc('get_next_number', {
       p_type: 'PERIOD_CLOSE',
     });
     const reference = refData || `YEC-${fiscal_year_id.slice(0, 8)}`;
  
+    // ── 7.5. BUG-001 FIX (Critical): Resolve OPEN period for the closing entry ──
+    // Original code posted the closing entry to `periods[periods.length - 1].id`
+    // (the last period of the closing fiscal year), but this route already
+    // requires every period of the closing year to be HARD_CLOSED before it
+    // will proceed. Posting to a HARD_CLOSED period is rejected by the
+    // trg_prevent_closed_period_posting trigger, so the entire close
+    // workflow was broken.
+    //
+    // Spec 12.10 step 6: "Transfer current-year result to retained earnings
+    // according to the approved chart of accounts and open the next fiscal
+    // year/periods." The closing entry should therefore post to an OPEN
+    // period — ideally the first period of the NEXT fiscal year (so the
+    // close entry doesn't reopen a closed period). If no next-year period
+    // exists yet, fall back to the first OPEN period of the closing year
+    // (rare case: closing mid-period before year-end). If neither exists,
+    // fail closed with a clear error.
+    let closingPeriodId: string | null = null;
+
+    // 7.5.1. Try next fiscal year's first OPEN period.
+    const nextFiscalYear = getData(
+      await supabase
+        .from('finance.fiscal_years')
+        .select('id, name, start_date, end_date')
+        .eq('organization_id', orgId)
+        .gt('start_date', fiscalYear.end_date)
+        .order('start_date', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+    );
+
+    if (nextFiscalYear) {
+      const nextPeriod = getData(
+        await supabase
+          .from('finance.accounting_periods')
+          .select('id, status')
+          .eq('fiscal_year_id', nextFiscalYear.id)
+          .eq('organization_id', orgId)
+          .eq('status', 'OPEN')
+          .order('start_date', { ascending: true })
+          .limit(1)
+          .maybeSingle()
+      );
+      if (nextPeriod) {
+        closingPeriodId = nextPeriod.id;
+      }
+    }
+
+    // 7.5.2. Fallback: first OPEN period of the closing fiscal year (rare).
+    if (!closingPeriodId) {
+      const openPeriod = getData(
+        await supabase
+          .from('finance.accounting_periods')
+          .select('id, status')
+          .eq('fiscal_year_id', fiscal_year_id)
+          .eq('organization_id', orgId)
+          .eq('status', 'OPEN')
+          .order('start_date', { ascending: true })
+          .limit(1)
+          .maybeSingle()
+      );
+      if (openPeriod) {
+        closingPeriodId = openPeriod.id;
+      }
+    }
+
+    if (!closingPeriodId) {
+      return NextResponse.json({
+        error: 'No OPEN accounting period found for the closing entry. Open the next fiscal year (or an adjustment period) before retrying year-end close.',
+      }, { status: 400 });
+    }
+
     // ── 8. BUG-001 FIX: Single atomic RPC call with CORRECT signature ──
     //    Replaces: manual journal header insert + manual lines insert + wrong RPC({ p_journal_id, p_posted_by })
-    const { data: journalId, error: postErr } = await supabase.rpc('finance.post_journal_entry', {
+    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: description || `Year-End Close: FY ${fiscalYear.name || fiscal_year_id}`,
       p_transaction_date: new Date().toISOString().split('T')[0],
-      p_period_id: periods[periods.length - 1].id, // Use last period of the fiscal year
+      p_period_id: closingPeriodId, // BUG-001 FIX: post to an OPEN period, not a HARD_CLOSED one
       p_lines: JSON.stringify(rpcLines),
       p_currency: 'PKR',
       p_exchange_rate: 1,

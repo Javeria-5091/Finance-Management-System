@@ -1,5 +1,20 @@
-import { supabase } from '@/lib/supabase';
+import { supabase as browserSupabase } from '@/lib/supabase';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
+// BUG-007 FIX: This service previously imported the browser supabase client
+// directly. When called from an API route, the browser client has no
+// authenticated session, causing RLS to reject queries or return wrong data.
+//
+// Each function below now accepts an optional `supabaseClient` parameter.
+// API routes pass their server-side authenticated client (from getAuthSupabase());
+// frontend code omits it and the browser client is used (with its valid session).
+type SClient = SupabaseClient<any, any, any>;
+function resolveClient(override?: SClient | null): SClient {
+  return override || (browserSupabase as unknown as SClient);
+}
+// Backward-compat alias: existing function bodies
+// continue to reference `supabase` directly.
+const supabase = browserSupabase;
 //  Finance schema reference
 const db = supabase.schema('finance');
 const rpt = supabase.schema('reporting');
@@ -238,21 +253,21 @@ export const getUnreconciledLines = async (orgId: string) => {
 // ==================== RECONCILIATION RPCs ====================
 
 export const runAutoMatch = async (statementId: string) => {
-  const { data, error } = await db.rpc('auto_match_statement_lines', {
+  const { data, error } = await db.schema('finance').rpc('auto_match_statement_lines', {
     p_statement_id: statementId
   });
   return { data, error };
 };
 
 export const detectDuplicates = async (statementId: string) => {
-  const { data, error } = await db.rpc('detect_duplicate_statement_lines', {
+  const { data, error } = await db.schema('finance').rpc('detect_duplicate_statement_lines', {
     p_statement_id: statementId
   });
   return { data, error };
 };
 
 export const manualMatchLine = async (lineId: string, journalLineId: string, reason?: string) => {
-  const { data, error } = await db.rpc('manual_match_statement_line', {
+  const { data, error } = await db.schema('finance').rpc('manual_match_statement_line', {
     p_line_id: lineId,
     p_journal_line_id: journalLineId,
     p_reason: reason || null
@@ -261,14 +276,14 @@ export const manualMatchLine = async (lineId: string, journalLineId: string, rea
 };
 
 export const unmatchLine = async (lineId: string) => {
-  const { data, error } = await db.rpc('unmatch_statement_line', {
+  const { data, error } = await db.schema('finance').rpc('unmatch_statement_line', {
     p_line_id: lineId
   });
   return { data, error };
 };
 
 export const excludeLine = async (lineId: string, reason: string) => {
-  const { data, error } = await db.rpc('exclude_statement_line', {
+  const { data, error } = await db.schema('finance').rpc('exclude_statement_line', {
     p_line_id: lineId,
     p_reason: reason
   });
@@ -332,7 +347,7 @@ export const postBankTransfer = async (
   periodId: string,
   date: string
 ) => {
-  const { data, error } = await db.rpc('post_bank_transfer', {
+  const { data, error } = await db.schema('finance').rpc('post_bank_transfer', {
     p_transfer_id: transferId,
     p_period_id: periodId,
     p_transaction_date: date

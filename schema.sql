@@ -94,19 +94,33 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 CREATE OR REPLACE FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'ai'
+    SET "search_path" TO 'pg_catalog', 'ai', 'core', 'public'
     AS $$
 BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  IF p_user_id IS DISTINCT FROM auth.uid() THEN
+    RAISE EXCEPTION 'Cannot record AI usage for another user';
+  END IF;
+
+  IF NOT core.same_org(p_organization_id) THEN
+    RAISE EXCEPTION 'Cannot record AI usage for another organization';
+  END IF;
+
   INSERT INTO ai.ai_user_cost_tracking
     (user_id, organization_id, period_date, request_count, total_tokens, estimated_cost)
   VALUES
-    (p_user_id, p_organization_id, CURRENT_DATE, 1, GREATEST(p_tokens, 0), GREATEST(p_cost, 0))
+    (p_user_id, p_organization_id, CURRENT_DATE, 1,
+     GREATEST(COALESCE(p_tokens, 0), 0),
+     GREATEST(COALESCE(p_cost, 0), 0))
   ON CONFLICT (user_id, organization_id, period_date)
   DO UPDATE SET
-    request_count  = ai.ai_user_cost_tracking.request_count + 1,
-    total_tokens    = ai.ai_user_cost_tracking.total_tokens + GREATEST(p_tokens, 0),
-    estimated_cost  = ai.ai_user_cost_tracking.estimated_cost + GREATEST(p_cost, 0),
-    updated_at      = now();
+    request_count = ai.ai_user_cost_tracking.request_count + 1,
+    total_tokens = ai.ai_user_cost_tracking.total_tokens + GREATEST(COALESCE(p_tokens, 0), 0),
+    estimated_cost = ai.ai_user_cost_tracking.estimated_cost + GREATEST(COALESCE(p_cost, 0), 0),
+    updated_at = now();
 END;
 $$;
 
@@ -1290,27 +1304,35 @@ BEGIN
   v_journal_id := COALESCE(NEW.journal_entry_id, OLD.journal_entry_id);
 
   SELECT
-    COALESCE(SUM(debit_amount), 0), COALESCE(SUM(credit_amount), 0),
+    COALESCE(SUM(debit_amount), 0),
+    COALESCE(SUM(credit_amount), 0),
     COALESCE(SUM(COALESCE(base_debit, debit_amount)), 0),
     COALESCE(SUM(COALESCE(base_credit, credit_amount)), 0)
-  INTO v_total_debit, v_total_credit, v_total_base_debit, v_total_base_credit
+  INTO
+    v_total_debit,
+    v_total_credit,
+    v_total_base_debit,
+    v_total_base_credit
   FROM finance.journal_lines
   WHERE journal_entry_id = v_journal_id;
 
-  IF abs(v_total_debit - v_total_credit) > 0.01 THEN
-    RAISE EXCEPTION 'Journal entry % is unbalanced in transaction currency: debit % != credit %',
+  IF v_total_debit <> v_total_credit THEN
+    RAISE EXCEPTION
+      'Journal entry % is unbalanced in transaction currency: debit % != credit %',
       v_journal_id, v_total_debit, v_total_credit
       USING ERRCODE = 'check_violation';
   END IF;
 
-  IF abs(v_total_base_debit - v_total_base_credit) > 0.01 THEN
-    RAISE EXCEPTION 'Journal entry % is unbalanced in base (PKR) currency: base debit % != base credit %',
+  IF v_total_base_debit <> v_total_base_credit THEN
+    RAISE EXCEPTION
+      'Journal entry % is unbalanced in base (PKR) currency: base debit % != base credit %',
       v_journal_id, v_total_base_debit, v_total_base_credit
       USING ERRCODE = 'check_violation';
   END IF;
 
   UPDATE finance.journal_entries
-  SET total_debit = v_total_debit, total_credit = v_total_credit
+  SET total_debit = v_total_debit,
+      total_credit = v_total_credit
   WHERE id = v_journal_id;
 
   RETURN NULL;
@@ -1600,6 +1622,42 @@ END;
 ALTER FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."enforce_expense_line_org"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE v_org uuid;
+BEGIN
+  SELECT organization_id INTO v_org FROM public.expenses WHERE id = NEW.expense_id;
+  IF v_org IS NULL OR NEW.organization_id IS DISTINCT FROM v_org THEN
+    RAISE EXCEPTION 'Expense line organization does not match parent expense';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."enforce_expense_line_org"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."enforce_invoice_line_org"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE v_org uuid;
+BEGIN
+  SELECT organization_id INTO v_org FROM public.invoices WHERE id = NEW.invoice_id;
+  IF v_org IS NULL OR NEW.organization_id IS DISTINCT FROM v_org THEN
+    RAISE EXCEPTION 'Invoice line organization does not match parent invoice';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."enforce_invoice_line_org"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."enforce_maker_checker"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
@@ -1701,6 +1759,26 @@ $$;
 
 
 ALTER FUNCTION "finance"."enforce_postable_account"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."enforce_settlement_line_org"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE v_org uuid;
+BEGIN
+  SELECT organization_id INTO v_org
+  FROM finance.settlement_batches
+  WHERE id = NEW.settlement_batch_id;
+  IF v_org IS NULL OR NEW.organization_id IS DISTINCT FROM v_org THEN
+    RAISE EXCEPTION 'Settlement line organization does not match parent settlement batch';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."enforce_settlement_line_org"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."enforce_transition_year_period_13"() RETURNS "trigger"
@@ -6650,6 +6728,31 @@ COMMENT ON TABLE "finance"."credit_notes" IS 'Credit notes against either a clie
 
 
 
+CREATE TABLE IF NOT EXISTS "finance"."currency_settings" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "currency" "text" NOT NULL,
+    "enabled" boolean DEFAULT true NOT NULL,
+    "decimals" smallint DEFAULT 2 NOT NULL,
+    "rounding_method" "text" DEFAULT 'HALF_UP'::"text" NOT NULL,
+    "rounding_account_id" "uuid",
+    "tolerance" numeric(18,6) DEFAULT 0 NOT NULL,
+    "display_format" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "currency_settings_currency_check" CHECK (("currency" ~ '^[A-Z]{3}$'::"text")),
+    CONSTRAINT "currency_settings_decimals_check" CHECK ((("decimals" >= 0) AND ("decimals" <= 6))),
+    CONSTRAINT "currency_settings_rounding_method_check" CHECK (("rounding_method" = ANY (ARRAY['HALF_UP'::"text", 'HALF_EVEN'::"text", 'DOWN'::"text", 'UP'::"text", 'FLOOR'::"text", 'CEILING'::"text"]))),
+    CONSTRAINT "currency_settings_tolerance_check" CHECK (("tolerance" >= (0)::numeric))
+);
+
+ALTER TABLE ONLY "finance"."currency_settings" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "finance"."currency_settings" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "finance"."depreciation_schedule" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "asset_id" "uuid" NOT NULL,
@@ -6746,6 +6849,41 @@ ALTER TABLE "finance"."exchange_rates" OWNER TO "postgres";
 
 COMMENT ON COLUMN "finance"."exchange_rates"."organization_id" IS 'Migration 040: now NOT NULL. Every manual exchange rate must belong to exactly one organization; a NULL value previously made the row invisible to the tenant boundary entirely (it satisfied neither side of core.same_org(), which fails closed, but also was never actually checked by the old fx_select/fx_insert policies).';
 
+
+
+CREATE TABLE IF NOT EXISTS "finance"."expense_lines" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "expense_id" "uuid" NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "line_number" integer NOT NULL,
+    "description" "text" NOT NULL,
+    "quantity" numeric(18,4) DEFAULT 1 NOT NULL,
+    "unit_price" numeric(18,2) DEFAULT 0 NOT NULL,
+    "amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "exchange_rate" numeric(18,6) DEFAULT 1 NOT NULL,
+    "base_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "account_id" "uuid",
+    "project_id" "uuid",
+    "department_id" "uuid",
+    "cost_center_id" "uuid",
+    "tax_code_id" "uuid",
+    "tax_rate" numeric(8,4) DEFAULT 0 NOT NULL,
+    "tax_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "vendor_id" "uuid",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "expense_lines_amounts_check" CHECK ((("unit_price" >= (0)::numeric) AND ("amount" >= (0)::numeric) AND ("exchange_rate" > (0)::numeric) AND ("base_amount" >= (0)::numeric) AND ("tax_rate" >= (0)::numeric) AND ("tax_amount" >= (0)::numeric))),
+    CONSTRAINT "expense_lines_currency_check" CHECK (("currency" ~ '^[A-Z]{3}$'::"text")),
+    CONSTRAINT "expense_lines_number_check" CHECK (("line_number" > 0)),
+    CONSTRAINT "expense_lines_quantity_check" CHECK (("quantity" > (0)::numeric))
+);
+
+ALTER TABLE ONLY "finance"."expense_lines" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "finance"."expense_lines" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "finance"."fee_computation_log" (
@@ -6950,6 +7088,39 @@ CREATE TABLE IF NOT EXISTS "finance"."fixed_assets" (
 
 
 ALTER TABLE "finance"."fixed_assets" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."invoice_lines" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "invoice_id" "uuid" NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "line_number" integer NOT NULL,
+    "description" "text" NOT NULL,
+    "quantity" numeric(18,4) DEFAULT 1 NOT NULL,
+    "unit_price" numeric(18,2) DEFAULT 0 NOT NULL,
+    "line_subtotal" numeric(18,2) DEFAULT 0 NOT NULL,
+    "discount_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "tax_code_id" "uuid",
+    "tax_rate" numeric(8,4) DEFAULT 0 NOT NULL,
+    "tax_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "line_total" numeric(18,2) DEFAULT 0 NOT NULL,
+    "base_line_subtotal" numeric(18,2) DEFAULT 0 NOT NULL,
+    "base_tax_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "base_line_total" numeric(18,2) DEFAULT 0 NOT NULL,
+    "account_id" "uuid",
+    "project_id" "uuid",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "invoice_lines_amounts_check" CHECK ((("unit_price" >= (0)::numeric) AND ("line_subtotal" >= (0)::numeric) AND ("discount_amount" >= (0)::numeric) AND ("tax_rate" >= (0)::numeric) AND ("tax_amount" >= (0)::numeric) AND ("line_total" >= (0)::numeric) AND ("base_line_subtotal" >= (0)::numeric) AND ("base_tax_amount" >= (0)::numeric) AND ("base_line_total" >= (0)::numeric))),
+    CONSTRAINT "invoice_lines_number_check" CHECK (("line_number" > 0)),
+    CONSTRAINT "invoice_lines_quantity_check" CHECK (("quantity" > (0)::numeric))
+);
+
+ALTER TABLE ONLY "finance"."invoice_lines" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "finance"."invoice_lines" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "finance"."journal_entries" (
@@ -7270,6 +7441,70 @@ CREATE OR REPLACE VIEW "finance"."sequence_status" WITH ("security_invoker"='tru
 ALTER VIEW "finance"."sequence_status" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "finance"."settlement_batches" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "platform_id" "uuid",
+    "financial_account_id" "uuid",
+    "settlement_reference" "text" NOT NULL,
+    "settlement_date" "date" NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "gross_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "expected_fee_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "actual_fee_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "withholding_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "withdrawal_fee_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "net_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "exchange_rate" numeric(18,6),
+    "base_net_amount" numeric(18,2),
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "evidence_attachment_id" "uuid",
+    "notes" "text",
+    "created_by" "uuid",
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "posted_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "settlement_batches_amounts_check" CHECK ((("gross_amount" >= (0)::numeric) AND ("expected_fee_amount" >= (0)::numeric) AND ("actual_fee_amount" >= (0)::numeric) AND ("withholding_amount" >= (0)::numeric) AND ("withdrawal_fee_amount" >= (0)::numeric) AND ("net_amount" >= (0)::numeric))),
+    CONSTRAINT "settlement_batches_currency_check" CHECK (("currency" ~ '^[A-Z]{3}$'::"text")),
+    CONSTRAINT "settlement_batches_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'RECONCILED'::"text", 'REJECTED'::"text", 'REVERSED'::"text"])))
+);
+
+ALTER TABLE ONLY "finance"."settlement_batches" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "finance"."settlement_batches" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."settlement_lines" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "settlement_batch_id" "uuid" NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "line_number" integer NOT NULL,
+    "line_type" "text" NOT NULL,
+    "source_type" "text",
+    "source_id" "uuid",
+    "project_id" "uuid",
+    "client_id" "uuid",
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "rate" numeric(18,6),
+    "base_amount" numeric(18,2),
+    "notes" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "settlement_lines_amount_check" CHECK (("amount" >= (0)::numeric)),
+    CONSTRAINT "settlement_lines_currency_check" CHECK (("currency" ~ '^[A-Z]{3}$'::"text")),
+    CONSTRAINT "settlement_lines_number_check" CHECK (("line_number" > 0))
+);
+
+ALTER TABLE ONLY "finance"."settlement_lines" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "finance"."settlement_lines" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "finance"."statement_lines" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "bank_statement_id" "uuid" NOT NULL,
@@ -7314,6 +7549,33 @@ CREATE TABLE IF NOT EXISTS "finance"."tax_adjustments" (
 
 
 ALTER TABLE "finance"."tax_adjustments" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."tax_codes" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "code" "text" NOT NULL,
+    "name" "text" NOT NULL,
+    "tax_type" "text" DEFAULT 'TAX'::"text" NOT NULL,
+    "rate" numeric(8,4) DEFAULT 0 NOT NULL,
+    "recoverable_account_id" "uuid",
+    "payable_account_id" "uuid",
+    "effective_from" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "effective_to" "date",
+    "is_active" boolean DEFAULT true NOT NULL,
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "tax_codes_code_not_empty" CHECK (("btrim"("code") <> ''::"text")),
+    CONSTRAINT "tax_codes_dates_check" CHECK ((("effective_to" IS NULL) OR ("effective_to" >= "effective_from"))),
+    CONSTRAINT "tax_codes_name_not_empty" CHECK (("btrim"("name") <> ''::"text")),
+    CONSTRAINT "tax_codes_rate_check" CHECK (("rate" >= (0)::numeric))
+);
+
+ALTER TABLE ONLY "finance"."tax_codes" FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "finance"."tax_codes" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "finance"."tax_computations" (
@@ -9391,6 +9653,53 @@ CREATE OR REPLACE VIEW "public"."v_user_roles" WITH ("security_invoker"='true') 
 ALTER VIEW "public"."v_user_roles" OWNER TO "postgres";
 
 
+CREATE OR REPLACE VIEW "reporting"."trial_balance" WITH ("security_invoker"='true') AS
+ SELECT "je"."organization_id",
+    "je"."fiscal_year_id",
+    "je"."period_id",
+    "jl"."account_id",
+    "coa"."code" AS "account_code",
+    "coa"."name" AS "account_name",
+    "coa"."account_type",
+    "coa"."normal_balance",
+    "sum"("jl"."debit_amount") AS "debit",
+    "sum"("jl"."credit_amount") AS "credit",
+    "sum"(COALESCE("jl"."base_debit", "jl"."debit_amount")) AS "base_debit",
+    "sum"(COALESCE("jl"."base_credit", "jl"."credit_amount")) AS "base_credit",
+    "sum"((COALESCE("jl"."base_debit", "jl"."debit_amount") - COALESCE("jl"."base_credit", "jl"."credit_amount"))) AS "signed_base_balance"
+   FROM (("finance"."journal_entries" "je"
+     JOIN "finance"."journal_lines" "jl" ON (("jl"."journal_entry_id" = "je"."id")))
+     JOIN "finance"."chart_of_accounts" "coa" ON (("coa"."id" = "jl"."account_id")))
+  WHERE ("je"."status" = 'POSTED'::"text")
+  GROUP BY "je"."organization_id", "je"."fiscal_year_id", "je"."period_id", "jl"."account_id", "coa"."code", "coa"."name", "coa"."account_type", "coa"."normal_balance";
+
+
+ALTER VIEW "reporting"."trial_balance" OWNER TO "postgres";
+
+
+CREATE OR REPLACE VIEW "reporting"."balance_sheet" WITH ("security_invoker"='true') AS
+ SELECT "organization_id",
+    "fiscal_year_id",
+    "period_id",
+    "account_id",
+    "account_code",
+    "account_name",
+    "account_type",
+    "debit",
+    "credit",
+    "base_debit",
+    "base_credit",
+        CASE
+            WHEN ("account_type" = ANY (ARRAY['ASSET'::"text", 'OTHER_EXPENSE'::"text"])) THEN ("base_debit" - "base_credit")
+            ELSE ("base_credit" - "base_debit")
+        END AS "amount"
+   FROM "reporting"."trial_balance"
+  WHERE ("account_type" = ANY (ARRAY['ASSET'::"text", 'LIABILITY'::"text", 'EQUITY'::"text"]));
+
+
+ALTER VIEW "reporting"."balance_sheet" OWNER TO "postgres";
+
+
 CREATE OR REPLACE VIEW "reporting"."budget_vs_actual" WITH ("security_invoker"='true') AS
  SELECT "b"."id" AS "budget_id",
     "b"."name" AS "budget_name",
@@ -9480,6 +9789,60 @@ COMMENT ON VIEW "reporting"."budget_gl_actual" IS 'Budget-vs-GL actuals, spec Se
 
 
 
+CREATE OR REPLACE VIEW "reporting"."cash_flow" WITH ("security_invoker"='true') AS
+ SELECT "organization_id",
+    "fiscal_year_id",
+    "period_id",
+    "account_id",
+    "account_code",
+    "account_name",
+    "account_type",
+    "report_mapping",
+    "base_debit",
+    "base_credit",
+    ("base_debit" - "base_credit") AS "net_cash_movement"
+   FROM ( SELECT "tb"."organization_id",
+            "tb"."fiscal_year_id",
+            "tb"."period_id",
+            "tb"."account_id",
+            "tb"."account_code",
+            "tb"."account_name",
+            "tb"."account_type",
+            "tb"."normal_balance",
+            "tb"."debit",
+            "tb"."credit",
+            "tb"."base_debit",
+            "tb"."base_credit",
+            "tb"."signed_base_balance",
+            "coa"."report_mapping"
+           FROM ("reporting"."trial_balance" "tb"
+             JOIN "finance"."chart_of_accounts" "coa" ON (("coa"."id" = "tb"."account_id")))
+          WHERE ("tb"."account_type" = 'ASSET'::"text")) "q"
+  WHERE (("report_mapping" IS NOT NULL) AND (("upper"("report_mapping") ~~ '%CASH%'::"text") OR ("upper"("report_mapping") ~~ '%BANK%'::"text") OR ("upper"("report_mapping") ~~ '%WALLET%'::"text")));
+
+
+ALTER VIEW "reporting"."cash_flow" OWNER TO "postgres";
+
+
+CREATE OR REPLACE VIEW "reporting"."changes_in_equity" WITH ("security_invoker"='true') AS
+ SELECT "organization_id",
+    "fiscal_year_id",
+    "period_id",
+    "account_id",
+    "account_code",
+    "account_name",
+    "debit",
+    "credit",
+    "base_debit",
+    "base_credit",
+    ("base_credit" - "base_debit") AS "equity_change"
+   FROM "reporting"."trial_balance"
+  WHERE ("account_type" = 'EQUITY'::"text");
+
+
+ALTER VIEW "reporting"."changes_in_equity" OWNER TO "postgres";
+
+
 CREATE OR REPLACE VIEW "reporting"."payable_aging" WITH ("security_invoker"='true') AS
  SELECT "vb"."id" AS "bill_id",
     "vb"."bill_number",
@@ -9519,6 +9882,29 @@ CREATE OR REPLACE VIEW "reporting"."payable_aging" WITH ("security_invoker"='tru
 
 
 ALTER VIEW "reporting"."payable_aging" OWNER TO "postgres";
+
+
+CREATE OR REPLACE VIEW "reporting"."pnl" WITH ("security_invoker"='true') AS
+ SELECT "organization_id",
+    "fiscal_year_id",
+    "period_id",
+    "account_id",
+    "account_code",
+    "account_name",
+    "account_type",
+    "debit",
+    "credit",
+    "base_debit",
+    "base_credit",
+        CASE
+            WHEN ("account_type" = ANY (ARRAY['REVENUE'::"text", 'OTHER_INCOME'::"text"])) THEN ("base_credit" - "base_debit")
+            ELSE ("base_debit" - "base_credit")
+        END AS "amount"
+   FROM "reporting"."trial_balance"
+  WHERE ("account_type" = ANY (ARRAY['REVENUE'::"text", 'COST_OF_SALES'::"text", 'OPERATING_EXPENSE'::"text", 'OTHER_INCOME'::"text", 'OTHER_EXPENSE'::"text"]));
+
+
+ALTER VIEW "reporting"."pnl" OWNER TO "postgres";
 
 
 CREATE OR REPLACE VIEW "reporting"."receivable_aging" WITH ("security_invoker"='true') AS
@@ -10151,6 +10537,16 @@ ALTER TABLE ONLY "finance"."credit_notes"
 
 
 
+ALTER TABLE ONLY "finance"."currency_settings"
+    ADD CONSTRAINT "currency_settings_org_currency_key" UNIQUE ("organization_id", "currency");
+
+
+
+ALTER TABLE ONLY "finance"."currency_settings"
+    ADD CONSTRAINT "currency_settings_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "finance"."depreciation_schedule"
     ADD CONSTRAINT "depreciation_schedule_asset_id_period_id_key" UNIQUE ("asset_id", "period_id");
 
@@ -10178,6 +10574,16 @@ ALTER TABLE ONLY "finance"."distribution_lines"
 
 ALTER TABLE ONLY "finance"."exchange_rates"
     ADD CONSTRAINT "exchange_rates_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."expense_lines"
+    ADD CONSTRAINT "expense_lines_expense_line_key" UNIQUE ("expense_id", "line_number");
+
+
+
+ALTER TABLE ONLY "finance"."expense_lines"
+    ADD CONSTRAINT "expense_lines_pkey" PRIMARY KEY ("id");
 
 
 
@@ -10228,6 +10634,16 @@ ALTER TABLE ONLY "finance"."fiscal_years"
 
 ALTER TABLE "finance"."fiscal_years"
     ADD CONSTRAINT "fy_transition_requires_approval" CHECK ((("is_transition_year" = false) OR (("transition_approved_by" IS NOT NULL) AND ("transition_approved_at" IS NOT NULL)))) NOT VALID;
+
+
+
+ALTER TABLE ONLY "finance"."invoice_lines"
+    ADD CONSTRAINT "invoice_lines_invoice_line_key" UNIQUE ("invoice_id", "line_number");
+
+
+
+ALTER TABLE ONLY "finance"."invoice_lines"
+    ADD CONSTRAINT "invoice_lines_pkey" PRIMARY KEY ("id");
 
 
 
@@ -10306,6 +10722,26 @@ ALTER TABLE ONLY "finance"."reserve_policies"
 
 
 
+ALTER TABLE ONLY "finance"."settlement_batches"
+    ADD CONSTRAINT "settlement_batches_org_reference_key" UNIQUE ("organization_id", "settlement_reference");
+
+
+
+ALTER TABLE ONLY "finance"."settlement_batches"
+    ADD CONSTRAINT "settlement_batches_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."settlement_lines"
+    ADD CONSTRAINT "settlement_lines_batch_line_key" UNIQUE ("settlement_batch_id", "line_number");
+
+
+
+ALTER TABLE ONLY "finance"."settlement_lines"
+    ADD CONSTRAINT "settlement_lines_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "finance"."statement_lines"
     ADD CONSTRAINT "statement_lines_pkey" PRIMARY KEY ("id");
 
@@ -10313,6 +10749,16 @@ ALTER TABLE ONLY "finance"."statement_lines"
 
 ALTER TABLE ONLY "finance"."tax_adjustments"
     ADD CONSTRAINT "tax_adjustments_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."tax_codes"
+    ADD CONSTRAINT "tax_codes_org_code_key" UNIQUE ("organization_id", "code");
+
+
+
+ALTER TABLE ONLY "finance"."tax_codes"
+    ADD CONSTRAINT "tax_codes_pkey" PRIMARY KEY ("id");
 
 
 
@@ -10834,6 +11280,14 @@ CREATE UNIQUE INDEX "uq_upo_active_user_permission" ON "core"."user_permission_o
 
 
 
+CREATE INDEX "expense_lines_expense_id_idx" ON "finance"."expense_lines" USING "btree" ("expense_id");
+
+
+
+CREATE INDEX "expense_lines_org_id_idx" ON "finance"."expense_lines" USING "btree" ("organization_id");
+
+
+
 CREATE INDEX "idx_alloc_invoice" ON "finance"."payment_allocations" USING "btree" ("invoice_id");
 
 
@@ -11259,6 +11713,26 @@ CREATE INDEX "idx_vp_vendor" ON "finance"."vendor_payments" USING "btree" ("vend
 
 
 CREATE INDEX "idx_vpa_payment" ON "finance"."vendor_payment_allocations" USING "btree" ("vendor_payment_id");
+
+
+
+CREATE INDEX "invoice_lines_invoice_id_idx" ON "finance"."invoice_lines" USING "btree" ("invoice_id");
+
+
+
+CREATE INDEX "invoice_lines_org_id_idx" ON "finance"."invoice_lines" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "settlement_batches_org_id_idx" ON "finance"."settlement_batches" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "settlement_lines_batch_id_idx" ON "finance"."settlement_lines" USING "btree" ("settlement_batch_id");
+
+
+
+CREATE INDEX "settlement_lines_org_id_idx" ON "finance"."settlement_lines" USING "btree" ("organization_id");
 
 
 
@@ -11745,6 +12219,14 @@ CREATE OR REPLACE TRIGGER "credit_notes_audit" AFTER INSERT OR DELETE OR UPDATE 
 
 
 
+CREATE OR REPLACE TRIGGER "currency_settings_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."currency_settings" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "currency_settings_updated_at" BEFORE UPDATE ON "finance"."currency_settings" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "depreciation_schedul_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."depreciation_schedule" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
@@ -11754,6 +12236,18 @@ CREATE OR REPLACE TRIGGER "distribution_lines_audit" AFTER INSERT OR DELETE OR U
 
 
 CREATE OR REPLACE TRIGGER "exchange_rates_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."exchange_rates" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "expense_lines_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."expense_lines" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "expense_lines_org_guard" BEFORE INSERT OR UPDATE ON "finance"."expense_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_expense_line_org"();
+
+
+
+CREATE OR REPLACE TRIGGER "expense_lines_updated_at" BEFORE UPDATE ON "finance"."expense_lines" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
 
 
 
@@ -11782,6 +12276,18 @@ CREATE OR REPLACE TRIGGER "fixed_assets_audit" AFTER INSERT OR DELETE OR UPDATE 
 
 
 CREATE OR REPLACE TRIGGER "fy_updated_at" BEFORE UPDATE ON "finance"."fiscal_years" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "invoice_lines_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."invoice_lines" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "invoice_lines_org_guard" BEFORE INSERT OR UPDATE ON "finance"."invoice_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_invoice_line_org"();
+
+
+
+CREATE OR REPLACE TRIGGER "invoice_lines_updated_at" BEFORE UPDATE ON "finance"."invoice_lines" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
 
 
 
@@ -11837,11 +12343,39 @@ CREATE OR REPLACE TRIGGER "reserve_policies_audit" AFTER INSERT OR DELETE OR UPD
 
 
 
+CREATE OR REPLACE TRIGGER "settlement_batches_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."settlement_batches" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "settlement_batches_updated_at" BEFORE UPDATE ON "finance"."settlement_batches" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "settlement_lines_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."settlement_lines" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "settlement_lines_org_guard" BEFORE INSERT OR UPDATE ON "finance"."settlement_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_settlement_line_org"();
+
+
+
+CREATE OR REPLACE TRIGGER "settlement_lines_updated_at" BEFORE UPDATE ON "finance"."settlement_lines" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "statement_lines_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."statement_lines" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
 CREATE OR REPLACE TRIGGER "tax_adjustments_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."tax_adjustments" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "tax_codes_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."tax_codes" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "tax_codes_updated_at" BEFORE UPDATE ON "finance"."tax_codes" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
 
 
 
@@ -11881,10 +12415,6 @@ CREATE OR REPLACE TRIGGER "trg_asset_categories_ts" BEFORE UPDATE ON "finance"."
 
 
 
-CREATE OR REPLACE TRIGGER "trg_asset_nbv" BEFORE INSERT OR UPDATE OF "accumulated_depreciation", "base_cost" ON "finance"."fixed_assets" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_update_asset_nbv"();
-
-
-
 CREATE OR REPLACE TRIGGER "trg_asset_verification_lines_ts" BEFORE UPDATE ON "finance"."asset_verification_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_update_timestamp"();
 
 
@@ -11902,10 +12432,6 @@ CREATE OR REPLACE TRIGGER "trg_auto_update_invoice_status" AFTER INSERT OR DELET
 
 
 CREATE OR REPLACE TRIGGER "trg_bs_updated_at" BEFORE UPDATE ON "finance"."bank_statements" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_bs_sl_updated_at"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_bt_dual_approval" BEFORE INSERT OR UPDATE OF "from_amount" ON "finance"."bank_transfers" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_set_dual_approval"();
 
 
 
@@ -11937,15 +12463,7 @@ CREATE OR REPLACE TRIGGER "trg_fa_updated_at" BEFORE UPDATE ON "finance"."financ
 
 
 
-CREATE OR REPLACE TRIGGER "trg_fa_validate_ledger" BEFORE INSERT OR UPDATE OF "linked_ledger_account_id" ON "finance"."financial_accounts" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_validate_fa_ledger"();
-
-
-
 CREATE OR REPLACE TRIGGER "trg_fixed_assets_nbv" BEFORE INSERT OR UPDATE ON "finance"."fixed_assets" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_update_asset_nbv"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_fixed_assets_ts" BEFORE UPDATE ON "finance"."fixed_assets" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_update_timestamp"();
 
 
 
@@ -12026,10 +12544,6 @@ CREATE OR REPLACE TRIGGER "trg_set_dual_approval" BEFORE INSERT OR UPDATE OF "fr
 
 
 CREATE OR REPLACE TRIGGER "trg_single_default_fa" BEFORE INSERT OR UPDATE OF "is_default" ON "finance"."financial_accounts" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_enforce_single_default_fa"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_sl_prevent_double_match" BEFORE INSERT OR UPDATE OF "matched_journal_line_id" ON "finance"."statement_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_prevent_double_match"();
 
 
 
@@ -12362,50 +12876,6 @@ CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."budgets" F
 
 
 CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."clients" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."commissions" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."contractors" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_advances" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_commissions" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_compensation" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_deductions" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_employees" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_lines" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_reimbursements" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."payroll_runs" FOR EACH ROW EXECUTE FUNCTION "public"."payroll_update_timestamp"();
-
-
-
-CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "public"."subscriptions" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
 
 
 
@@ -12819,6 +13289,16 @@ ALTER TABLE ONLY "finance"."credit_notes"
 
 
 
+ALTER TABLE ONLY "finance"."currency_settings"
+    ADD CONSTRAINT "currency_settings_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."currency_settings"
+    ADD CONSTRAINT "currency_settings_rounding_account_id_fkey" FOREIGN KEY ("rounding_account_id") REFERENCES "finance"."chart_of_accounts"("id") ON DELETE RESTRICT;
+
+
+
 ALTER TABLE ONLY "finance"."depreciation_schedule"
     ADD CONSTRAINT "depreciation_schedule_asset_id_fkey" FOREIGN KEY ("asset_id") REFERENCES "finance"."fixed_assets"("id");
 
@@ -12866,6 +13346,46 @@ ALTER TABLE ONLY "finance"."distribution_lines"
 
 ALTER TABLE ONLY "finance"."exchange_rates"
     ADD CONSTRAINT "exchange_rates_entered_by_fkey" FOREIGN KEY ("entered_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."expense_lines"
+    ADD CONSTRAINT "expense_lines_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "finance"."chart_of_accounts"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."expense_lines"
+    ADD CONSTRAINT "expense_lines_cost_center_id_fkey" FOREIGN KEY ("cost_center_id") REFERENCES "finance"."dimensions"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "finance"."expense_lines"
+    ADD CONSTRAINT "expense_lines_department_id_fkey" FOREIGN KEY ("department_id") REFERENCES "finance"."dimensions"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "finance"."expense_lines"
+    ADD CONSTRAINT "expense_lines_expense_id_fkey" FOREIGN KEY ("expense_id") REFERENCES "public"."expenses"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."expense_lines"
+    ADD CONSTRAINT "expense_lines_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."expense_lines"
+    ADD CONSTRAINT "expense_lines_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "finance"."expense_lines"
+    ADD CONSTRAINT "expense_lines_tax_code_id_fkey" FOREIGN KEY ("tax_code_id") REFERENCES "finance"."tax_codes"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."expense_lines"
+    ADD CONSTRAINT "expense_lines_vendor_id_fkey" FOREIGN KEY ("vendor_id") REFERENCES "finance"."vendors"("id") ON DELETE SET NULL;
 
 
 
@@ -12984,6 +13504,31 @@ ALTER TABLE ONLY "finance"."fixed_assets"
 
 
 
+ALTER TABLE ONLY "finance"."invoice_lines"
+    ADD CONSTRAINT "invoice_lines_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "finance"."chart_of_accounts"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."invoice_lines"
+    ADD CONSTRAINT "invoice_lines_invoice_id_fkey" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."invoice_lines"
+    ADD CONSTRAINT "invoice_lines_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."invoice_lines"
+    ADD CONSTRAINT "invoice_lines_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "finance"."invoice_lines"
+    ADD CONSTRAINT "invoice_lines_tax_code_id_fkey" FOREIGN KEY ("tax_code_id") REFERENCES "finance"."tax_codes"("id") ON DELETE RESTRICT;
+
+
+
 ALTER TABLE ONLY "finance"."journal_entries"
     ADD CONSTRAINT "journal_entries_approved_by_fkey" FOREIGN KEY ("approved_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
 
@@ -13041,6 +13586,11 @@ ALTER TABLE ONLY "finance"."journal_lines"
 
 ALTER TABLE ONLY "finance"."journal_lines"
     ADD CONSTRAINT "journal_lines_journal_entry_id_fkey" FOREIGN KEY ("journal_entry_id") REFERENCES "finance"."journal_entries"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."journal_lines"
+    ADD CONSTRAINT "journal_lines_tax_code_id_fkey" FOREIGN KEY ("tax_code_id") REFERENCES "finance"."tax_codes"("id") ON DELETE RESTRICT;
 
 
 
@@ -13139,6 +13689,46 @@ ALTER TABLE ONLY "finance"."reserve_policies"
 
 
 
+ALTER TABLE ONLY "finance"."settlement_batches"
+    ADD CONSTRAINT "settlement_batches_evidence_attachment_id_fkey" FOREIGN KEY ("evidence_attachment_id") REFERENCES "finance"."attachments"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "finance"."settlement_batches"
+    ADD CONSTRAINT "settlement_batches_financial_account_id_fkey" FOREIGN KEY ("financial_account_id") REFERENCES "finance"."financial_accounts"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "finance"."settlement_batches"
+    ADD CONSTRAINT "settlement_batches_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."settlement_batches"
+    ADD CONSTRAINT "settlement_batches_platform_id_fkey" FOREIGN KEY ("platform_id") REFERENCES "finance"."platforms"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."settlement_lines"
+    ADD CONSTRAINT "settlement_lines_client_id_fkey" FOREIGN KEY ("client_id") REFERENCES "public"."clients"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "finance"."settlement_lines"
+    ADD CONSTRAINT "settlement_lines_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."settlement_lines"
+    ADD CONSTRAINT "settlement_lines_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "finance"."settlement_lines"
+    ADD CONSTRAINT "settlement_lines_settlement_batch_id_fkey" FOREIGN KEY ("settlement_batch_id") REFERENCES "finance"."settlement_batches"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "finance"."statement_lines"
     ADD CONSTRAINT "statement_lines_bank_statement_id_fkey" FOREIGN KEY ("bank_statement_id") REFERENCES "finance"."bank_statements"("id") ON DELETE CASCADE;
 
@@ -13166,6 +13756,21 @@ ALTER TABLE ONLY "finance"."tax_adjustments"
 
 ALTER TABLE ONLY "finance"."tax_adjustments"
     ADD CONSTRAINT "tax_adjustments_tax_reconciliation_id_fkey" FOREIGN KEY ("tax_reconciliation_id") REFERENCES "finance"."tax_reconciliations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."tax_codes"
+    ADD CONSTRAINT "tax_codes_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."tax_codes"
+    ADD CONSTRAINT "tax_codes_payable_account_id_fkey" FOREIGN KEY ("payable_account_id") REFERENCES "finance"."chart_of_accounts"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."tax_codes"
+    ADD CONSTRAINT "tax_codes_recoverable_account_id_fkey" FOREIGN KEY ("recoverable_account_id") REFERENCES "finance"."chart_of_accounts"("id") ON DELETE RESTRICT;
 
 
 
@@ -13321,6 +13926,11 @@ ALTER TABLE ONLY "finance"."taxpayer_profile"
 
 ALTER TABLE ONLY "finance"."vendor_bill_lines"
     ADD CONSTRAINT "vendor_bill_lines_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "finance"."chart_of_accounts"("id");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_bill_lines"
+    ADD CONSTRAINT "vendor_bill_lines_tax_code_id_fkey" FOREIGN KEY ("tax_code_id") REFERENCES "finance"."tax_codes"("id") ON DELETE RESTRICT;
 
 
 
@@ -14494,6 +15104,25 @@ CREATE POLICY "coa_update" ON "finance"."chart_of_accounts" FOR UPDATE USING (((
 ALTER TABLE "finance"."credit_notes" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "finance"."currency_settings" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "currency_settings_delete_org" ON "finance"."currency_settings" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "currency_settings_insert_org" ON "finance"."currency_settings" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "currency_settings_select_org" ON "finance"."currency_settings" FOR SELECT TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "currency_settings_update_org" ON "finance"."currency_settings" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
 ALTER TABLE "finance"."depreciation_schedule" ENABLE ROW LEVEL SECURITY;
 
 
@@ -14568,6 +15197,25 @@ CREATE POLICY "distribution_lines_update_org_scoped" ON "finance"."distribution_
 
 
 ALTER TABLE "finance"."exchange_rates" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "finance"."expense_lines" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "expense_lines_delete_org" ON "finance"."expense_lines" FOR DELETE TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "expense_lines_insert_org" ON "finance"."expense_lines" FOR INSERT TO "authenticated" WITH CHECK ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "expense_lines_select_org" ON "finance"."expense_lines" FOR SELECT TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "expense_lines_update_org" ON "finance"."expense_lines" FOR UPDATE TO "authenticated" USING ("core"."same_org"("organization_id")) WITH CHECK ("core"."same_org"("organization_id"));
+
 
 
 CREATE POLICY "fa_delete" ON "finance"."financial_accounts" FOR DELETE USING (("core"."is_finance_head"() AND "core"."same_org"("organization_id")));
@@ -14655,6 +15303,25 @@ CREATE POLICY "fy_select" ON "finance"."fiscal_years" FOR SELECT USING ((("auth"
 
 
 CREATE POLICY "fy_update" ON "finance"."fiscal_years" FOR UPDATE USING (("core"."is_finance_head"() AND "core"."same_org"("organization_id")));
+
+
+
+ALTER TABLE "finance"."invoice_lines" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "invoice_lines_delete_org" ON "finance"."invoice_lines" FOR DELETE TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "invoice_lines_insert_org" ON "finance"."invoice_lines" FOR INSERT TO "authenticated" WITH CHECK ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "invoice_lines_select_org" ON "finance"."invoice_lines" FOR SELECT TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "invoice_lines_update_org" ON "finance"."invoice_lines" FOR UPDATE TO "authenticated" USING ("core"."same_org"("organization_id")) WITH CHECK ("core"."same_org"("organization_id"));
 
 
 
@@ -14827,6 +15494,44 @@ CREATE POLICY "reserve_policies_update_org_scoped" ON "finance"."reserve_policie
 
 
 
+ALTER TABLE "finance"."settlement_batches" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "settlement_batches_delete_org" ON "finance"."settlement_batches" FOR DELETE TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "settlement_batches_insert_org" ON "finance"."settlement_batches" FOR INSERT TO "authenticated" WITH CHECK ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "settlement_batches_select_org" ON "finance"."settlement_batches" FOR SELECT TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "settlement_batches_update_org" ON "finance"."settlement_batches" FOR UPDATE TO "authenticated" USING ("core"."same_org"("organization_id")) WITH CHECK ("core"."same_org"("organization_id"));
+
+
+
+ALTER TABLE "finance"."settlement_lines" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "settlement_lines_delete_org" ON "finance"."settlement_lines" FOR DELETE TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "settlement_lines_insert_org" ON "finance"."settlement_lines" FOR INSERT TO "authenticated" WITH CHECK ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "settlement_lines_select_org" ON "finance"."settlement_lines" FOR SELECT TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "settlement_lines_update_org" ON "finance"."settlement_lines" FOR UPDATE TO "authenticated" USING ("core"."same_org"("organization_id")) WITH CHECK ("core"."same_org"("organization_id"));
+
+
+
 CREATE POLICY "sl_delete_org_scoped" ON "finance"."statement_lines" FOR DELETE USING ((("auth"."uid"() IS NOT NULL) AND (EXISTS ( SELECT 1
    FROM "finance"."bank_statements" "bs"
   WHERE (("bs"."id" = "statement_lines"."bank_statement_id") AND "core"."same_org"("bs"."organization_id"))))));
@@ -14871,6 +15576,25 @@ CREATE POLICY "ta_update_restricted" ON "finance"."tax_adjustments" FOR UPDATE U
 
 
 ALTER TABLE "finance"."tax_adjustments" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "finance"."tax_codes" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "tax_codes_delete_org" ON "finance"."tax_codes" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "tax_codes_insert_org" ON "finance"."tax_codes" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "tax_codes_select_org" ON "finance"."tax_codes" FOR SELECT TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "tax_codes_update_org" ON "finance"."tax_codes" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
 
 
 CREATE POLICY "tax_comp_delete" ON "finance"."tax_computations" FOR DELETE TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
@@ -15686,6 +16410,8 @@ ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
 
 
 
+
+
 GRANT USAGE ON SCHEMA "audit" TO "authenticated";
 
 
@@ -15718,7 +16444,6 @@ GRANT ALL ON SCHEMA "reporting" TO "authenticated";
 GRANT ALL ON SCHEMA "reporting" TO "service_role";
 GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
-
 
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
 GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
@@ -15773,6 +16498,7 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
+
 
 
 
@@ -16050,6 +16776,8 @@ REVOKE ALL ON FUNCTION "reporting"."unreconciled_summary"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
 
 
+
+
 GRANT SELECT,INSERT ON TABLE "audit"."audit_log" TO "authenticated";
 GRANT ALL ON TABLE "audit"."audit_log" TO "service_role";
 
@@ -16252,6 +16980,11 @@ GRANT ALL ON TABLE "finance"."credit_notes" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "finance"."currency_settings" TO "authenticated";
+GRANT ALL ON TABLE "finance"."currency_settings" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "finance"."depreciation_schedule" TO "authenticated";
 GRANT ALL ON TABLE "finance"."depreciation_schedule" TO "service_role";
 
@@ -16269,6 +17002,11 @@ GRANT ALL ON TABLE "finance"."distribution_lines" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."exchange_rates" TO "authenticated";
 GRANT ALL ON TABLE "finance"."exchange_rates" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."expense_lines" TO "authenticated";
+GRANT ALL ON TABLE "finance"."expense_lines" TO "service_role";
 
 
 
@@ -16304,6 +17042,11 @@ GRANT ALL ON TABLE "finance"."fiscal_year_summary" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."fixed_assets" TO "authenticated";
 GRANT ALL ON TABLE "finance"."fixed_assets" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."invoice_lines" TO "authenticated";
+GRANT ALL ON TABLE "finance"."invoice_lines" TO "service_role";
 
 
 
@@ -16373,6 +17116,16 @@ GRANT ALL ON TABLE "finance"."sequence_status" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "finance"."settlement_batches" TO "authenticated";
+GRANT ALL ON TABLE "finance"."settlement_batches" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."settlement_lines" TO "authenticated";
+GRANT ALL ON TABLE "finance"."settlement_lines" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "finance"."statement_lines" TO "authenticated";
 GRANT ALL ON TABLE "finance"."statement_lines" TO "service_role";
 
@@ -16380,6 +17133,11 @@ GRANT ALL ON TABLE "finance"."statement_lines" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."tax_adjustments" TO "authenticated";
 GRANT ALL ON TABLE "finance"."tax_adjustments" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."tax_codes" TO "authenticated";
+GRANT ALL ON TABLE "finance"."tax_codes" TO "service_role";
 
 
 
@@ -16799,6 +17557,16 @@ GRANT ALL ON TABLE "public"."v_user_roles" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "reporting"."trial_balance" TO "authenticated";
+GRANT ALL ON TABLE "reporting"."trial_balance" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "reporting"."balance_sheet" TO "authenticated";
+GRANT ALL ON TABLE "reporting"."balance_sheet" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "reporting"."budget_vs_actual" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."budget_vs_actual" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."budget_vs_actual" TO "authenticated";
@@ -16815,9 +17583,24 @@ GRANT SELECT ON TABLE "reporting"."budget_gl_actual" TO "authenticated";
 
 
 
+GRANT ALL ON TABLE "reporting"."cash_flow" TO "authenticated";
+GRANT ALL ON TABLE "reporting"."cash_flow" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "reporting"."changes_in_equity" TO "authenticated";
+GRANT ALL ON TABLE "reporting"."changes_in_equity" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "reporting"."payable_aging" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."payable_aging" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."payable_aging" TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "reporting"."pnl" TO "authenticated";
+GRANT ALL ON TABLE "reporting"."pnl" TO "service_role";
 
 
 
@@ -16871,7 +17654,6 @@ GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_ro
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 
 
-
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "service_role";
 
@@ -16894,10 +17676,14 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON SEQ
 
 
 
+
+
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "postgres";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON FUNCTIONS TO "service_role";
+
+
 
 
 
@@ -16910,5 +17696,8 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 
 
+
+
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
+

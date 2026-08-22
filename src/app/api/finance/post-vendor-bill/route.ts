@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
-import { postVendorBillSchema, validateBody } from '@/lib/validations';
+import { postVendorBillSchema, validateBody, validateExchangeRate } from '@/lib/validations';
 import { checkBudgetForTransaction, createBudgetAlertNotifications } from '@/services/budget-check.service';
 
 function getData<T = any>(res: any): T | null {
@@ -15,7 +15,7 @@ function getData<T = any>(res: any): T | null {
 // BUG-001 FIX: Use RPC with CORRECT signature (p_description, p_transaction_date, p_period_id, p_lines, ...)
 // BUG-005 FIX: WHT journal lines constructed explicitly, no pop() on wrong line
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('APPROVE_EXPENSE');
+  const auth = await requirePermission('APPROVE_VENDOR_BILL');
   if (auth instanceof NextResponse) return auth;
   // H3 FIX: Enforce MFA for financial posting
   const mfaCheck = await enforceMFA(auth);
@@ -51,6 +51,12 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
+    // BUG-008 FIX: validate exchange rate for non-PKR currencies
+    const rateError = validateExchangeRate(bill.currency, bill.exchange_rate);
+    if (rateError) {
+      return NextResponse.json({ error: rateError }, { status: 400 });
+    }
+
     // 2. Idempotency check
     const existingJournal = getData(await supabase
       .from('finance.journal_entries')
@@ -76,10 +82,12 @@ export async function POST(req: NextRequest) {
       amount: totalBillAmount,
       currency: bill.currency || 'PKR',
       organization_id: orgId,
+      // BUG-007 FIX: pass server-side authenticated supabase client.
+      supabaseClient: supabase,
     });
 
     if (budgetCheck.notifications && budgetCheck.notifications.length > 0) {
-      await createBudgetAlertNotifications(budgetCheck.notifications, orgId, auth.userId, vendorBillId);
+      await createBudgetAlertNotifications(budgetCheck.notifications, orgId, auth.userId, vendorBillId, supabase);
     }
 
     if (budgetCheck.blocked) {

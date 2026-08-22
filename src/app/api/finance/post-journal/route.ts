@@ -157,37 +157,55 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // ── 8. BUG-001 FIX: Post via GL engine with CORRECT RPC signature ──
-    //    Since the RPC creates a NEW journal entry, we:
-    //    a) Build lines from existing journal (strip journal_entry_id — RPC sets it)
-    //    b) Call RPC to create+post a new journal (atomically updates GL)
-    //    c) Delete the old unposted journal + lines
-    //    d) Update source records to point to the new journal ID
-    const rpcLines = journalLines.map((l: any) => ({
-      account_id: l.account_id,
-      debit_amount: l.debit_amount,
-      credit_amount: l.credit_amount,
-      description: l.description,
-    }));
+    // ── 8. BUG-009 FIX: Atomic journal replacement via single DB function ──
+    // The previous implementation called finance.post_journal_entry to create
+    // a new POSTED journal, then SEPARATELY (a) updated the source record's
+    // journal_entry_id pointer, (b) deleted the old journal_lines, and (c)
+    // deleted the old journal_entries row — three sequential client-side
+    // operations outside any transaction. If (b) or (c) failed, the system
+    // ended up with TWO journals for the same source: one POSTED and one
+    // APPROVED that could be re-posted by retrying this route.
+    //
+    // FIX: a new finance.post_existing_journal_entry(p_journal_id, p_posted_by)
+    // function (added in supabase/migrations/20260822000001_bug_fix_api_services.sql)
+    // does the entire operation inside one Postgres transaction:
+    //   1. Reads + locks the old APPROVED journal
+    //   2. Verifies org-scoping via core.same_org()
+    //   3. Builds lines JSON from the old journal_lines
+    //   4. Calls finance.post_journal_entry to create the new POSTED journal
+    //   5. Copies audit-trail metadata (submitted/verified/approved_by/at)
+    //   6. Updates source record's journal_entry_id pointer to the new journal
+    //   7. Deletes the old APPROVED draft (CASCADE removes the old lines)
+    // Either all of it commits or none of it does.
 
-    const { data: newJournalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
-      p_description: journal.description || journal.reference,
-      p_transaction_date: journal.journal_date || journal.entry_date || new Date().toISOString().split('T')[0],
-      p_period_id: period.id,
-      p_lines: JSON.stringify(rpcLines),
-      p_currency: journal.currency || 'PKR',
-      p_exchange_rate: journal.exchange_rate || 1,
-      p_source_type: journal.source_type || 'MANUAL_JOURNAL',
-      p_source_id: journal.source_id || journal_entry_id,
-      p_project_id: journal.project_id || null,
-      p_department_id: journal.department_id || null,
-    });
+    // Sanity-check the journal is still balanced before calling the atomic
+    // function (the function itself also enforces this via the trigger on
+    // journal_lines, but surfacing a clear error here is friendlier).
+    if (Math.abs(totalDebit - totalCredit) > 0.01) {
+      return NextResponse.json({
+        error: `Journal entry is unbalanced. Debit: ${totalDebit}, Credit: ${totalCredit}`,
+        total_debit: totalDebit,
+        total_credit: totalCredit,
+      }, { status: 400 });
+    }
+
+    const { data: newJournalId, error: postErr } = await supabase
+      .schema('finance')
+      .rpc('post_existing_journal_entry', {
+        p_journal_id: journal_entry_id,
+        p_posted_by: auth.userId,
+      });
 
     if (postErr || !newJournalId) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
 
-    // Fetch the new posted journal for reference
+    // Copy approval metadata — handled inside the DB function, but kept here
+    // as a no-op for backward source compatibility.
+
+    // Fetch the new posted journal for reference number (used in audit log
+    // + response). The actual posting + metadata copy + source-record pointer
+    // update were already done atomically by finance.post_existing_journal_entry.
     const newJournal = getData(
       await supabase
         .from('finance.journal_entries')
@@ -195,44 +213,11 @@ export async function POST(req: NextRequest) {
         .eq('id', newJournalId)
         .single()
     );
-    // C6 FIX: Null guard
     if (!newJournal) {
-      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + newJournalId }, { status: 500 });
+      // The journal exists (the RPC returned its ID) — we just failed to fetch
+      // it back for the response. Don't fail the request; surface the warning.
+      console.error('Post-journal: failed to fetch new journal metadata for ID:', newJournalId);
     }
-
-    // Copy approval metadata from old journal to new
-    if (journal.approved_by || journal.approved_at) {
-      await supabase
-        .from('finance.journal_entries')
-        .update({
-          approved_by: journal.approved_by,
-          approved_at: journal.approved_at,
-        })
-        .eq('id', newJournalId);
-    }
-
-    // H10 FIX: Proper source table name mapping
-    const SOURCE_TABLE_MAP: Record<string, string> = {
-      EXPENSE: 'expenses',
-      INCOME: 'incomes',
-      INVOICE: 'invoices',
-      VENDOR_BILL: 'vendor_bills',
-      CREDIT_NOTE: 'credit_notes',
-      PAYMENT_RECEIPT: 'payment_receipts',
-      PAYMENT_REVERSAL: 'payment_receipts',
-      PROFIT_DISTRIBUTION: 'finance.profit_distributions',
-      YEAR_END_CLOSE: 'finance.fiscal_years',
-      MANUAL_JOURNAL: 'finance.journal_entries',
-    };
-    const sourceTable = SOURCE_TABLE_MAP[journal.source_type] || 'finance.journal_entries';
-    await supabase
-      .from(sourceTable)
-      .update({ journal_entry_id: newJournalId })
-      .eq('id', journal.source_id);
-
-    // Delete old unposted journal lines + header
-    await supabase.from('finance.journal_lines').delete().eq('journal_entry_id', journal_entry_id);
-    await supabase.from('finance.journal_entries').delete().eq('id', journal_entry_id);
 
     // ── 9. Audit log ──
     let auditLogFailed = false;
@@ -242,13 +227,13 @@ export async function POST(req: NextRequest) {
         p_action: 'JOURNAL_POSTED',
         p_entity_type: 'journal_entry',
         p_entity_id: newJournalId,
-        p_description: `Journal posted to GL: ${newJournal.reference || journal.reference} (DR: ${totalDebit.toFixed(2)}, CR: ${totalCredit.toFixed(2)}, Lines: ${journalLines.length}). Previous draft ID: ${journal_entry_id}`,
+        p_description: `Journal posted to GL: ${newJournal?.reference || journal.reference} (DR: ${totalDebit.toFixed(2)}, CR: ${totalCredit.toFixed(2)}, Lines: ${journalLines.length}). Previous draft ID: ${journal_entry_id}`,
         p_previous_status: 'APPROVED',
         p_new_status: 'POSTED',
         p_source_module: 'journal',
         p_severity: 'high',
         p_new_values: {
-          reference: newJournal.reference || journal.reference,
+          reference: newJournal?.reference || journal.reference,
           total_debit: totalDebit,
           total_credit: totalCredit,
           line_count: journalLines.length,
@@ -270,7 +255,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       journalId: newJournalId,
-      reference: newJournal.reference || journal.reference,
+      reference: newJournal?.reference || journal.reference,
       total_debit: totalDebit,
       total_credit: totalCredit,
       line_count: journalLines.length,

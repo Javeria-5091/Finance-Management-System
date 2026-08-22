@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
-import { postIncomeSchema, validateBody } from '@/lib/validations';
+import { postIncomeSchema, validateBody, validateExchangeRate } from '@/lib/validations';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -36,6 +36,12 @@ export async function POST(req: NextRequest) {
     }
     if (income.status !== 'APPROVED') {
       return NextResponse.json({ error: 'Only APPROVED incomes can be posted. Current: ' + income.status }, { status: 400 });
+    }
+
+    // BUG-008 FIX: validate exchange rate for non-PKR currencies
+    const rateError = validateExchangeRate(income.currency, income.exchange_rate);
+    if (rateError) {
+      return NextResponse.json({ error: rateError }, { status: 400 });
     }
 
     // 2. Already posted? (Idempotency check)

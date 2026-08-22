@@ -76,6 +76,7 @@ export async function PATCH(
       .from('clients')
       .update(updates)
       .eq('id', id)
+      .eq('organization_id', auth.orgId)
       .select()
       .single();
  
@@ -123,16 +124,22 @@ export async function DELETE(
     const { id } = params;
  
     // Check if client has active invoices or projects
+    // BUG FIX (Audit M-2): add .eq('organization_id', auth.orgId) to both
+    // count queries. The previous code filtered only by client_id, so the
+    // counts could leak how many active invoices/projects exist for a given
+    // client_id in OTHER organizations (cross-tenant count leak).
     const { count: activeInvoices } = await supabase
       .from('invoices')
       .select('id', { count: 'exact', head: true })
       .eq('client_id', id)
+      .eq('organization_id', auth.orgId)
       .in('status', ['DRAFT', 'SUBMITTED', 'APPROVED', 'ISSUED', 'PARTIALLY_PAID']);
- 
+
     const { count: activeProjects } = await supabase
       .from('projects')
       .select('id', { count: 'exact', head: true })
       .eq('client_id', id)
+      .eq('organization_id', auth.orgId)
       .eq('is_active', true);
  
     if ((activeInvoices || 0) > 0 || (activeProjects || 0) > 0) {

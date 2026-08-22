@@ -1,4 +1,14 @@
-import { supabase } from '@/lib/supabase';
+import { supabase as browserSupabase } from '@/lib/supabase';
+import type { SupabaseClient } from '@supabase/supabase-js';
+
+// BUG-007 FIX: Type alias for the optional supabase client parameter.
+// API routes pass their server-side authenticated client; frontend code
+// omits it and the browser client is used.
+type SClient = SupabaseClient<any, any, any>;
+
+function resolveClient(override?: SClient | null): SClient {
+  return override || (browserSupabase as unknown as SClient);
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -58,6 +68,12 @@ export interface PostDistributionWithWHTInput {
     exempt_owner_ids?: string[];
     exempt_reason?: string;
   };
+  /**
+   * BUG-007 FIX: Optional server-side authenticated supabase client.
+   * API routes pass their server-side client (from getAuthSupabase()) so
+   * distribution/WHT queries run with the authenticated user's RLS context.
+   */
+  supabaseClient?: SClient | null;
 }
 
 // ─── Default Withholding Tax Config (Pakistan dividend withholding) ──────────
@@ -85,8 +101,10 @@ function getData<T = any>(res: any): T | null {
 // Reads from core.distribution_tax_config (organization-scoped, configurable)
 
 export async function getWithholdingTaxConfig(
-  organizationId: string
+  organizationId: string,
+  supabaseClient?: SClient | null
 ): Promise<WithholdingTaxConfig> {
+  const supabase = resolveClient(supabaseClient);
   try {
     const config = getData<WithholdingTaxConfig>(
       await supabase
@@ -171,7 +189,8 @@ export function calculateWithholdingTax(
 export async function postDistributionWithWHT(
   input: PostDistributionWithWHTInput
 ) {
-  const { distribution_id, organization_id, period_id, declared_by, description, withholding_override } = input;
+  const { distribution_id, organization_id, period_id, declared_by, description, withholding_override, supabaseClient } = input;
+  const supabase = resolveClient(supabaseClient);
 
   // 1. Fetch distribution with lines
   // BUG FIX (verified against schema): finance.distributions does not
@@ -227,7 +246,7 @@ export async function postDistributionWithWHT(
   }
 
   // 2. Check WHT config
-  const whtConfig = await getWithholdingTaxConfig(organization_id);
+  const whtConfig = await getWithholdingTaxConfig(organization_id, supabaseClient);
 
   if (whtConfig.enabled && !whtConfig.withholding_tax_account_id) {
     return {
@@ -388,8 +407,10 @@ export async function recordWithholdingForTaxCompliance(
   organizationId: string,
   postedBy: string,
   journalId: string,
-  fiscalYearId?: string
+  fiscalYearId?: string,
+  supabaseClient?: SClient | null
 ): Promise<{ success: boolean; error?: string }> {
+  const supabase = resolveClient(supabaseClient);
   if (whtCalculation.total_withholding_tax <= 0) {
     return { success: true }; // No WHT to record
   }

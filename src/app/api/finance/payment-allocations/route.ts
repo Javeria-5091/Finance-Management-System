@@ -120,7 +120,7 @@ export async function POST(req: NextRequest) {
           await supabase.from('invoices').update({
             amount_paid: newPaid,
             status: newStatus,
-          }).eq('id', alloc.invoice_id);
+          }).eq('id', alloc.invoice_id).eq('organization_id', auth.orgId);
         }
       }
     }
@@ -134,7 +134,7 @@ export async function POST(req: NextRequest) {
       amount_allocated: newAmountAllocated,
       unallocated_amount: newUnallocated,
       status: newStatus,
-    }).eq('id', payment_receipt_id);
+    }).eq('id', payment_receipt_id).eq('organization_id', auth.orgId);
  
     // Audit log
     try {

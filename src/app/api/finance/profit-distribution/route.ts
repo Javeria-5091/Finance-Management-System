@@ -7,6 +7,7 @@ import {
   recordWithholdingForTaxCompliance,
   type PostDistributionWithWHTInput,
 } from '@/services/distribution-wht.service';
+import { validateExchangeRate } from '@/lib/validations';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -81,6 +82,11 @@ export async function POST(req: NextRequest) {
         error: `Only APPROVED distributions can be posted. Current: ${distribution.status}`,
       }, { status: 400 });
     }
+    // BUG-008 FIX: validate exchange rate for non-PKR currencies
+    const rateError = validateExchangeRate(distribution.currency, distribution.exchange_rate);
+    if (rateError) {
+      return NextResponse.json({ error: rateError }, { status: 400 });
+    }
  
     // 2. Idempotency check — already posted?
     const existingJournal = getData(
@@ -101,11 +107,15 @@ export async function POST(req: NextRequest) {
     }
  
     // 3. Get open period
+    // BUG-012 FIX (High): add organization_id filter. Without this, the
+    // query could return an OPEN period from another organization, causing
+    // cross-tenant GL postings.
     const period = getData(
       await supabase
         .from('finance.accounting_periods')
         .select('id')
         .eq('status', 'OPEN')
+        .eq('organization_id', orgId)
         .order('start_date', { ascending: false })
         .limit(1)
         .single()
@@ -124,8 +134,10 @@ export async function POST(req: NextRequest) {
       description: description || undefined,
       distribution_date: distribution_date || new Date().toISOString().split('T')[0],
       withholding_override,
+      // BUG-007 FIX: pass server-side authenticated supabase client.
+      supabaseClient: supabase,
     };
- 
+
     const result = await postDistributionWithWHT(input);
  
     if ('error' in result && result.status) {
@@ -219,7 +231,9 @@ export async function POST(req: NextRequest) {
       whtCalculation,
       orgId,
       auth.userId,
-      journalId
+      journalId,
+      undefined,        // fiscalYearId (optional, not currently tracked here)
+      supabase,         // BUG-007 FIX: server-side authenticated supabase client
     );
  
     // 10. Audit log
@@ -318,7 +332,7 @@ export async function GET(req: NextRequest) {
     }
  
     const { getWithholdingTaxConfig, calculateWithholdingTax } = await import('@/services/distribution-wht.service');
-    const whtConfig = await getWithholdingTaxConfig(orgId);
+        const whtConfig = await getWithholdingTaxConfig(orgId, supabase);
  
     const linesWithWHT = calculateWithholdingTax(
       distribution.distribution_lines || [],

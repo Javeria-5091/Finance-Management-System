@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { sanitizeSearch } from '@/lib/validations';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
  
@@ -23,7 +24,7 @@ export async function GET(req: NextRequest) {
       .order('sequence_code', { ascending: true });
  
     if (prefix) {
-      query = query.ilike('sequence_code', `${prefix}%`);
+      query = query.ilike('sequence_code', `${sanitizeSearch(prefix)}%`);
     }
  
     const { data, error } = await query;

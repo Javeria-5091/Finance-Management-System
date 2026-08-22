@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { sanitizeSearch } from '@/lib/validations';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { getAuthUser, requirePermission } from '@/lib/api-auth';
 import { createServerClient } from '@supabase/ssr';
@@ -16,10 +17,12 @@ function getData<T = any>(res: any): T | null {
 // change the match semantics. We strip characters that have special meaning
 // in the PostgREST filter grammar and escape ILIKE wildcards.
 function sanitizeIlikeTerm(raw: string): string {
-  return raw
-    .replace(/[,()]/g, '') // PostgREST filter-syntax separators/grouping
-    .replace(/[%_]/g, (c) => `\\${c}`) // escape ILIKE wildcards
-    .slice(0, 100);
+  // BUG FIX (Audit M-13): delegate to the shared sanitizeSearch() helper
+  // from @/lib/validations, which also escapes single quotes, dots, and
+  // parentheses. The previous local implementation only stripped ,()
+  // characters and escaped %_, leaving ' and . unescaped — a weaker
+  // sanitization than the rest of the codebase.
+  return sanitizeSearch(raw).slice(0, 100);
 }
  
 // ─── GET: List all users with roles and permissions ───
