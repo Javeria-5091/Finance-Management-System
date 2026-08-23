@@ -27,7 +27,7 @@ function createDB() {
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    { cookies: { getAll: async () => (await cookies()).getAll(), setAll: () => {} } }
+    { cookies: { getAll: async () => (await cookies()).getAll(), setAll(cookiesToSet: any[]) { try { cookiesToSet.forEach(({ name, value, options }: any) => cookieStore.set(name, value)); } catch {} } } }
   );
 }
 

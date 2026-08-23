@@ -1,3 +1,4 @@
+import { sanitizeSearch } from '@/lib/validations';
 import { supabase as browserSupabase } from '@/lib/supabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -46,7 +47,7 @@ export async function getAuditLogs(filters: AuditLogFilters = {}): Promise<{
 
   if (filters.search) {
     query = query.or(
-      `user_name.ilike.%${filters.search}%,user_email.ilike.%${filters.search}%,reason.ilike.%${filters.search}%,entity_type.ilike.%${filters.search}%,description.ilike.%${filters.search}%,action.ilike.%${filters.search}%`
+      `user_name.ilike.%${sanitizeSearch(filters.search)}%,user_email.ilike.%${sanitizeSearch(filters.search)}%,reason.ilike.%${sanitizeSearch(filters.search)}%,entity_type.ilike.%${sanitizeSearch(filters.search)}%,description.ilike.%${sanitizeSearch(filters.search)}%,action.ilike.%${sanitizeSearch(filters.search)}%`
     );
   }
 
@@ -147,7 +148,7 @@ export async function exportAuditLogsToCSV(filters: AuditLogFilters = {}): Promi
 
   if (filters.search) {
     query = query.or(
-      `user_name.ilike.%${filters.search}%,reason.ilike.%${filters.search}%,description.ilike.%${filters.search}%`
+      `user_name.ilike.%${sanitizeSearch(filters.search)}%,reason.ilike.%${sanitizeSearch(filters.search)}%,description.ilike.%${sanitizeSearch(filters.search)}%`
     );
   }
 

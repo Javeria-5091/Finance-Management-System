@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
  
     // C4 FIX: Authorization check — only allow sending to self or admin can send to anyone
     const targetUserId = user_id || auth.userId;
-    if (targetUserId !== auth.userId && auth.role !== 'CEO' && auth.role !== 'Admin') {
+    if (targetUserId !== auth.userId && auth.role !== 'CEO') {
       return NextResponse.json({ error: 'You can only create notifications for yourself' }, { status: 403 });
     }
 

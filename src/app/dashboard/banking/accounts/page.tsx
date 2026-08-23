@@ -234,7 +234,7 @@ export default function AccountsPage() {
               account={acct}
               onClick={() => {
                 // TODO: Navigate to statements for this account
-                window.location.href = `/banking/statements?account=${acct.financial_account_id}`;
+                window.location.href = `/dashboard/banking/statements?account=${acct.financial_account_id}`;
               }}
             />
           ))}

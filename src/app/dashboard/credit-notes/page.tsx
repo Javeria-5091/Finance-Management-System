@@ -54,7 +54,7 @@ interface FormData {
 // ==========================================
 function formatCurrency(amount: number, currency: string): string {
   try {
-    return new Intl.NumberFormat("en-US", {
+    return new Intl.NumberFormat("en-PK", {
       style: "currency",
       currency: currency || "PKR",
       minimumFractionDigits: 0,
@@ -66,7 +66,7 @@ function formatCurrency(amount: number, currency: string): string {
 }
 
 function formatNumber(num: number): string {
-  return num.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  return num.toLocaleString("en-PK", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
 const STATUS_STYLES: Record<string, string> = {

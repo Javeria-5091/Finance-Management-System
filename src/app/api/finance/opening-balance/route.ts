@@ -1,30 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requirePermission } from '@/lib/api-auth';
+import { requirePermission, getAuthSupabase } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
-import { createServerClient } from '@supabase/ssr';
-import { cookies } from 'next/headers';
- 
-function db() {
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll: async () => (await cookies()).getAll(),
-        setAll: async (cookiesToSet: any[]) => {   
-          try {
-            const cookieStore = await cookies();
-            cookiesToSet.forEach(({ name, value, options }: any) =>
-              cookieStore.set(name, value, options)
-            );
-          } catch {
-            // Server Component — read-only cookies
-          }
-        }
-      }
-    }
-  );
-}
  
 // P0: Opening Balance Import API
 // Accepts CSV rows and creates balanced opening journal entries
@@ -46,7 +22,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const { action, rows, fiscalYearId } = await req.json();
-    const supabase = db();
+    const { supabase } = await getAuthSupabase(req);
  
     if (action === 'import') {
       if (!rows || !Array.isArray(rows) || rows.length === 0) {

@@ -8,7 +8,6 @@ import ExpenseForm from "@/components/sections/ExpenseForm";
 import StatusActions from "@/components/finance/StatusActions";
 import ReasonModal from "@/components/finance/ReasonModal";
 import { Plus, AlertTriangle } from "lucide-react";
-import { logAction } from "@/lib/logAction";
 import { callWorkflow } from "@/lib/workflow";
 import toast from "react-hot-toast";
 

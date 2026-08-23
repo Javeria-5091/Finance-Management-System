@@ -40,7 +40,7 @@ const APPROVAL_ROLES: Record<string, number> = {
   TECHNICAL_ADMIN: 15,
   EMPLOYEE: 10,
   VIEWER: 0,
-  Admin: 100,
+
 };
 
 // ---------- Core: get authenticated user from session ----------

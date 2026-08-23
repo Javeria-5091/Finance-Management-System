@@ -3,7 +3,7 @@ import { validateExchangeRate } from '@/lib/validations';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
-import { creditNotePostSchema, validateBody } from '@/lib/validations';
+import { creditNoteCreateSchema, creditNotePostSchema, validateBody } from '@/lib/validations';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -49,7 +49,9 @@ export async function PATCH(
 
   try {
     const { id } = params;
-    const body = await req.json();
+    const bodyValidation = validateBody(creditNoteCreateSchema.partial(), await req.json());
+    if (!bodyValidation.success) return NextResponse.json({ error: bodyValidation.error }, { status: 400 });
+    const body = bodyValidation.data as any;
 
     const existing = getData(await supabase
       .from('credit_notes')
@@ -72,6 +74,7 @@ export async function PATCH(
       .from('credit_notes')
       .update(updates)
       .eq('id', id)
+      .eq('organization_id', auth.orgId)
       .select()
       .single();
 

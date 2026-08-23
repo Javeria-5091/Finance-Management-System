@@ -69,7 +69,7 @@ export default function NotificationsPage() {
         const { error } = await (await import("@/lib/supabase")).supabase
           .from("profiles")
           .update({ notification_settings: payload })
-          .eq("id", user.id);
+          .eq("user_id", user.id);
         if (error) {
           // Fallback: save to localStorage
           localStorage.setItem(`notif_${user.id}`, JSON.stringify(payload));

@@ -249,11 +249,13 @@ export async function POST(req: NextRequest) {
       });
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
+      auditLogFailed = true;
     }
  
     return NextResponse.json({
       success: true,
       journalId,
+      audit_log_warning: auditLogFailed ? 'Posting succeeded but the audit log entry failed to write. Please notify an administrator.' : undefined,
       reference,
       totalDebit: journal?.total_debit,
       totalCredit: journal?.total_credit,
