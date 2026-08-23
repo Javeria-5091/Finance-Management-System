@@ -8550,7 +8550,7 @@ CREATE TABLE IF NOT EXISTS "public"."invoices" (
     "project_id" "uuid",
     "invoice_number" character varying(50) NOT NULL,
     "client_name" character varying(255) NOT NULL,
-    "amount" numeric(12,2) NOT NULL,
+    "amount" numeric(18,2) NOT NULL,
     "status" character varying(50) DEFAULT 'DRAFT'::character varying,
     "issue_date" "date" DEFAULT CURRENT_DATE NOT NULL,
     "due_date" "date" NOT NULL,
@@ -10365,8 +10365,18 @@ ALTER TABLE ONLY "core"."approval_actions"
 
 
 
+ALTER TABLE "core"."approval_limits"
+    ADD CONSTRAINT "approval_limits_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "core"."approval_limits"
     ADD CONSTRAINT "approval_limits_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "core"."approval_requests"
+    ADD CONSTRAINT "approval_requests_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10387,6 +10397,11 @@ ALTER TABLE ONLY "core"."approval_steps"
 
 ALTER TABLE ONLY "core"."budget_policies"
     ADD CONSTRAINT "budget_policies_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "core"."delegations"
+    ADD CONSTRAINT "delegations_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10412,6 +10427,11 @@ ALTER TABLE ONLY "core"."idempotency_keys"
 
 ALTER TABLE ONLY "core"."integration_events"
     ADD CONSTRAINT "integration_events_idempotency_unique" UNIQUE ("organization_id", "source_module", "event_type", "idempotency_key");
+
+
+
+ALTER TABLE "core"."integration_events"
+    ADD CONSTRAINT "integration_events_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10490,6 +10510,11 @@ ALTER TABLE ONLY "core"."user_roles"
 
 
 
+ALTER TABLE "finance"."accounting_periods"
+    ADD CONSTRAINT "accounting_periods_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."accounting_periods"
     ADD CONSTRAINT "accounting_periods_pkey" PRIMARY KEY ("id");
 
@@ -10515,6 +10540,11 @@ ALTER TABLE ONLY "finance"."asset_categories"
 
 
 
+ALTER TABLE "finance"."asset_categories"
+    ADD CONSTRAINT "asset_categories_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."asset_categories"
     ADD CONSTRAINT "asset_categories_pkey" PRIMARY KEY ("id");
 
@@ -10530,6 +10560,11 @@ ALTER TABLE ONLY "finance"."asset_verification_lines"
 
 
 
+ALTER TABLE "finance"."asset_verifications"
+    ADD CONSTRAINT "asset_verifications_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."asset_verifications"
     ADD CONSTRAINT "asset_verifications_pkey" PRIMARY KEY ("id");
 
@@ -10537,6 +10572,11 @@ ALTER TABLE ONLY "finance"."asset_verifications"
 
 ALTER TABLE ONLY "finance"."asset_verifications"
     ADD CONSTRAINT "asset_verifications_verification_code_key" UNIQUE ("verification_code");
+
+
+
+ALTER TABLE "finance"."attachments"
+    ADD CONSTRAINT "attachments_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10555,8 +10595,18 @@ ALTER TABLE ONLY "finance"."attendance_period_snapshots"
 
 
 
+ALTER TABLE "finance"."bank_statements"
+    ADD CONSTRAINT "bank_statements_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."bank_statements"
     ADD CONSTRAINT "bank_statements_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "finance"."bank_transfers"
+    ADD CONSTRAINT "bank_transfers_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10570,8 +10620,18 @@ ALTER TABLE ONLY "finance"."budget_commitments"
 
 
 
+ALTER TABLE "finance"."budget_lines"
+    ADD CONSTRAINT "budget_lines_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."budget_lines"
     ADD CONSTRAINT "budget_lines_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "finance"."budget_revisions"
+    ADD CONSTRAINT "budget_revisions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10582,6 +10642,11 @@ ALTER TABLE ONLY "finance"."budget_revisions"
 
 ALTER TABLE ONLY "finance"."budget_revisions"
     ADD CONSTRAINT "budget_revisions_unique_number" UNIQUE ("budget_id", "revision_number");
+
+
+
+ALTER TABLE "finance"."capital_transactions"
+    ADD CONSTRAINT "capital_transactions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10602,6 +10667,11 @@ ALTER TABLE ONLY "finance"."chart_of_accounts"
 
 ALTER TABLE ONLY "finance"."credit_notes"
     ADD CONSTRAINT "credit_notes_credit_note_number_key" UNIQUE ("credit_note_number");
+
+
+
+ALTER TABLE "finance"."credit_notes"
+    ADD CONSTRAINT "credit_notes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10660,8 +10730,18 @@ ALTER TABLE ONLY "finance"."expense_lines"
 
 
 
+ALTER TABLE "finance"."fee_computation_log"
+    ADD CONSTRAINT "fee_computation_log_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."fee_computation_log"
     ADD CONSTRAINT "fee_computation_log_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "finance"."fee_rules"
+    ADD CONSTRAINT "fee_rules_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10685,6 +10765,11 @@ ALTER TABLE ONLY "finance"."financial_accounts"
 
 
 
+ALTER TABLE "finance"."fiscal_years"
+    ADD CONSTRAINT "fiscal_years_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."fiscal_years"
     ADD CONSTRAINT "fiscal_years_pkey" PRIMARY KEY ("id");
 
@@ -10692,6 +10777,11 @@ ALTER TABLE ONLY "finance"."fiscal_years"
 
 ALTER TABLE ONLY "finance"."fixed_assets"
     ADD CONSTRAINT "fixed_assets_code_key" UNIQUE ("code");
+
+
+
+ALTER TABLE "finance"."fixed_assets"
+    ADD CONSTRAINT "fixed_assets_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10755,8 +10845,18 @@ ALTER TABLE ONLY "finance"."opening_balance_imports"
 
 
 
+ALTER TABLE "finance"."owners"
+    ADD CONSTRAINT "owners_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."owners"
     ADD CONSTRAINT "owners_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "finance"."ownership_history"
+    ADD CONSTRAINT "ownership_history_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10767,6 +10867,11 @@ ALTER TABLE ONLY "finance"."ownership_history"
 
 ALTER TABLE ONLY "finance"."payment_allocations"
     ADD CONSTRAINT "payment_allocations_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "finance"."payment_receipts"
+    ADD CONSTRAINT "payment_receipts_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10785,13 +10890,28 @@ ALTER TABLE ONLY "finance"."platforms"
 
 
 
+ALTER TABLE "finance"."platforms"
+    ADD CONSTRAINT "platforms_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."platforms"
     ADD CONSTRAINT "platforms_pkey" PRIMARY KEY ("id");
 
 
 
+ALTER TABLE "finance"."profit_distributions"
+    ADD CONSTRAINT "profit_distributions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."profit_distributions"
     ADD CONSTRAINT "profit_distributions_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "finance"."reserve_policies"
+    ADD CONSTRAINT "reserve_policies_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10825,6 +10945,11 @@ ALTER TABLE ONLY "finance"."statement_lines"
 
 
 
+ALTER TABLE "finance"."tax_adjustments"
+    ADD CONSTRAINT "tax_adjustments_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."tax_adjustments"
     ADD CONSTRAINT "tax_adjustments_pkey" PRIMARY KEY ("id");
 
@@ -10855,6 +10980,11 @@ ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
 
 
 
+ALTER TABLE "finance"."tax_reconciliations"
+    ADD CONSTRAINT "tax_reconciliations_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."tax_reconciliations"
     ADD CONSTRAINT "tax_reconciliations_pkey" PRIMARY KEY ("id");
 
@@ -10865,13 +10995,28 @@ ALTER TABLE ONLY "finance"."tax_returns"
 
 
 
+ALTER TABLE "finance"."tax_rule_sets"
+    ADD CONSTRAINT "tax_rule_sets_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."tax_rule_sets"
     ADD CONSTRAINT "tax_rule_sets_pkey" PRIMARY KEY ("id");
 
 
 
+ALTER TABLE "finance"."tax_slabs"
+    ADD CONSTRAINT "tax_slabs_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."tax_slabs"
     ADD CONSTRAINT "tax_slabs_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "finance"."taxpayer_profile"
+    ADD CONSTRAINT "taxpayer_profile_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10930,6 +11075,11 @@ ALTER TABLE ONLY "finance"."vendor_payment_allocations"
 
 
 
+ALTER TABLE "finance"."vendor_payments"
+    ADD CONSTRAINT "vendor_payments_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."vendor_payments"
     ADD CONSTRAINT "vendor_payments_payment_number_key" UNIQUE ("payment_number");
 
@@ -10937,6 +11087,11 @@ ALTER TABLE ONLY "finance"."vendor_payments"
 
 ALTER TABLE ONLY "finance"."vendor_payments"
     ADD CONSTRAINT "vendor_payments_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "finance"."vendors"
+    ADD CONSTRAINT "vendors_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10985,8 +11140,18 @@ ALTER TABLE ONLY "public"."clients"
 
 
 
+ALTER TABLE "public"."commissions"
+    ADD CONSTRAINT "commissions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "public"."commissions"
     ADD CONSTRAINT "commissions_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."contractors"
+    ADD CONSTRAINT "contractors_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10997,6 +11162,11 @@ ALTER TABLE ONLY "public"."contractors"
 
 ALTER TABLE ONLY "public"."expenses"
     ADD CONSTRAINT "expenses_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."incomes"
+    ADD CONSTRAINT "incomes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11050,8 +11220,18 @@ ALTER TABLE ONLY "public"."payments"
 
 
 
+ALTER TABLE "public"."payroll_advances"
+    ADD CONSTRAINT "payroll_advances_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "public"."payroll_advances"
     ADD CONSTRAINT "payroll_advances_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."payroll_commissions"
+    ADD CONSTRAINT "payroll_commissions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11060,8 +11240,18 @@ ALTER TABLE ONLY "public"."payroll_commissions"
 
 
 
+ALTER TABLE "public"."payroll_compensation"
+    ADD CONSTRAINT "payroll_compensation_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "public"."payroll_compensation"
     ADD CONSTRAINT "payroll_compensation_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."payroll_deductions"
+    ADD CONSTRAINT "payroll_deductions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11075,8 +11265,18 @@ ALTER TABLE ONLY "public"."payroll_employees"
 
 
 
+ALTER TABLE "public"."payroll_employees"
+    ADD CONSTRAINT "payroll_employees_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "public"."payroll_employees"
     ADD CONSTRAINT "payroll_employees_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."payroll_lines"
+    ADD CONSTRAINT "payroll_lines_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11085,8 +11285,18 @@ ALTER TABLE ONLY "public"."payroll_lines"
 
 
 
+ALTER TABLE "public"."payroll_reimbursements"
+    ADD CONSTRAINT "payroll_reimbursements_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
+
+
+
 ALTER TABLE ONLY "public"."payroll_reimbursements"
     ADD CONSTRAINT "payroll_reimbursements_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."payroll_runs"
+    ADD CONSTRAINT "payroll_runs_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11112,6 +11322,11 @@ ALTER TABLE ONLY "public"."profiles"
 
 ALTER TABLE ONLY "public"."projects"
     ADD CONSTRAINT "projects_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."subscriptions"
+    ADD CONSTRAINT "subscriptions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -14287,7 +14502,7 @@ ALTER TABLE ONLY "public"."payments"
 
 
 ALTER TABLE ONLY "public"."payments"
-    ADD CONSTRAINT "payments_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE SET NULL;
+    ADD CONSTRAINT "payments_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE RESTRICT;
 
 
 
@@ -14737,14 +14952,17 @@ CREATE POLICY "Users can read their org" ON "core"."organizations" FOR SELECT US
 ALTER TABLE "core"."approval_actions" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "approval_actions_insert" ON "core"."approval_actions" FOR INSERT WITH CHECK (("actor_user_id" = "auth"."uid"()));
-
-
-
-CREATE POLICY "approval_actions_select" ON "core"."approval_actions" FOR SELECT USING ((("actor_user_id" = "auth"."uid"()) OR "core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR (EXISTS ( SELECT 1
+CREATE POLICY "approval_actions_insert" ON "core"."approval_actions" FOR INSERT WITH CHECK ((("actor_user_id" = "auth"."uid"()) AND (EXISTS ( SELECT 1
    FROM ("core"."approval_steps" "s"
      JOIN "core"."approval_requests" "r" ON (("r"."id" = "s"."approval_request_id")))
-  WHERE (("s"."id" = "approval_actions"."approval_step_id") AND ("r"."requested_by" = "auth"."uid"()))))));
+  WHERE (("s"."id" = "approval_actions"."approval_step_id") AND "core"."same_org"("r"."organization_id"))))));
+
+
+
+CREATE POLICY "approval_actions_select" ON "core"."approval_actions" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM ("core"."approval_steps" "s"
+     JOIN "core"."approval_requests" "r" ON (("r"."id" = "s"."approval_request_id")))
+  WHERE (("s"."id" = "approval_actions"."approval_step_id") AND "core"."same_org"("r"."organization_id") AND (("approval_actions"."actor_user_id" = "auth"."uid"()) OR ("r"."requested_by" = "auth"."uid"()) OR "core"."is_ceo_or_admin"() OR "core"."is_finance_head"())))));
 
 
 
@@ -14762,38 +14980,40 @@ CREATE POLICY "approval_limits_select_own" ON "core"."approval_limits" FOR SELEC
 ALTER TABLE "core"."approval_requests" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "approval_requests_insert" ON "core"."approval_requests" FOR INSERT WITH CHECK (("requested_by" = "auth"."uid"()));
+CREATE POLICY "approval_requests_insert" ON "core"."approval_requests" FOR INSERT WITH CHECK (("core"."same_org"("organization_id") AND ("requested_by" = "auth"."uid"())));
 
 
 
-CREATE POLICY "approval_requests_select" ON "core"."approval_requests" FOR SELECT USING ((("requested_by" = "auth"."uid"()) OR "core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR (EXISTS ( SELECT 1
+CREATE POLICY "approval_requests_select" ON "core"."approval_requests" FOR SELECT USING (("core"."same_org"("organization_id") AND (("requested_by" = "auth"."uid"()) OR "core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR (EXISTS ( SELECT 1
    FROM "core"."approval_steps" "s"
-  WHERE (("s"."approval_request_id" = "approval_requests"."id") AND ("s"."assigned_user_id" = "auth"."uid"()))))));
+  WHERE (("s"."approval_request_id" = "approval_requests"."id") AND ("s"."assigned_user_id" = "auth"."uid"())))))));
 
 
 
-CREATE POLICY "approval_requests_update" ON "core"."approval_requests" FOR UPDATE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR (EXISTS ( SELECT 1
+CREATE POLICY "approval_requests_update" ON "core"."approval_requests" FOR UPDATE USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR (EXISTS ( SELECT 1
    FROM "core"."approval_steps" "s"
-  WHERE (("s"."approval_request_id" = "approval_requests"."id") AND ("s"."assigned_user_id" = "auth"."uid"())))))) WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR (EXISTS ( SELECT 1
-   FROM "core"."approval_steps" "s"
-  WHERE (("s"."approval_request_id" = "approval_requests"."id") AND ("s"."assigned_user_id" = "auth"."uid"()))))));
+  WHERE (("s"."approval_request_id" = "approval_requests"."id") AND ("s"."assigned_user_id" = "auth"."uid"())))))));
 
 
 
 ALTER TABLE "core"."approval_steps" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "approval_steps_insert" ON "core"."approval_steps" FOR INSERT WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
-
-
-
-CREATE POLICY "approval_steps_select" ON "core"."approval_steps" FOR SELECT USING ((("assigned_user_id" = "auth"."uid"()) OR "core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR (EXISTS ( SELECT 1
+CREATE POLICY "approval_steps_insert" ON "core"."approval_steps" FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
    FROM "core"."approval_requests" "r"
-  WHERE (("r"."id" = "approval_steps"."approval_request_id") AND ("r"."requested_by" = "auth"."uid"()))))));
+  WHERE (("r"."id" = "approval_steps"."approval_request_id") AND "core"."same_org"("r"."organization_id")))));
 
 
 
-CREATE POLICY "approval_steps_update" ON "core"."approval_steps" FOR UPDATE USING ((("assigned_user_id" = "auth"."uid"()) OR "core"."is_ceo_or_admin"() OR "core"."is_finance_head"())) WITH CHECK ((("assigned_user_id" = "auth"."uid"()) OR "core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "approval_steps_select" ON "core"."approval_steps" FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM "core"."approval_requests" "r"
+  WHERE (("r"."id" = "approval_steps"."approval_request_id") AND "core"."same_org"("r"."organization_id") AND (("r"."requested_by" = "auth"."uid"()) OR ("approval_steps"."assigned_user_id" = "auth"."uid"()) OR "core"."is_ceo_or_admin"() OR "core"."is_finance_head"())))));
+
+
+
+CREATE POLICY "approval_steps_update" ON "core"."approval_steps" FOR UPDATE USING ((EXISTS ( SELECT 1
+   FROM "core"."approval_requests" "r"
+  WHERE (("r"."id" = "approval_steps"."approval_request_id") AND "core"."same_org"("r"."organization_id") AND (("approval_steps"."assigned_user_id" = "auth"."uid"()) OR "core"."is_ceo_or_admin"() OR "core"."is_finance_head"())))));
 
 
 
@@ -14854,14 +15074,16 @@ CREATE POLICY "idempotency_keys_service_all" ON "core"."idempotency_keys" TO "se
 ALTER TABLE "core"."integration_events" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "integration_events_select" ON "core"."integration_events" FOR SELECT USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "integration_events_select" ON "core"."integration_events" FOR SELECT USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))));
 
 
 
 ALTER TABLE "core"."integration_failures" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "integration_failures_read_finance" ON "core"."integration_failures" FOR SELECT TO "authenticated" USING ("core"."is_finance_head"());
+CREATE POLICY "integration_failures_read_finance" ON "core"."integration_failures" FOR SELECT TO "authenticated" USING (("core"."is_finance_head"() AND (EXISTS ( SELECT 1
+   FROM "core"."integration_events" "e"
+  WHERE (("e"."id" = "integration_failures"."integration_event_id") AND (("e"."organization_id" IS NULL) OR "core"."same_org"("e"."organization_id")))))));
 
 
 
@@ -14869,7 +15091,7 @@ CREATE POLICY "integration_failures_service_all" ON "core"."integration_failures
 
 
 
-CREATE POLICY "org_config_insert" ON "core"."organization_config" FOR INSERT WITH CHECK ("core"."is_ceo_or_admin"());
+CREATE POLICY "org_config_insert" ON "core"."organization_config" FOR INSERT WITH CHECK (("core"."is_ceo_or_admin"() AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))));
 
 
 
@@ -14877,11 +15099,11 @@ CREATE POLICY "org_config_select_org_scoped" ON "core"."organization_config" FOR
 
 
 
-CREATE POLICY "org_config_update" ON "core"."organization_config" FOR UPDATE USING ("core"."is_ceo_or_admin"());
+CREATE POLICY "org_config_update" ON "core"."organization_config" FOR UPDATE USING (("core"."is_ceo_or_admin"() AND "core"."same_org"("organization_id"))) WITH CHECK (("core"."is_ceo_or_admin"() AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "org_modules_manage" ON "core"."organization_modules" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text")) WITH CHECK ("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text"));
+CREATE POLICY "org_modules_manage" ON "core"."organization_modules" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text") AND "core"."same_org"("organization_id"))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text") AND "core"."same_org"("organization_id")));
 
 
 
@@ -14999,11 +15221,11 @@ CREATE POLICY "Org scope opening balance imports" ON "finance"."opening_balance_
 ALTER TABLE "finance"."accounting_periods" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "admin_write_fee_rules" ON "finance"."fee_rules" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text"));
+CREATE POLICY "admin_write_fee_rules" ON "finance"."fee_rules" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text") AND "core"."same_org"("organization_id"))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text") AND "core"."same_org"("organization_id")));
 
 
 
-CREATE POLICY "admin_write_platforms" ON "finance"."platforms" USING ("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text"));
+CREATE POLICY "admin_write_platforms" ON "finance"."platforms" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text") AND "core"."same_org"("organization_id"))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_CONFIG'::"text") AND "core"."same_org"("organization_id")));
 
 
 
@@ -15138,7 +15360,7 @@ CREATE POLICY "bs_update_org_scoped" ON "finance"."bank_statements" FOR UPDATE U
 
 
 
-CREATE POLICY "bt_delete_restricted" ON "finance"."bank_transfers" FOR DELETE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "bt_delete_restricted" ON "finance"."bank_transfers" FOR DELETE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id")));
 
 
 
@@ -15277,7 +15499,7 @@ CREATE POLICY "depreciation_schedule_update_org_scoped" ON "finance"."depreciati
 ALTER TABLE "finance"."dimensions" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "dimensions_delete" ON "finance"."dimensions" FOR DELETE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "dimensions_delete" ON "finance"."dimensions" FOR DELETE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id")));
 
 
 
@@ -15703,7 +15925,7 @@ CREATE POLICY "sl_update_org_scoped" ON "finance"."statement_lines" FOR UPDATE U
 ALTER TABLE "finance"."statement_lines" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "ta_delete_restricted" ON "finance"."tax_adjustments" FOR DELETE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "ta_delete_restricted" ON "finance"."tax_adjustments" FOR DELETE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id")));
 
 
 
@@ -15877,7 +16099,7 @@ CREATE POLICY "trs_update_org_scoped" ON "finance"."tax_rule_sets" FOR UPDATE US
 
 
 
-CREATE POLICY "tsl_delete_restricted" ON "finance"."tax_slabs" FOR DELETE USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "tsl_delete_restricted" ON "finance"."tax_slabs" FOR DELETE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id")));
 
 
 
@@ -16559,9 +16781,6 @@ ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
 
 
 
-
-
-
 GRANT USAGE ON SCHEMA "audit" TO "authenticated";
 
 
@@ -16594,7 +16813,6 @@ GRANT ALL ON SCHEMA "reporting" TO "authenticated";
 GRANT ALL ON SCHEMA "reporting" TO "service_role";
 GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
-
 
 
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
@@ -16650,7 +16868,6 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
-
 
 
 
@@ -17027,12 +17244,6 @@ GRANT ALL ON TABLE "core"."user_permission_overrides" TO "service_role";
 
 GRANT ALL ON TABLE "core"."user_roles" TO "authenticated";
 GRANT ALL ON TABLE "core"."user_roles" TO "service_role";
-
-
-
-
-
-
 
 
 
@@ -17736,6 +17947,7 @@ GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 
+
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "service_role";
 
@@ -17782,3 +17994,4 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
+
