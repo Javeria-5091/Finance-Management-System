@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { paymentAllocationSchema, validateBody } from '@/lib/validations';
+import { enforceMFA } from '@/lib/mfa-middleware';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -11,6 +12,8 @@ function getData<T = any>(res: any): T | null {
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('APPROVE_INVOICE');
   if (auth instanceof NextResponse) return auth;
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
  
   try {
@@ -62,13 +65,17 @@ export async function POST(req: NextRequest) {
       // Check invoice outstanding
       const invoice = getData(await supabase
         .from('invoices')
-        .select('id, invoice_number, total_amount, amount_paid, status')
+        .select('id, invoice_number, total_amount, amount_paid, status, client_id')
         .eq('id', alloc.invoice_id)
         .eq('organization_id', auth.orgId)
         .single());
  
       if (!invoice) {
         return NextResponse.json({ error: `Invoice ${alloc.invoice_id} not found` }, { status: 404 });
+      }
+
+      if (invoice.client_id !== receipt.client_id) {
+        return NextResponse.json({ error: `Invoice ${invoice.invoice_number} does not belong to the payment receipt's client.` }, { status: 400 });
       }
  
       const outstanding = Number(invoice.total_amount) - Number(invoice.amount_paid || 0);

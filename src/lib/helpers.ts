@@ -15,7 +15,7 @@ export function formatPKR(amount: number): string {
 }
 
 export function formatCurrency(amount: number, currency: string = 'PKR'): string {
-  return new Intl.NumberFormat('en-US', {
+  return new Intl.NumberFormat('en-PK', {
     style: 'currency',
     currency,
     minimumFractionDigits: 0,

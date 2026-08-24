@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CalendarDays, Coins, Search, RotateCcw, ChevronDown } from "lucide-react";
 
 export interface FilterOption {
@@ -81,8 +81,23 @@ export default function ReportFilterBar({
   const [endDate, setEndDate] = useState(defaultValues.endDate || "");
   const [fiscalYear, setFiscalYear] = useState(defaultValues.fiscalYear || "");
   const [currency, setCurrency] = useState(defaultValues.currency || "PKR");
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const saved = window.sessionStorage.getItem("fms-report-currency");
+    if (saved) setCurrency(saved);
+  }, []);
   const [comparison, setComparison] = useState(defaultValues.comparison || "none");
   const [entity, setEntity] = useState(defaultValues.entity || "");
+
+  useEffect(() => {
+    setStartDate(defaultValues.startDate || "");
+    setEndDate(defaultValues.endDate || "");
+    setFiscalYear(defaultValues.fiscalYear || "");
+    setCurrency(defaultValues.currency || (typeof window !== "undefined" ? window.sessionStorage.getItem("fms-report-currency") || "PKR" : "PKR"));
+    setComparison(defaultValues.comparison || "none");
+    setEntity(defaultValues.entity || "");
+  }, [defaultValues.startDate, defaultValues.endDate, defaultValues.fiscalYear, defaultValues.currency, defaultValues.comparison, defaultValues.entity]);
 
   const handleApply = () => {
     onApply?.({
@@ -99,7 +114,7 @@ export default function ReportFilterBar({
     setStartDate(defaultValues.startDate || "");
     setEndDate(defaultValues.endDate || "");
     setFiscalYear(defaultValues.fiscalYear || "");
-    setCurrency(defaultValues.currency || "PKR");
+    setCurrency(defaultValues.currency || (typeof window !== "undefined" ? window.sessionStorage.getItem("fms-report-currency") || "PKR" : "PKR"));
     setComparison(defaultValues.comparison || "none");
     setEntity(defaultValues.entity || "");
     onApply?.({
@@ -163,7 +178,7 @@ export default function ReportFilterBar({
               <Coins className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
               <select
                 value={currency}
-                onChange={(e) => setCurrency(e.target.value)}
+                onChange={(e) => { const value = e.target.value; setCurrency(value); if (typeof window !== "undefined") window.sessionStorage.setItem("fms-report-currency", value); }}
                 className="w-full pl-8 pr-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none appearance-none pr-8 bg-[url('data:image/svg+xml;charset=UTF-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%239ca3af%22%20stroke-width%3D%222%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C%2Fpolyline%3E%3C%2Fsvg%3E')] bg-no-repeat bg-[position:right_8px_center]"
               >
                 {currencyOptions.map((o) => (

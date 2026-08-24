@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { creditNoteCreateSchema, validateBody, sanitizeSearch, validateExchangeRate } from '@/lib/validations';
+import { enforceMFA } from '@/lib/mfa-middleware';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -58,6 +59,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('INVOICE_CREATE');
   if (auth instanceof NextResponse) return auth;
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
 
   try {
@@ -79,13 +82,35 @@ export async function POST(req: NextRequest) {
     // Validate the referenced invoice exists and belongs to org
     const invoice = getData(await supabase
       .from('invoices')
-      .select('id, invoice_number, client_id, total_amount, status, currency')
+      .select('id, invoice_number, client_id, total_amount, amount_paid, status, currency')
       .eq('id', invoice_id)
       .eq('organization_id', auth.orgId)
       .single());
 
     if (!invoice) {
       return NextResponse.json({ error: 'Referenced invoice not found' }, { status: 404 });
+    }
+
+    const { data: existingCreditNotes, error: creditNoteLookupError } = await supabase
+      .from('credit_notes')
+      .select('total_amount, status')
+      .eq('invoice_id', invoice_id)
+      .eq('organization_id', auth.orgId)
+      .neq('status', 'REVERSED');
+
+    if (creditNoteLookupError) {
+      return NextResponse.json({ error: 'Unable to validate existing credit notes: ' + creditNoteLookupError.message }, { status: 500 });
+    }
+
+    const invoiceTotal = Number(invoice.total_amount) || 0;
+    const amountPaid = Number(invoice.amount_paid) || 0;
+    const previouslyCredited = (existingCreditNotes || []).reduce((sum: number, cn: any) => sum + (Number(cn.total_amount) || 0), 0);
+    const remainingCreditable = Math.max(0, invoiceTotal - amountPaid - previouslyCredited);
+
+    if (Number(total_amount) > remainingCreditable + 0.01) {
+      return NextResponse.json({
+        error: `Credit note amount ${Number(total_amount).toFixed(2)} exceeds the remaining invoice balance available for credit (${remainingCreditable.toFixed(2)}).`,
+      }, { status: 400 });
     }
 
     // Generate credit note number

@@ -3020,7 +3020,6 @@ DECLARE
     v_total_debit NUMERIC(18,2) := 0;
     v_total_credit NUMERIC(18,2) := 0;
 BEGIN
-    -- ─── P1_060 SECURITY FIX (ISS-02, Critical) ───
     IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
         RAISE EXCEPTION 'Insufficient privileges to post a vendor bill to the general ledger. Requires Finance Head, CEO, or Accountant.';
     END IF;
@@ -3028,7 +3027,6 @@ BEGIN
     SELECT * INTO v_bill FROM finance.vendor_bills WHERE id = p_bill_id;
     IF NOT FOUND THEN RAISE EXCEPTION 'Bill not found'; END IF;
 
-    -- P1_060 SECURITY FIX: verify the bill belongs to the caller's own organization.
     IF NOT core.same_org(v_bill.organization_id) THEN
         RAISE EXCEPTION 'Access denied: vendor bill % does not belong to your organization', p_bill_id;
     END IF;
@@ -3084,12 +3082,16 @@ BEGIN
         RAISE EXCEPTION 'Journal unbalanced: DR=% CR=%', v_total_debit, v_total_credit;
     END IF;
 
-    --  CORRECT PARAMETER ORDER
+    -- BUG-006 FIX: use the bill's OWN currency and exchange rate instead
+    -- of hard-coding 'PKR' / 1.0000, so FX exposure on foreign-currency
+    -- bills (line amounts already include tax via line_total, and the
+    -- AP credit is the tax-inclusive total_amount) is correctly recorded
+    -- in the journal rather than silently discarded.
     RETURN finance.post_journal_entry(
         'AP Bill: ' || v_bill.bill_number,
         p_transaction_date, p_period_id,
         v_lines,
-        'PKR', 1.0000,
+        COALESCE(v_bill.currency, 'PKR'), COALESCE(v_bill.exchange_rate, 1.0000),
         'VENDOR_BILL', p_bill_id,
         v_bill.project_id, NULL
     );
@@ -3100,7 +3102,7 @@ $$;
 ALTER FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'P1_060 SECURITY FIX (ISS-02, Critical): added in-function role check (Finance Head/CEO/Accountant) and organization-match check against the vendor bill being posted. Previously contained no authorization of any kind.';
+COMMENT ON FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'BUG-006 fix (database audit): posts using vendor_bills.currency / vendor_bills.exchange_rate instead of hard-coded PKR/1.0, so foreign-currency bills carry correct FX information into the journal. Retains the P1_060 role/org-ownership checks.';
 
 
 
@@ -3113,9 +3115,11 @@ DECLARE
     v_fy_id UUID;
     v_ap_account UUID;
     v_bank_account UUID;
-    v_wht_payable UUID;  --  FIXED: Now uses correct account
+    v_wht_payable UUID;
+    v_discount_account UUID;
     v_total_allocated NUMERIC(18,2);
     v_total_withholding NUMERIC(18,2);
+    v_total_discount NUMERIC(18,2);
     v_total_bill_amount NUMERIC(18,2);
     v_lines JSONB := '[]'::JSONB;
 BEGIN
@@ -3131,9 +3135,16 @@ BEGIN
     SELECT id INTO v_bank_account FROM finance.chart_of_accounts WHERE code = '1110' LIMIT 1;
     IF v_bank_account IS NULL THEN RAISE EXCEPTION 'Bank account 1110 not found'; END IF;
 
-    --  BUG #9 FIX: Changed from 2201 (doesn't exist) to 2210 (Income Tax Payable)
     SELECT id INTO v_wht_payable FROM finance.chart_of_accounts WHERE code = '2210' LIMIT 1;
-    -- Note: 2210 is Income Tax Payable — if WHT is separate, create code 2221 in COA
+
+    -- BUG-001 FIX: resolve the discount account (falls back to name match
+    -- in case an org already had a differently-coded discount account
+    -- before this migration ran).
+    SELECT id INTO v_discount_account
+    FROM finance.chart_of_accounts
+    WHERE code = '4910' OR name ILIKE '%discount%'
+    ORDER BY (code = '4910') DESC
+    LIMIT 1;
 
     SELECT
         COALESCE(SUM(vpa.allocated_amount), 0),
@@ -3142,29 +3153,45 @@ BEGIN
              FROM finance.vendor_bill_lines bl
              WHERE bl.vendor_bill_id = vpa.vendor_bill_id)
         ), 0),
+        COALESCE(SUM(vpa.discount_amount), 0),
         COALESCE(SUM(vb.total_amount), 0)
-    INTO v_total_allocated, v_total_withholding, v_total_bill_amount
+    INTO v_total_allocated, v_total_withholding, v_total_discount, v_total_bill_amount
     FROM finance.vendor_payment_allocations vpa
     JOIN finance.vendor_bills vb ON vb.id = vpa.vendor_bill_id
     WHERE vpa.vendor_payment_id = p_payment_id;
 
-    -- Debit AP (clear the payable)
-    IF v_total_allocated > 0 THEN
+    IF v_total_discount > 0 AND v_discount_account IS NULL THEN
+        RAISE EXCEPTION 'A discount was taken on this payment but no "Purchase Discounts Received" GL account exists. Run the BUG-001 fix migration or create one manually before posting.';
+    END IF;
+
+    -- Debit AP for the FULL bill amount being cleared (allocated + discount)
+    IF (v_total_allocated + v_total_discount) > 0 THEN
         v_lines := jsonb_build_object(
             'account_id', v_ap_account,
-            'debit_amount', v_total_allocated,
+            'debit_amount', v_total_allocated + v_total_discount,
             'credit_amount', 0,
             'description', 'AP Cleared: ' || v_pay.payment_number
         );
     END IF;
 
-    -- Credit Bank (money going out)
+    -- Credit Bank for the NET cash actually paid out
     IF v_total_allocated > 0 THEN
         v_lines := v_lines || jsonb_build_object(
             'account_id', v_bank_account,
             'debit_amount', 0,
             'credit_amount', v_total_allocated,
             'description', 'Paid to Vendor: ' || v_pay.payment_number
+        );
+    END IF;
+
+    -- BUG-001 FIX: Credit Purchase Discounts Received so the journal
+    -- balances (debit AP = credit Bank + credit Discount Received).
+    IF v_total_discount > 0 THEN
+        v_lines := v_lines || jsonb_build_object(
+            'account_id', v_discount_account,
+            'debit_amount', 0,
+            'credit_amount', v_total_discount,
+            'description', 'Early Payment Discount Taken: ' || v_pay.payment_number
         );
     END IF;
 
@@ -3178,7 +3205,6 @@ BEGIN
         );
     END IF;
 
-    --  CORRECT PARAMETER ORDER
     RETURN finance.post_journal_entry(
         'Vendor Payment: ' || v_pay.payment_number,
         p_transaction_date, p_period_id,
@@ -3192,6 +3218,10 @@ $$;
 
 
 ALTER FUNCTION "finance"."post_vendor_payment"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_vendor_payment"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'BUG-001 fix (database audit): now posts vendor_payment_allocations.discount_amount to a Purchase Discounts Received GL line so debit AP always equals credit Bank + credit Discount, keeping the journal balanced.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."prevent_closed_period_posting"() RETURNS "trigger"
@@ -3427,14 +3457,15 @@ ALTER FUNCTION "finance"."reset_sequence"("p_type" "text", "p_fy_id" "uuid") OWN
 CREATE OR REPLACE FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ 
+    AS $$
 DECLARE
   v_original RECORD;
   v_reversal_id UUID;
   v_ref TEXT;
+  v_period_status TEXT;
 BEGIN
   -- 1. Fetch original
-  SELECT * INTO v_original 
+  SELECT * INTO v_original
   FROM finance.journal_entries WHERE id = p_journal_id;
 
   IF NOT FOUND THEN RAISE EXCEPTION 'Journal not found'; END IF;
@@ -3442,10 +3473,29 @@ BEGIN
   IF v_original.reversal_of_id IS NOT NULL THEN RAISE EXCEPTION 'This is already a reversal'; END IF;
   IF p_reason IS NULL OR TRIM(p_reason) = '' THEN RAISE EXCEPTION 'Reversal reason is mandatory'; END IF;
 
+  -- BUG-005 FIX: explicit fiscal-period-lock check, in addition to the
+  -- table trigger. Reversal always posts into the ORIGINAL entry's
+  -- period (see INSERT below), so that is the period we must validate.
+  SELECT status INTO v_period_status
+  FROM finance.accounting_periods
+  WHERE id = v_original.period_id;
+
+  IF v_period_status IS NULL THEN
+    RAISE EXCEPTION 'Cannot reverse journal %: its accounting period no longer exists', p_journal_id;
+  END IF;
+
+  IF v_period_status = 'HARD_CLOSED' THEN
+    RAISE EXCEPTION 'Cannot reverse journal %: fiscal period is HARD CLOSED', p_journal_id;
+  END IF;
+
+  IF v_period_status = 'SOFT_CLOSED' THEN
+    RAISE EXCEPTION 'Cannot reverse journal %: fiscal period is SOFT CLOSED. Reopen the period or post the reversal into a later open period.', p_journal_id;
+  END IF;
+
   v_ref := finance.get_next_number('JOURNAL_ENTRY');
 
   -- 2. Mark original as REVERSED
-  UPDATE finance.journal_entries 
+  UPDATE finance.journal_entries
   SET status = 'REVERSED', reversed_by = auth.uid(), reversed_at = NOW(), reversal_reason = p_reason
   WHERE id = p_journal_id;
 
@@ -3471,7 +3521,7 @@ BEGIN
     debit_amount, credit_amount, currency, exchange_rate, base_debit, base_credit,
     project_id, department_id, created_by
   )
-  SELECT 
+  SELECT
     v_reversal_id, line_number, account_id, 'REVERSAL: ' || COALESCE(description, ''),
     credit_amount, debit_amount, -- SWAPPED
     currency, exchange_rate, base_credit, base_debit, -- SWAPPED
@@ -3480,10 +3530,14 @@ BEGIN
 
   RETURN v_reversal_id;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "p_reversal_date" "date", "p_reason" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "p_reversal_date" "date", "p_reason" "text") IS 'BUG-005 fix (database audit): added an explicit fiscal-period-lock check as defense-in-depth alongside the existing trg_prevent_closed_period_posting table trigger.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."snapshot_tax_rule_set"() RETURNS "trigger"
@@ -5952,6 +6006,7 @@ CREATE TABLE IF NOT EXISTS "core"."approval_limits" (
     "organization_id" "uuid",
     CONSTRAINT "approval_limits_dates_chk" CHECK ((("effective_to" IS NULL) OR ("effective_to" >= "effective_from"))),
     CONSTRAINT "approval_limits_max_amount_chk" CHECK ((("max_amount" IS NULL) OR ("max_amount" >= (0)::numeric))),
+    CONSTRAINT "approval_limits_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "approval_limits_role_or_user_chk" CHECK (((("role_id" IS NOT NULL) AND ("user_id" IS NULL)) OR (("role_id" IS NULL) AND ("user_id" IS NOT NULL)))),
     CONSTRAINT "approval_limits_scope_chk" CHECK (("scope" = ANY (ARRAY['OWN'::"text", 'PROJECT'::"text", 'DEPARTMENT'::"text", 'ALL'::"text"]))),
     CONSTRAINT "approval_limits_transaction_type_chk" CHECK (("transaction_type" = ANY (ARRAY['EXPENSE'::"text", 'PURCHASE'::"text", 'VENDOR_PAYMENT'::"text", 'BUDGET_REVISION'::"text", 'JOURNAL_ENTRY'::"text", 'BANK_TRANSFER'::"text", 'SALARY_PAYROLL'::"text", 'OWNER_DISTRIBUTION'::"text", 'PERIOD_REOPEN'::"text", 'INVOICE_CREDIT_NOTE'::"text", 'VENDOR_BILL'::"text", 'RESERVE_ALLOCATION'::"text"])))
@@ -5978,6 +6033,7 @@ CREATE TABLE IF NOT EXISTS "core"."approval_requests" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
+    CONSTRAINT "approval_requests_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "approval_requests_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'APPROVED'::"text", 'REJECTED'::"text", 'ESCALATED'::"text", 'CANCELLED'::"text"])))
 );
 
@@ -6053,6 +6109,7 @@ CREATE TABLE IF NOT EXISTS "core"."delegations" (
     "organization_id" "uuid",
     CONSTRAINT "delegations_dates_chk" CHECK (("effective_to" >= "effective_from")),
     CONSTRAINT "delegations_not_self_chk" CHECK (("from_user_id" <> "to_user_id")),
+    CONSTRAINT "delegations_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "delegations_permission_ids_not_empty_chk" CHECK (("array_length"("permission_ids", 1) > 0)),
     CONSTRAINT "delegations_reason_not_blank_chk" CHECK (("btrim"("reason") <> ''::"text")),
     CONSTRAINT "delegations_status_chk" CHECK (("status" = ANY (ARRAY['ACTIVE'::"text", 'EXPIRED'::"text", 'REVOKED'::"text"])))
@@ -6114,6 +6171,7 @@ CREATE TABLE IF NOT EXISTS "core"."integration_events" (
     "processing_status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
     "processed_at" timestamp with time zone,
     "created_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "integration_events_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "integration_events_status_check" CHECK (("processing_status" = ANY (ARRAY['PENDING'::"text", 'PROCESSED'::"text", 'FAILED'::"text", 'DEAD_LETTER'::"text"])))
 );
 
@@ -6416,6 +6474,7 @@ CREATE TABLE IF NOT EXISTS "finance"."accounting_periods" (
     "closed_at" timestamp with time zone,
     "reopening_reason" "text",
     "organization_id" "uuid",
+    CONSTRAINT "accounting_periods_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "accounting_periods_period_number_check" CHECK ((("period_number" >= 1) AND ("period_number" <= 13))),
     CONSTRAINT "accounting_periods_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'OPEN'::"text", 'SOFT_CLOSED'::"text", 'HARD_CLOSED'::"text"]))),
     CONSTRAINT "ap_dates_valid" CHECK (("end_date" > "start_date")),
@@ -6444,7 +6503,8 @@ CREATE TABLE IF NOT EXISTS "finance"."asset_categories" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
-    CONSTRAINT "asset_categories_depreciation_method_check" CHECK ((("depreciation_method")::"text" = ANY ((ARRAY['straight_line'::character varying, 'declining_balance'::character varying, 'units_of_production'::character varying])::"text"[])))
+    CONSTRAINT "asset_categories_depreciation_method_check" CHECK ((("depreciation_method")::"text" = ANY ((ARRAY['straight_line'::character varying, 'declining_balance'::character varying, 'units_of_production'::character varying])::"text"[]))),
+    CONSTRAINT "asset_categories_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
@@ -6478,6 +6538,7 @@ CREATE TABLE IF NOT EXISTS "finance"."asset_verifications" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
+    CONSTRAINT "asset_verifications_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "asset_verifications_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['in_progress'::character varying, 'completed'::character varying, 'discrepancy_found'::character varying])::"text"[])))
 );
 
@@ -6498,7 +6559,8 @@ CREATE TABLE IF NOT EXISTS "finance"."attachments" (
     "description" "text",
     "uploaded_by" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"(),
-    "organization_id" "uuid"
+    "organization_id" "uuid",
+    CONSTRAINT "attachments_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
@@ -6545,6 +6607,7 @@ CREATE TABLE IF NOT EXISTS "finance"."bank_statements" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
+    CONSTRAINT "bank_statements_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "bank_statements_reconciliation_status_check" CHECK (("reconciliation_status" = ANY (ARRAY['PENDING'::"text", 'IN_PROGRESS'::"text", 'COMPLETED'::"text", 'PARTIAL'::"text"])))
 );
 
@@ -6586,6 +6649,7 @@ CREATE TABLE IF NOT EXISTS "finance"."bank_transfers" (
     "organization_id" "uuid",
     CONSTRAINT "bank_transfers_exchange_rate_check" CHECK (("exchange_rate" > (0)::numeric)),
     CONSTRAINT "bank_transfers_from_amount_check" CHECK (("from_amount" > (0)::numeric)),
+    CONSTRAINT "bank_transfers_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "bank_transfers_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"]))),
     CONSTRAINT "bank_transfers_to_amount_check" CHECK (("to_amount" > (0)::numeric)),
     CONSTRAINT "chk_diff_accounts" CHECK (("from_account_id" <> "to_account_id"))
@@ -6634,7 +6698,8 @@ CREATE TABLE IF NOT EXISTS "finance"."budget_lines" (
     "description" "text",
     "created_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
-    "committed_amount" numeric(18,2) DEFAULT 0 NOT NULL
+    "committed_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    CONSTRAINT "budget_lines_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
@@ -6659,6 +6724,7 @@ CREATE TABLE IF NOT EXISTS "finance"."budget_revisions" (
     "status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
+    CONSTRAINT "budget_revisions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "budget_revisions_reason_not_blank" CHECK (("btrim"("reason") <> ''::"text")),
     CONSTRAINT "budget_revisions_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'APPROVED'::"text", 'REJECTED'::"text"])))
 );
@@ -6695,6 +6761,7 @@ CREATE TABLE IF NOT EXISTS "finance"."capital_transactions" (
     "created_by" "uuid",
     "organization_id" "uuid",
     CONSTRAINT "capital_transactions_amount_check" CHECK (("amount" > (0)::numeric)),
+    CONSTRAINT "capital_transactions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "capital_transactions_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'CANCELLED'::"text"]))),
     CONSTRAINT "capital_transactions_type_check" CHECK (("transaction_type" = ANY (ARRAY['CAPITAL_CONTRIBUTION'::"text", 'OWNER_LOAN_ADVANCE'::"text", 'OWNER_LOAN_REPAYMENT'::"text", 'DRAWING'::"text"])))
 );
@@ -6795,6 +6862,7 @@ CASE
 END) STORED,
     CONSTRAINT "credit_notes_amount_check" CHECK (("amount" > (0)::numeric)),
     CONSTRAINT "credit_notes_exactly_one_source" CHECK (((("invoice_id" IS NOT NULL) AND ("vendor_bill_id" IS NULL)) OR (("invoice_id" IS NULL) AND ("vendor_bill_id" IS NOT NULL)))),
+    CONSTRAINT "credit_notes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "credit_notes_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text"])))
 );
 
@@ -6918,6 +6986,7 @@ CREATE TABLE IF NOT EXISTS "finance"."exchange_rates" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
     "organization_id" "uuid" NOT NULL,
+    CONSTRAINT "exchange_rates_rate_positive_check" CHECK (("rate" > (0)::numeric)),
     CONSTRAINT "exchange_rates_rate_type_check" CHECK (("rate_type" = ANY (ARRAY['PLATFORM'::"text", 'BANK'::"text", 'MANUAL'::"text", 'PAYMENT_CHANNEL'::"text"])))
 );
 
@@ -6975,7 +7044,8 @@ CREATE TABLE IF NOT EXISTS "finance"."fee_computation_log" (
     "computed_by" "uuid",
     "computed_at" timestamp with time zone DEFAULT "now"(),
     "details" "jsonb" DEFAULT '{}'::"jsonb",
-    "organization_id" "uuid"
+    "organization_id" "uuid",
+    CONSTRAINT "fee_computation_log_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
@@ -7000,7 +7070,8 @@ CREATE TABLE IF NOT EXISTS "finance"."fee_rules" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
     CONSTRAINT "fee_rules_applies_to_check" CHECK ((("applies_to")::"text" = ANY ((ARRAY['EXPENSE'::character varying, 'INVOICE'::character varying, 'VENDOR_BILL'::character varying, 'PAYMENT_RECEIPT'::character varying, 'ALL'::character varying])::"text"[]))),
-    CONSTRAINT "fee_rules_fee_type_check" CHECK ((("fee_type")::"text" = ANY ((ARRAY['PERCENTAGE'::character varying, 'FIXED'::character varying, 'TIERED'::character varying, 'SLAB'::character varying])::"text"[])))
+    CONSTRAINT "fee_rules_fee_type_check" CHECK ((("fee_type")::"text" = ANY ((ARRAY['PERCENTAGE'::character varying, 'FIXED'::character varying, 'TIERED'::character varying, 'SLAB'::character varying])::"text"[]))),
+    CONSTRAINT "fee_rules_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
@@ -7075,10 +7146,12 @@ CREATE TABLE IF NOT EXISTS "finance"."fiscal_years" (
     "transition_approved_by" "uuid",
     "transition_approved_at" timestamp with time zone,
     "organization_id" "uuid",
+    CONSTRAINT "fiscal_years_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "fiscal_years_status_check" CHECK (("status" = ANY (ARRAY['OPEN'::"text", 'SOFT_CLOSED'::"text", 'HARD_CLOSED'::"text"]))),
     CONSTRAINT "fy_dates_valid" CHECK (("end_date" > "start_date")),
     CONSTRAINT "fy_name_not_empty" CHECK ((TRIM(BOTH FROM "name") <> ''::"text")),
-    CONSTRAINT "fy_reopening_requires_reason" CHECK (((("status" <> 'OPEN'::"text") AND ("reopening_reason" IS NOT NULL)) OR ("status" = 'OPEN'::"text")))
+    CONSTRAINT "fy_reopening_requires_reason" CHECK (((("status" <> 'OPEN'::"text") AND ("reopening_reason" IS NOT NULL)) OR ("status" = 'OPEN'::"text"))),
+    CONSTRAINT "fy_transition_requires_approval" CHECK ((("is_transition_year" = false) OR (("transition_approved_by" IS NOT NULL) AND ("transition_approved_at" IS NOT NULL))))
 );
 
 
@@ -7160,6 +7233,7 @@ CREATE TABLE IF NOT EXISTS "finance"."fixed_assets" (
     "organization_id" "uuid",
     CONSTRAINT "fixed_assets_base_cost_check" CHECK (("base_cost" >= (0)::numeric)),
     CONSTRAINT "fixed_assets_depreciation_method_check" CHECK ((("depreciation_method" IS NULL) OR (("depreciation_method")::"text" = ANY ((ARRAY['straight_line'::character varying, 'declining_balance'::character varying, 'units_of_production'::character varying])::"text"[])))),
+    CONSTRAINT "fixed_assets_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "fixed_assets_purchase_cost_check" CHECK (("purchase_cost" >= (0)::numeric)),
     CONSTRAINT "fixed_assets_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['pending_capitalization'::character varying, 'active'::character varying, 'fully_depreciated'::character varying, 'under_repair'::character varying, 'disposed'::character varying, 'sold'::character varying])::"text"[])))
 );
@@ -7295,6 +7369,7 @@ CREATE TABLE IF NOT EXISTS "finance"."numbering_sequences" (
     "organization_id" "uuid",
     CONSTRAINT "ns_current_non_negative" CHECK (("current_number" >= 0)),
     CONSTRAINT "ns_format_valid" CHECK ((("format" ~~ '%{PREFIX}%'::"text") AND ("format" ~~ '%{NUMBER}%'::"text"))),
+    CONSTRAINT "numbering_sequences_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "numbering_sequences_padding_check" CHECK ((("padding" >= 1) AND ("padding" <= 10)))
 );
 
@@ -7344,6 +7419,7 @@ CREATE TABLE IF NOT EXISTS "finance"."owners" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
     "organization_id" "uuid",
+    CONSTRAINT "owners_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "owners_status_check" CHECK (("status" = ANY (ARRAY['ACTIVE'::"text", 'INACTIVE'::"text", 'EXITED'::"text"])))
 );
 
@@ -7363,6 +7439,7 @@ CREATE TABLE IF NOT EXISTS "finance"."ownership_history" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
+    CONSTRAINT "ownership_history_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "ownership_history_ownership_percentage_check" CHECK ((("ownership_percentage" >= (0)::numeric) AND ("ownership_percentage" <= (100)::numeric)))
 );
 
@@ -7411,6 +7488,7 @@ CREATE TABLE IF NOT EXISTS "finance"."payment_receipts" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
     CONSTRAINT "payment_receipts_amount_check" CHECK (("amount" >= (0)::numeric)),
+    CONSTRAINT "payment_receipts_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payment_receipts_payment_method_check" CHECK (("payment_method" = ANY (ARRAY['BANK_TRANSFER'::"text", 'PLATFORM'::"text", 'CASH'::"text", 'CHEQUE'::"text", 'OTHER'::"text"]))),
     CONSTRAINT "payment_receipts_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text"])))
 );
@@ -7433,6 +7511,7 @@ CREATE TABLE IF NOT EXISTS "finance"."platforms" (
     "deleted_at" timestamp with time zone,
     "deleted_by" "uuid",
     "organization_id" "uuid",
+    CONSTRAINT "platforms_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "platforms_platform_type_check" CHECK ((("platform_type")::"text" = ANY ((ARRAY['PAYMENT_GATEWAY'::character varying, 'BANK_TRANSFER'::character varying, 'MARKETPLACE'::character varying, 'WALLET'::character varying, 'OTHER'::character varying])::"text"[])))
 );
 
@@ -7477,6 +7556,7 @@ CREATE TABLE IF NOT EXISTS "finance"."profit_distributions" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
     "organization_id" "uuid",
+    CONSTRAINT "profit_distributions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "profit_distributions_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'DECLARED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'PAID'::"text", 'CANCELLED'::"text"])))
 );
 
@@ -7497,6 +7577,7 @@ CREATE TABLE IF NOT EXISTS "finance"."reserve_policies" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
     "organization_id" "uuid",
+    CONSTRAINT "reserve_policies_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "reserve_policies_policy_type_check" CHECK (("policy_type" = ANY (ARRAY['DISABLED'::"text", 'FIXED_AMOUNT'::"text", 'PERCENT_OF_PROFIT'::"text", 'PERCENT_OF_PAYOUT'::"text", 'TARGET_BALANCE'::"text", 'HYBRID'::"text"])))
 );
 
@@ -7622,7 +7703,8 @@ CREATE TABLE IF NOT EXISTS "finance"."tax_adjustments" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
-    CONSTRAINT "tax_adjustments_adjustment_category_check" CHECK (("adjustment_category" = ANY (ARRAY['ADD_BACK'::"text", 'DEDUCTION'::"text", 'NON_DEDUCTIBLE'::"text", 'EXEMPTION'::"text", 'DEPRECIATION_DIFF'::"text", 'PROVISION_ADJUST'::"text", 'PRIVATE_EXPENSE'::"text", 'CAPITAL_VS_REVENUE'::"text", 'LOSS_CARRY_FORWARD'::"text", 'SEPARATE_BLOCK'::"text", 'TAX_DEPRECIATION'::"text", 'OTHER'::"text"])))
+    CONSTRAINT "tax_adjustments_adjustment_category_check" CHECK (("adjustment_category" = ANY (ARRAY['ADD_BACK'::"text", 'DEDUCTION'::"text", 'NON_DEDUCTIBLE'::"text", 'EXEMPTION'::"text", 'DEPRECIATION_DIFF'::"text", 'PROVISION_ADJUST'::"text", 'PRIVATE_EXPENSE'::"text", 'CAPITAL_VS_REVENUE'::"text", 'LOSS_CARRY_FORWARD'::"text", 'SEPARATE_BLOCK'::"text", 'TAX_DEPRECIATION'::"text", 'OTHER'::"text"]))),
+    CONSTRAINT "tax_adjustments_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
@@ -7789,6 +7871,7 @@ CREATE TABLE IF NOT EXISTS "finance"."tax_reconciliations" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
     "organization_id" "uuid",
+    CONSTRAINT "tax_reconciliations_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "tax_reconciliations_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'CALCULATED'::"text", 'UNDER_REVIEW'::"text", 'ACCOUNTANT_APPROVED'::"text", 'FILED'::"text", 'PAYMENT_PENDING'::"text", 'PAID'::"text", 'REFUND_PENDING'::"text", 'AMENDED'::"text", 'CLOSED'::"text"])))
 );
 
@@ -7862,6 +7945,7 @@ CREATE TABLE IF NOT EXISTS "finance"."tax_rule_sets" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
     "organization_id" "uuid",
+    CONSTRAINT "tax_rule_sets_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "tax_rule_sets_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'APPROVED'::"text", 'LOCKED'::"text", 'SUPERSEDED'::"text"])))
 );
 
@@ -7882,6 +7966,7 @@ CREATE TABLE IF NOT EXISTS "finance"."tax_slabs" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
+    CONSTRAINT "tax_slabs_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "tax_slabs_slab_type_check" CHECK (("slab_type" = ANY (ARRAY['PROGRESSIVE'::"text", 'FLAT'::"text", 'FIXED'::"text"])))
 );
 
@@ -7906,6 +7991,7 @@ CREATE TABLE IF NOT EXISTS "finance"."taxpayer_profile" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
     CONSTRAINT "taxpayer_profile_legal_entity_type_check" CHECK (("legal_entity_type" = ANY (ARRAY['SOLE_PROPRIETOR'::"text", 'AOP'::"text", 'COMPANY'::"text", 'INDIVIDUAL'::"text"]))),
+    CONSTRAINT "taxpayer_profile_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "taxpayer_profile_tax_status_check" CHECK (("tax_status" = ANY (ARRAY['ACTIVE'::"text", 'SUSPENDED'::"text", 'DEREGISTERED'::"text"])))
 );
 
@@ -7987,7 +8073,10 @@ CREATE TABLE IF NOT EXISTS "finance"."vendor_payment_allocations" (
     "base_allocated_amount" numeric(18,2) NOT NULL,
     "allocated_by" "uuid" NOT NULL,
     "allocated_at" timestamp with time zone DEFAULT "now"(),
-    CONSTRAINT "vendor_payment_allocations_allocated_amount_check" CHECK (("allocated_amount" > (0)::numeric))
+    "discount_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "base_discount_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    CONSTRAINT "vendor_payment_allocations_allocated_amount_check" CHECK (("allocated_amount" > (0)::numeric)),
+    CONSTRAINT "vendor_payment_allocations_discount_amount_check" CHECK (("discount_amount" >= (0)::numeric))
 );
 
 
@@ -8020,6 +8109,7 @@ CREATE TABLE IF NOT EXISTS "finance"."vendor_payments" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
     "organization_id" "uuid",
+    CONSTRAINT "vendor_payments_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "vendor_payments_payment_method_check" CHECK (("payment_method" = ANY (ARRAY['BANK_TRANSFER'::"text", 'CHEQUE'::"text", 'CASH'::"text", 'PLATFORM'::"text", 'OTHER'::"text"]))),
     CONSTRAINT "vendor_payments_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text"])))
 );
@@ -8051,7 +8141,8 @@ CREATE TABLE IF NOT EXISTS "finance"."vendors" (
     "created_by" "uuid",
     "deleted_at" timestamp with time zone,
     "deleted_by" "uuid",
-    "organization_id" "uuid"
+    "organization_id" "uuid",
+    CONSTRAINT "vendors_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
@@ -8303,6 +8394,7 @@ END) STORED,
     CONSTRAINT "commissions_calculation_basis_check" CHECK ((("calculation_basis")::"text" = ANY ((ARRAY['PROJECT_REVENUE'::character varying, 'INVOICE_AMOUNT'::character varying, 'MILESTONE_VALUE'::character varying, 'CLIENT_PAYMENT'::character varying, 'SALES_TARGET'::character varying, 'FIXED_AMOUNT'::character varying])::"text"[]))),
     CONSTRAINT "commissions_commission_amount_check" CHECK (("commission_amount" >= (0)::numeric)),
     CONSTRAINT "commissions_commission_type_check" CHECK ((("commission_type")::"text" = ANY ((ARRAY['PERCENTAGE'::character varying, 'FIXED_AMOUNT'::character varying, 'TIERED'::character varying, 'FLAT_BONUS'::character varying, 'REFERRAL'::character varying])::"text"[]))),
+    CONSTRAINT "commissions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "commissions_person_type_check" CHECK ((("person_type")::"text" = ANY ((ARRAY['CONTRACTOR'::character varying, 'EMPLOYEE'::character varying])::"text"[]))),
     CONSTRAINT "commissions_rate_or_amount_check" CHECK (("rate_or_amount" >= (0)::numeric)),
     CONSTRAINT "commissions_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying, 'PAID'::character varying, 'CANCELLED'::character varying, 'HELD'::character varying])::"text"[]))),
@@ -8341,6 +8433,7 @@ CREATE TABLE IF NOT EXISTS "public"."contractors" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
+    CONSTRAINT "contractors_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "contractors_payment_terms_check" CHECK ((("payment_terms")::"text" = ANY ((ARRAY['NET_15'::character varying, 'NET_30'::character varying, 'NET_45'::character varying, 'NET_60'::character varying, 'UPFRONT'::character varying, 'MILESTONE'::character varying])::"text"[]))),
     CONSTRAINT "contractors_rate_check" CHECK (("rate" >= (0)::numeric)),
     CONSTRAINT "contractors_rate_type_check" CHECK ((("rate_type")::"text" = ANY ((ARRAY['HOURLY'::character varying, 'DAILY'::character varying, 'WEEKLY'::character varying, 'MONTHLY'::character varying, 'FIXED_PROJECT'::character varying])::"text"[]))),
@@ -8537,6 +8630,7 @@ CREATE TABLE IF NOT EXISTS "public"."incomes" (
     "rejection_reason" "text",
     "account_id" "uuid",
     "organization_id" "uuid",
+    CONSTRAINT "incomes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "incomes_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
 );
 
@@ -8580,7 +8674,8 @@ CREATE TABLE IF NOT EXISTS "public"."invoices" (
     "void_reason" "text",
     "voided_by" "uuid",
     "voided_at" timestamp with time zone,
-    "organization_id" "uuid" NOT NULL
+    "organization_id" "uuid" NOT NULL,
+    CONSTRAINT "invoices_amounts_non_negative_check" CHECK ((("amount" >= (0)::numeric) AND ("subtotal" >= (0)::numeric) AND ("tax_amount" >= (0)::numeric) AND ("discount_amount" >= (0)::numeric) AND ("total_amount" >= (0)::numeric) AND ("base_subtotal" >= (0)::numeric) AND ("base_tax_amount" >= (0)::numeric) AND ("base_discount_amount" >= (0)::numeric) AND ("base_total_amount" >= (0)::numeric) AND ("amount_paid" >= (0)::numeric) AND ("base_amount_paid" >= (0)::numeric) AND ("outstanding_amount" >= (0)::numeric) AND ("base_outstanding_amount" >= (0)::numeric)))
 );
 
 
@@ -8824,7 +8919,8 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_advances" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
     CONSTRAINT "payroll_advances_amount_check" CHECK (("amount" > (0)::numeric)),
-    CONSTRAINT "payroll_advances_approval_status_check" CHECK ((("approval_status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying, 'REJECTED'::character varying, 'PARTIALLY_RECOVERED'::character varying, 'FULLY_RECOVERED'::character varying])::"text"[])))
+    CONSTRAINT "payroll_advances_approval_status_check" CHECK ((("approval_status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying, 'REJECTED'::character varying, 'PARTIALLY_RECOVERED'::character varying, 'FULLY_RECOVERED'::character varying])::"text"[]))),
+    CONSTRAINT "payroll_advances_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
@@ -8852,6 +8948,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_commissions" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
     CONSTRAINT "payroll_commissions_commission_type_check" CHECK ((("commission_type")::"text" = ANY ((ARRAY['PERFORMANCE_BASED'::character varying, 'PROJECT_BASED'::character varying, 'SALES_BASED'::character varying, 'REFERRAL'::character varying, 'OTHER'::character varying])::"text"[]))),
+    CONSTRAINT "payroll_commissions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payroll_commissions_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying, 'PAID'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying])::"text"[])))
 );
 
@@ -8875,7 +8972,8 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_compensation" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
     CONSTRAINT "payroll_compensation_amount_check" CHECK (("amount" >= (0)::numeric)),
-    CONSTRAINT "payroll_compensation_compensation_type_check" CHECK ((("compensation_type")::"text" = ANY ((ARRAY['MONTHLY_SALARY'::character varying, 'HOURLY_RATE'::character varying, 'DAILY_RATE'::character varying, 'PROJECT_BASED'::character varying, 'COMMISSION_ONLY'::character varying, 'FIXED_CONTRACT'::character varying])::"text"[])))
+    CONSTRAINT "payroll_compensation_compensation_type_check" CHECK ((("compensation_type")::"text" = ANY ((ARRAY['MONTHLY_SALARY'::character varying, 'HOURLY_RATE'::character varying, 'DAILY_RATE'::character varying, 'PROJECT_BASED'::character varying, 'COMMISSION_ONLY'::character varying, 'FIXED_CONTRACT'::character varying])::"text"[]))),
+    CONSTRAINT "payroll_compensation_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
@@ -8896,7 +8994,8 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_deductions" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
-    CONSTRAINT "payroll_deductions_deduction_type_check" CHECK ((("deduction_type")::"text" = ANY ((ARRAY['TAX'::character varying, 'PROVIDENT_FUND'::character varying, 'EOBI'::character varying, 'SOCIAL_SECURITY'::character varying, 'LOAN_INSTALLMENT'::character varying, 'ADVANCE_DEDUCTION'::character varying, 'ABSENCE_PENALTY'::character varying, 'OTHER'::character varying])::"text"[])))
+    CONSTRAINT "payroll_deductions_deduction_type_check" CHECK ((("deduction_type")::"text" = ANY ((ARRAY['TAX'::character varying, 'PROVIDENT_FUND'::character varying, 'EOBI'::character varying, 'SOCIAL_SECURITY'::character varying, 'LOAN_INSTALLMENT'::character varying, 'ADVANCE_DEDUCTION'::character varying, 'ABSENCE_PENALTY'::character varying, 'OTHER'::character varying])::"text"[]))),
+    CONSTRAINT "payroll_deductions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
@@ -8935,6 +9034,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_employees" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
     CONSTRAINT "payroll_employees_employment_type_check" CHECK ((("employment_type")::"text" = ANY ((ARRAY['FULL_TIME'::character varying, 'PART_TIME'::character varying, 'CONTRACTOR'::character varying, 'INTERN'::character varying, 'CONSULTANT'::character varying])::"text"[]))),
+    CONSTRAINT "payroll_employees_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payroll_employees_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['ACTIVE'::character varying, 'ON_LEAVE'::character varying, 'TERMINATED'::character varying, 'SUSPENDED'::character varying])::"text"[])))
 );
 
@@ -8987,6 +9087,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_lines" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
+    CONSTRAINT "payroll_lines_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payroll_lines_payment_status_check" CHECK ((("payment_status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'PAID'::character varying, 'PARTIALLY_PAID'::character varying, 'FAILED'::character varying])::"text"[])))
 );
 
@@ -9017,6 +9118,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_reimbursements" (
     "organization_id" "uuid",
     CONSTRAINT "payroll_reimbursements_amount_check" CHECK (("amount" > (0)::numeric)),
     CONSTRAINT "payroll_reimbursements_category_check" CHECK ((("category")::"text" = ANY ((ARRAY['TRAVEL'::character varying, 'MEAL'::character varying, 'MEDICAL'::character varying, 'EQUIPMENT'::character varying, 'INTERNET'::character varying, 'OTHER'::character varying])::"text"[]))),
+    CONSTRAINT "payroll_reimbursements_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payroll_reimbursements_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying, 'REJECTED'::character varying, 'PAID'::character varying, 'CANCELLED'::character varying])::"text"[])))
 );
 
@@ -9046,6 +9148,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_runs" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
+    CONSTRAINT "payroll_runs_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payroll_runs_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'CALCULATED'::character varying, 'UNDER_REVIEW'::character varying, 'APPROVED'::character varying, 'POSTED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying])::"text"[])))
 );
 
@@ -9222,6 +9325,7 @@ CREATE TABLE IF NOT EXISTS "public"."subscriptions" (
     CONSTRAINT "subscriptions_amount_check" CHECK (("amount" >= (0)::numeric)),
     CONSTRAINT "subscriptions_billing_frequency_check" CHECK ((("billing_frequency")::"text" = ANY ((ARRAY['WEEKLY'::character varying, 'MONTHLY'::character varying, 'QUARTERLY'::character varying, 'SEMI_ANNUALLY'::character varying, 'ANNUALLY'::character varying, 'BIENNIAL'::character varying, 'ONE_TIME'::character varying])::"text"[]))),
     CONSTRAINT "subscriptions_category_check" CHECK ((("category")::"text" = ANY ((ARRAY['HOSTING'::character varying, 'DOMAIN'::character varying, 'AI_API'::character varying, 'DATABASE'::character varying, 'EMAIL'::character varying, 'INTERNET'::character varying, 'RENT'::character varying, 'UTILITIES'::character varying, 'SOFTWARE'::character varying, 'HARDWARE'::character varying, 'INSURANCE'::character varying, 'MEMBERSHIP'::character varying, 'CLOUD_STORAGE'::character varying, 'CRM'::character varying, 'PROJECT_MANAGEMENT'::character varying, 'COMMUNICATION'::character varying, 'SECURITY'::character varying, 'OTHER'::character varying])::"text"[]))),
+    CONSTRAINT "subscriptions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "subscriptions_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['ACTIVE'::character varying, 'PAUSED'::character varying, 'CANCELLED'::character varying, 'EXPIRED'::character varying, 'PENDING_SETUP'::character varying])::"text"[])))
 );
 
@@ -9790,21 +9894,28 @@ CREATE OR REPLACE VIEW "reporting"."budget_vs_actual" WITH ("security_invoker"='
             WHEN ("coa"."normal_balance" = 'DEBIT'::"text") THEN (COALESCE("jl"."base_debit", "jl"."debit_amount") - COALESCE("jl"."base_credit", "jl"."credit_amount"))
             ELSE (COALESCE("jl"."base_credit", "jl"."credit_amount") - COALESCE("jl"."base_debit", "jl"."debit_amount"))
         END), (0)::numeric) AS "actual_amount",
-    ("b"."total_amount" - COALESCE("sum"(
+    (("b"."total_amount" - COALESCE("sum"(
         CASE
             WHEN ("coa"."normal_balance" = 'DEBIT'::"text") THEN (COALESCE("jl"."base_debit", "jl"."debit_amount") - COALESCE("jl"."base_credit", "jl"."credit_amount"))
             ELSE (COALESCE("jl"."base_credit", "jl"."credit_amount") - COALESCE("jl"."base_debit", "jl"."debit_amount"))
-        END), (0)::numeric)) AS "remaining_amount",
+        END), (0)::numeric)) - COALESCE(( SELECT "sum"(("vb"."total_amount" - "vb"."amount_paid")) AS "sum"
+           FROM "finance"."vendor_bills" "vb"
+          WHERE (("vb"."project_id" = "p"."id") AND ("vb"."status" = 'APPROVED'::"text"))), (0)::numeric)) AS "remaining_amount",
         CASE
             WHEN ("b"."total_amount" = (0)::numeric) THEN (0)::numeric
-            ELSE "round"(((COALESCE("sum"(
+            ELSE "round"((((COALESCE("sum"(
             CASE
                 WHEN ("coa"."normal_balance" = 'DEBIT'::"text") THEN (COALESCE("jl"."base_debit", "jl"."debit_amount") - COALESCE("jl"."base_credit", "jl"."credit_amount"))
                 ELSE (COALESCE("jl"."base_credit", "jl"."credit_amount") - COALESCE("jl"."base_debit", "jl"."debit_amount"))
-            END), (0)::numeric) / "b"."total_amount") * (100)::numeric), 2)
+            END), (0)::numeric) + COALESCE(( SELECT "sum"(("vb"."total_amount" - "vb"."amount_paid")) AS "sum"
+               FROM "finance"."vendor_bills" "vb"
+              WHERE (("vb"."project_id" = "p"."id") AND ("vb"."status" = 'APPROVED'::"text"))), (0)::numeric)) / "b"."total_amount") * (100)::numeric), 2)
         END AS "utilization_pct",
     "p"."id" AS "project_id",
-    "p"."name" AS "project_name"
+    "p"."name" AS "project_name",
+    COALESCE(( SELECT "sum"(("vb"."total_amount" - "vb"."amount_paid")) AS "sum"
+           FROM "finance"."vendor_bills" "vb"
+          WHERE (("vb"."project_id" = "p"."id") AND ("vb"."status" = 'APPROVED'::"text"))), (0)::numeric) AS "committed_amount"
    FROM (((("public"."budgets" "b"
      LEFT JOIN "public"."projects" "p" ON (("p"."budget_id" = "b"."id")))
      LEFT JOIN "finance"."journal_entries" "je" ON ((("je"."project_id" = "p"."id") AND ("je"."status" = 'POSTED'::"text") AND ("je"."source_type" = 'EXPENSE'::"text"))))
@@ -9814,6 +9925,10 @@ CREATE OR REPLACE VIEW "reporting"."budget_vs_actual" WITH ("security_invoker"='
 
 
 ALTER VIEW "reporting"."budget_vs_actual" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "reporting"."budget_vs_actual" IS 'BUG-019 fix (database audit): added committed_amount (approved-but-unpaid vendor bills on the same project) so remaining_amount/utilization_pct reflect true available budget, per spec.';
+
 
 
 CREATE OR REPLACE VIEW "reporting"."budget_category_summary" WITH ("security_invoker"='true') AS
@@ -10365,18 +10480,8 @@ ALTER TABLE ONLY "core"."approval_actions"
 
 
 
-ALTER TABLE "core"."approval_limits"
-    ADD CONSTRAINT "approval_limits_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "core"."approval_limits"
     ADD CONSTRAINT "approval_limits_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "core"."approval_requests"
-    ADD CONSTRAINT "approval_requests_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10397,11 +10502,6 @@ ALTER TABLE ONLY "core"."approval_steps"
 
 ALTER TABLE ONLY "core"."budget_policies"
     ADD CONSTRAINT "budget_policies_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "core"."delegations"
-    ADD CONSTRAINT "delegations_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10427,11 +10527,6 @@ ALTER TABLE ONLY "core"."idempotency_keys"
 
 ALTER TABLE ONLY "core"."integration_events"
     ADD CONSTRAINT "integration_events_idempotency_unique" UNIQUE ("organization_id", "source_module", "event_type", "idempotency_key");
-
-
-
-ALTER TABLE "core"."integration_events"
-    ADD CONSTRAINT "integration_events_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10510,11 +10605,6 @@ ALTER TABLE ONLY "core"."user_roles"
 
 
 
-ALTER TABLE "finance"."accounting_periods"
-    ADD CONSTRAINT "accounting_periods_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."accounting_periods"
     ADD CONSTRAINT "accounting_periods_pkey" PRIMARY KEY ("id");
 
@@ -10540,11 +10630,6 @@ ALTER TABLE ONLY "finance"."asset_categories"
 
 
 
-ALTER TABLE "finance"."asset_categories"
-    ADD CONSTRAINT "asset_categories_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."asset_categories"
     ADD CONSTRAINT "asset_categories_pkey" PRIMARY KEY ("id");
 
@@ -10560,11 +10645,6 @@ ALTER TABLE ONLY "finance"."asset_verification_lines"
 
 
 
-ALTER TABLE "finance"."asset_verifications"
-    ADD CONSTRAINT "asset_verifications_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."asset_verifications"
     ADD CONSTRAINT "asset_verifications_pkey" PRIMARY KEY ("id");
 
@@ -10572,11 +10652,6 @@ ALTER TABLE ONLY "finance"."asset_verifications"
 
 ALTER TABLE ONLY "finance"."asset_verifications"
     ADD CONSTRAINT "asset_verifications_verification_code_key" UNIQUE ("verification_code");
-
-
-
-ALTER TABLE "finance"."attachments"
-    ADD CONSTRAINT "attachments_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10595,18 +10670,8 @@ ALTER TABLE ONLY "finance"."attendance_period_snapshots"
 
 
 
-ALTER TABLE "finance"."bank_statements"
-    ADD CONSTRAINT "bank_statements_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."bank_statements"
     ADD CONSTRAINT "bank_statements_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "finance"."bank_transfers"
-    ADD CONSTRAINT "bank_transfers_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10620,18 +10685,8 @@ ALTER TABLE ONLY "finance"."budget_commitments"
 
 
 
-ALTER TABLE "finance"."budget_lines"
-    ADD CONSTRAINT "budget_lines_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."budget_lines"
     ADD CONSTRAINT "budget_lines_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "finance"."budget_revisions"
-    ADD CONSTRAINT "budget_revisions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10642,11 +10697,6 @@ ALTER TABLE ONLY "finance"."budget_revisions"
 
 ALTER TABLE ONLY "finance"."budget_revisions"
     ADD CONSTRAINT "budget_revisions_unique_number" UNIQUE ("budget_id", "revision_number");
-
-
-
-ALTER TABLE "finance"."capital_transactions"
-    ADD CONSTRAINT "capital_transactions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10667,11 +10717,6 @@ ALTER TABLE ONLY "finance"."chart_of_accounts"
 
 ALTER TABLE ONLY "finance"."credit_notes"
     ADD CONSTRAINT "credit_notes_credit_note_number_key" UNIQUE ("credit_note_number");
-
-
-
-ALTER TABLE "finance"."credit_notes"
-    ADD CONSTRAINT "credit_notes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10730,18 +10775,8 @@ ALTER TABLE ONLY "finance"."expense_lines"
 
 
 
-ALTER TABLE "finance"."fee_computation_log"
-    ADD CONSTRAINT "fee_computation_log_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."fee_computation_log"
     ADD CONSTRAINT "fee_computation_log_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "finance"."fee_rules"
-    ADD CONSTRAINT "fee_rules_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10765,11 +10800,6 @@ ALTER TABLE ONLY "finance"."financial_accounts"
 
 
 
-ALTER TABLE "finance"."fiscal_years"
-    ADD CONSTRAINT "fiscal_years_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."fiscal_years"
     ADD CONSTRAINT "fiscal_years_pkey" PRIMARY KEY ("id");
 
@@ -10780,11 +10810,6 @@ ALTER TABLE ONLY "finance"."fixed_assets"
 
 
 
-ALTER TABLE "finance"."fixed_assets"
-    ADD CONSTRAINT "fixed_assets_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."fixed_assets"
     ADD CONSTRAINT "fixed_assets_pkey" PRIMARY KEY ("id");
 
@@ -10792,11 +10817,6 @@ ALTER TABLE ONLY "finance"."fixed_assets"
 
 ALTER TABLE ONLY "finance"."fiscal_years"
     ADD CONSTRAINT "fy_no_overlapping_ranges" EXCLUDE USING "gist" ("organization_id" WITH =, "daterange"("start_date", "end_date", '[]'::"text") WITH &&);
-
-
-
-ALTER TABLE "finance"."fiscal_years"
-    ADD CONSTRAINT "fy_transition_requires_approval" CHECK ((("is_transition_year" = false) OR (("transition_approved_by" IS NOT NULL) AND ("transition_approved_at" IS NOT NULL)))) NOT VALID;
 
 
 
@@ -10830,11 +10850,6 @@ ALTER TABLE ONLY "finance"."journal_lines"
 
 
 
-ALTER TABLE "finance"."numbering_sequences"
-    ADD CONSTRAINT "numbering_sequences_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."numbering_sequences"
     ADD CONSTRAINT "numbering_sequences_pkey" PRIMARY KEY ("id");
 
@@ -10845,18 +10860,8 @@ ALTER TABLE ONLY "finance"."opening_balance_imports"
 
 
 
-ALTER TABLE "finance"."owners"
-    ADD CONSTRAINT "owners_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."owners"
     ADD CONSTRAINT "owners_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "finance"."ownership_history"
-    ADD CONSTRAINT "ownership_history_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10867,11 +10872,6 @@ ALTER TABLE ONLY "finance"."ownership_history"
 
 ALTER TABLE ONLY "finance"."payment_allocations"
     ADD CONSTRAINT "payment_allocations_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "finance"."payment_receipts"
-    ADD CONSTRAINT "payment_receipts_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10890,28 +10890,13 @@ ALTER TABLE ONLY "finance"."platforms"
 
 
 
-ALTER TABLE "finance"."platforms"
-    ADD CONSTRAINT "platforms_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."platforms"
     ADD CONSTRAINT "platforms_pkey" PRIMARY KEY ("id");
 
 
 
-ALTER TABLE "finance"."profit_distributions"
-    ADD CONSTRAINT "profit_distributions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."profit_distributions"
     ADD CONSTRAINT "profit_distributions_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "finance"."reserve_policies"
-    ADD CONSTRAINT "reserve_policies_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -10945,11 +10930,6 @@ ALTER TABLE ONLY "finance"."statement_lines"
 
 
 
-ALTER TABLE "finance"."tax_adjustments"
-    ADD CONSTRAINT "tax_adjustments_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."tax_adjustments"
     ADD CONSTRAINT "tax_adjustments_pkey" PRIMARY KEY ("id");
 
@@ -10980,11 +10960,6 @@ ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
 
 
 
-ALTER TABLE "finance"."tax_reconciliations"
-    ADD CONSTRAINT "tax_reconciliations_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."tax_reconciliations"
     ADD CONSTRAINT "tax_reconciliations_pkey" PRIMARY KEY ("id");
 
@@ -10995,28 +10970,13 @@ ALTER TABLE ONLY "finance"."tax_returns"
 
 
 
-ALTER TABLE "finance"."tax_rule_sets"
-    ADD CONSTRAINT "tax_rule_sets_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."tax_rule_sets"
     ADD CONSTRAINT "tax_rule_sets_pkey" PRIMARY KEY ("id");
 
 
 
-ALTER TABLE "finance"."tax_slabs"
-    ADD CONSTRAINT "tax_slabs_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."tax_slabs"
     ADD CONSTRAINT "tax_slabs_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "finance"."taxpayer_profile"
-    ADD CONSTRAINT "taxpayer_profile_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11075,11 +11035,6 @@ ALTER TABLE ONLY "finance"."vendor_payment_allocations"
 
 
 
-ALTER TABLE "finance"."vendor_payments"
-    ADD CONSTRAINT "vendor_payments_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "finance"."vendor_payments"
     ADD CONSTRAINT "vendor_payments_payment_number_key" UNIQUE ("payment_number");
 
@@ -11087,11 +11042,6 @@ ALTER TABLE ONLY "finance"."vendor_payments"
 
 ALTER TABLE ONLY "finance"."vendor_payments"
     ADD CONSTRAINT "vendor_payments_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "finance"."vendors"
-    ADD CONSTRAINT "vendors_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11140,18 +11090,8 @@ ALTER TABLE ONLY "public"."clients"
 
 
 
-ALTER TABLE "public"."commissions"
-    ADD CONSTRAINT "commissions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "public"."commissions"
     ADD CONSTRAINT "commissions_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "public"."contractors"
-    ADD CONSTRAINT "contractors_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11165,18 +11105,8 @@ ALTER TABLE ONLY "public"."expenses"
 
 
 
-ALTER TABLE "public"."incomes"
-    ADD CONSTRAINT "incomes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "public"."incomes"
     ADD CONSTRAINT "incomes_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "public"."invoices"
-    ADD CONSTRAINT "invoices_amounts_non_negative_check" CHECK ((("amount" >= (0)::numeric) AND ("subtotal" >= (0)::numeric) AND ("tax_amount" >= (0)::numeric) AND ("discount_amount" >= (0)::numeric) AND ("total_amount" >= (0)::numeric) AND ("base_subtotal" >= (0)::numeric) AND ("base_tax_amount" >= (0)::numeric) AND ("base_discount_amount" >= (0)::numeric) AND ("base_total_amount" >= (0)::numeric) AND ("amount_paid" >= (0)::numeric) AND ("base_amount_paid" >= (0)::numeric) AND ("outstanding_amount" >= (0)::numeric) AND ("base_outstanding_amount" >= (0)::numeric))) NOT VALID;
 
 
 
@@ -11220,18 +11150,8 @@ ALTER TABLE ONLY "public"."payments"
 
 
 
-ALTER TABLE "public"."payroll_advances"
-    ADD CONSTRAINT "payroll_advances_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "public"."payroll_advances"
     ADD CONSTRAINT "payroll_advances_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "public"."payroll_commissions"
-    ADD CONSTRAINT "payroll_commissions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11240,18 +11160,8 @@ ALTER TABLE ONLY "public"."payroll_commissions"
 
 
 
-ALTER TABLE "public"."payroll_compensation"
-    ADD CONSTRAINT "payroll_compensation_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "public"."payroll_compensation"
     ADD CONSTRAINT "payroll_compensation_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "public"."payroll_deductions"
-    ADD CONSTRAINT "payroll_deductions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11265,18 +11175,8 @@ ALTER TABLE ONLY "public"."payroll_employees"
 
 
 
-ALTER TABLE "public"."payroll_employees"
-    ADD CONSTRAINT "payroll_employees_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "public"."payroll_employees"
     ADD CONSTRAINT "payroll_employees_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "public"."payroll_lines"
-    ADD CONSTRAINT "payroll_lines_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11285,18 +11185,8 @@ ALTER TABLE ONLY "public"."payroll_lines"
 
 
 
-ALTER TABLE "public"."payroll_reimbursements"
-    ADD CONSTRAINT "payroll_reimbursements_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
-
-
-
 ALTER TABLE ONLY "public"."payroll_reimbursements"
     ADD CONSTRAINT "payroll_reimbursements_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "public"."payroll_runs"
-    ADD CONSTRAINT "payroll_runs_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -11322,11 +11212,6 @@ ALTER TABLE ONLY "public"."profiles"
 
 ALTER TABLE ONLY "public"."projects"
     ADD CONSTRAINT "projects_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE "public"."subscriptions"
-    ADD CONSTRAINT "subscriptions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)) NOT VALID;
 
 
 
@@ -14462,7 +14347,7 @@ ALTER TABLE ONLY "public"."incomes"
 
 
 ALTER TABLE ONLY "public"."invoices"
-    ADD CONSTRAINT "invoices_journal_entry_id_fkey" FOREIGN KEY ("journal_entry_id") REFERENCES "finance"."journal_entries"("id") ON DELETE SET NULL NOT VALID;
+    ADD CONSTRAINT "invoices_journal_entry_id_fkey" FOREIGN KEY ("journal_entry_id") REFERENCES "finance"."journal_entries"("id") ON DELETE SET NULL;
 
 
 
@@ -16780,7 +16665,6 @@ ALTER TABLE "public"."user_mfa" ENABLE ROW LEVEL SECURITY;
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
 
 
-
 GRANT USAGE ON SCHEMA "audit" TO "authenticated";
 
 
@@ -16813,6 +16697,7 @@ GRANT ALL ON SCHEMA "reporting" TO "authenticated";
 GRANT ALL ON SCHEMA "reporting" TO "service_role";
 GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
+
 
 
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
@@ -17128,6 +17013,15 @@ GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
 
 
 
+
+
+
+
+
+
+
+
+
 GRANT SELECT,INSERT ON TABLE "audit"."audit_log" TO "authenticated";
 GRANT ALL ON TABLE "audit"."audit_log" TO "service_role";
 
@@ -17244,6 +17138,12 @@ GRANT ALL ON TABLE "core"."user_permission_overrides" TO "service_role";
 
 GRANT ALL ON TABLE "core"."user_roles" TO "authenticated";
 GRANT ALL ON TABLE "core"."user_roles" TO "service_role";
+
+
+
+
+
+
 
 
 
@@ -17994,4 +17894,3 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
-

@@ -4,6 +4,7 @@ import { supabase } from "@/lib/supabase";
 import { IncomeFormData, Project } from "@/types";
 import { X } from "lucide-react";
 import { INCOME_CATEGORIES } from "@/types";
+import { incomeTaxSchema } from "@/lib/validations";
 
 interface IncomeFormProps {
   initialData: any;
@@ -24,6 +25,8 @@ export default function IncomeForm({ initialData, onSubmit, onClose, loading, pr
     income_date: initialData?.income_date || new Date().toISOString().split('T')[0],
     project_id: initialData?.project_id || null,
     account_id: initialData?.account_id || null,
+    tax_rate: Number(initialData?.tax_rate || 0),
+    tax_amount: Number(initialData?.tax_amount || 0),
   });
 
   useEffect(() => {
@@ -40,7 +43,11 @@ export default function IncomeForm({ initialData, onSubmit, onClose, loading, pr
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    onSubmit(form);
+    const taxRate = Number(form.tax_rate || 0);
+    const taxAmount = Number(form.amount || 0) * taxRate / 100;
+    const taxValidation = incomeTaxSchema.safeParse({ tax_rate: taxRate, tax_amount: taxAmount });
+    if (!taxValidation.success) return;
+    onSubmit({ ...form, tax_rate: taxRate, tax_amount: taxAmount });
   }
 
   return (
@@ -94,6 +101,17 @@ export default function IncomeForm({ initialData, onSubmit, onClose, loading, pr
                 <option value="">None</option>
                 {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Tax Rate (%)</label>
+              <input required type="number" min="0" max="100" step="0.01" value={form.tax_rate || 0} onChange={e => setForm({ ...form, tax_rate: Number(e.target.value) })} className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Calculated Tax</label>
+              <input type="number" readOnly value={Number(form.amount || 0) * Number(form.tax_rate || 0) / 100} className="w-full px-3 py-2.5 bg-gray-100 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-500 text-sm" />
             </div>
           </div>
 

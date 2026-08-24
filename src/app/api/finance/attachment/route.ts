@@ -63,12 +63,13 @@ async function computeFileHash(base64Data: string): Promise<string> {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
  
-async function checkDuplicateHash(fileHash: string, orgId: string | null): Promise<boolean> {
+async function checkDuplicateHash(fileHash: string, orgId: string | null, client: any): Promise<boolean> {
   if (!orgId) return false;
-  const { data } = await supabase
+  const { data } = await client
     .from('finance.attachments')
     .select('id, file_name, entity_type, entity_id')
     .eq('file_hash', fileHash)
+    .eq('organization_id', orgId)
     .limit(1);
   return (data && data.length > 0) || false;
 }
@@ -79,7 +80,13 @@ export async function POST(req: NextRequest) {
   const { supabase } = await getAuthSupabase(req);
  
   try {
-    const { action, entityId, entityType, fileName, fileType, fileSize, fileBase64 } = await req.json();
+    const body = await req.json();
+    // BUG-008 FIX: organization ownership is always derived from the authenticated session.
+    // Reject any legacy/client-supplied organization_id instead of trusting or persisting it.
+    if (Object.prototype.hasOwnProperty.call(body, 'organization_id')) {
+      return NextResponse.json({ error: 'organization_id must not be supplied by the client' }, { status: 400 });
+    }
+    const { action, entityId, entityType, fileName, fileType, fileSize, fileBase64 } = body;
  
     if (action === 'upload_url') {
       if (!fileName || !fileType || !entityId || !entityType) {
@@ -124,7 +131,7 @@ export async function POST(req: NextRequest) {
       let fileHash: string | null = null;
       if (fileBase64) {
         fileHash = await computeFileHash(fileBase64);
-        const isDuplicate = await checkDuplicateHash(fileHash, auth.orgId);
+        const isDuplicate = await checkDuplicateHash(fileHash, auth.orgId, supabase);
         if (isDuplicate) {
           try {
             await supabase.schema('audit').rpc('log_action', {

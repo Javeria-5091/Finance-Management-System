@@ -57,7 +57,7 @@ function recalcLine(line: LineItem, exchangeRate: number): LineItem {
     ...line,
     tax_amount: taxAmt,
     withholding_amount: whtAmt,
-    line_total: basePrice + taxAmt + whtAmt,
+    line_total: basePrice + taxAmt - whtAmt,
   };
 }
 

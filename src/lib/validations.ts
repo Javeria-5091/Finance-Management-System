@@ -30,6 +30,13 @@ export const postExpenseSchema = z.object({
 export const postIncomeSchema = z.object({
   incomeId: uuidSchema,
 });
+
+// BUG-009: income tax inputs are validated together so a tax calculation
+// cannot silently proceed with a missing/invalid rate.
+export const incomeTaxSchema = z.object({
+  tax_rate: z.number().min(0).max(100),
+  tax_amount: z.number().min(0),
+});
  
 // ─── Post Invoice ───
 export const postInvoiceSchema = z.object({

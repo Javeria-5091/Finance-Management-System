@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { unstable_noStore as noStore } from 'next/cache';
 import { requirePermission, getAuthSupabase } from '@/lib/api-auth';
 import {
   checkBudgetForTransaction,
@@ -20,6 +21,8 @@ import { supabase } from '@/lib/supabase';
 //   ?force_allow=true  — bypass HARD_BLOCK (CEO/Finance Head override, requires APPROVE_EXPENSE)
  
 export async function POST(req: NextRequest) {
+  // BUG-014 FIX: budget checks must always be live; never allow route-level caching across fiscal periods.
+  noStore();
   const auth = await requirePermission('EXPENSE_READ');
   if (auth instanceof NextResponse) return auth;
   // BUG-007 FIX: pass the server-side authenticated supabase client.
@@ -118,6 +121,8 @@ export async function POST(req: NextRequest) {
 // Returns the configurable policy (enforcement_mode, thresholds)
  
 export async function GET(req: NextRequest) {
+  // BUG-014 FIX: policy reads are request-scoped and must not be cached.
+  noStore();
   const auth = await requirePermission('EXPENSE_READ');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);

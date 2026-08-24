@@ -38,6 +38,8 @@ export interface Income {
   currency?: string;
   exchange_rate?: number;
   base_amount?: number;
+  tax_rate?: number;
+  tax_amount?: number;
   submitted_by?: string | null;
   submitted_at?: string | null;
   approved_by?: string | null;
@@ -55,7 +57,9 @@ export interface IncomeFormData {
   description?: string | null;
   income_date: string;
   project_id?: string | null;
-  account_id?: string | null; 
+  account_id?: string | null;
+  tax_rate?: number;
+  tax_amount?: number;
 }
 
 // ==========================================
@@ -97,7 +101,9 @@ export interface ExpenseFormData {
   expense_date: string;
   notes?: string | null;
   project_id?: string | null;
-  account_id?: string | null; 
+  account_id?: string | null;
+  tax_rate?: number;
+  tax_amount?: number;
 }
 
 // ==========================================

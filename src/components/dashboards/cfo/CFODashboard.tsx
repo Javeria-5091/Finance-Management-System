@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/context/AuthContext";
 import { useTheme } from "@/context/ThemeContext";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -103,6 +104,7 @@ function useReconciliationStatus() {
 // ==========================================
 export function CFODashboard() {
   const { isDark } = useTheme();
+  const { profile } = useAuth();
 
   // Reconciliation data (direct query for real-time status)
   // FIX: financial_accounts, journal_entries, vendor_bills, and
@@ -111,21 +113,55 @@ export function CFODashboard() {
   // the tables instead of erroring/returning nothing. `invoices` genuinely
   // is in `public`, so it is left unqualified.
   const { data: financialAccounts, isLoading: faLoading } = useQuery({
-    queryKey: ['cfo-financial-accounts'],
+    queryKey: ['cfo-financial-accounts', profile?.organization_id],
     queryFn: async () => {
+      const orgId = profile?.organization_id;
+      if (!orgId) return [];
+      // Use the authoritative reporting view so the dashboard reflects
+      // posted ledger activity rather than static opening balances.
       const { data, error } = await supabase
-        .schema('finance')
-        .from('financial_accounts')
-        .select('id, account_name, institution_type, currency, masked_identifier, opening_balance, is_active')
+        .schema('reporting')
+        .from('v_cash_position')
+        .select('account_id, account_name, institution_name, account_type, currency, opening_balance, current_balance, current_balance_base, base_currency, is_active, is_default, organization_id')
+        .eq('organization_id', orgId)
         .eq('is_active', true)
         .order('account_name');
       if (error) throw new Error(error.message);
       return data || [];
     },
+    enabled: !!profile?.organization_id,
   });
 
   // ✅ FIXED: Uses real reconciliation data from RPC, not Math.random()
   const { data: reconStatus } = useReconciliationStatus();
+
+  // Pending cash movements: approved-but-not-posted receipts increase available cash,
+  // while approved-but-not-posted vendor payments reduce it. These amounts are
+  // kept in base currency so the consolidated PKR cash position does not mix currencies.
+  const { data: pendingCashAdjustment = 0 } = useQuery({
+    queryKey: ['cfo-pending-cash', profile?.organization_id],
+    queryFn: async () => {
+      const orgId = profile?.organization_id;
+      if (!orgId) return 0;
+      const [receipts, vendorPayments] = await Promise.all([
+        supabase.schema('finance').from('payment_receipts')
+          .select('base_amount')
+          .eq('organization_id', orgId)
+          .eq('status', 'APPROVED'),
+        supabase.schema('finance').from('vendor_payments')
+          .select('base_amount')
+          .eq('organization_id', orgId)
+          .eq('status', 'APPROVED'),
+      ]);
+      if (receipts.error) throw new Error(receipts.error.message);
+      if (vendorPayments.error) throw new Error(vendorPayments.error.message);
+      const pendingIn = (receipts.data || []).reduce((sum: number, r: any) => sum + (Number(r.base_amount) || 0), 0);
+      const pendingOut = (vendorPayments.data || []).reduce((sum: number, p: any) => sum + (Number(p.base_amount) || 0), 0);
+      return pendingIn - pendingOut;
+    },
+    enabled: !!profile?.organization_id,
+    refetchInterval: 15000,
+  });
 
   // Pending journals
   const { data: pendingJournals } = useQuery({
@@ -189,7 +225,7 @@ export function CFODashboard() {
     staleTime: 30000,
   });
 
-  const totalCash = (financialAccounts || []).reduce((s, a) => s + (a.opening_balance || 0), 0);
+  const totalCash = (financialAccounts || []).reduce((s, a) => s + (Number(a.current_balance_base) || 0), 0) + Number(pendingCashAdjustment || 0);
   const totalReceivables = (aging?.receivable || []).reduce((s, a) => s + a.total, 0);
   const totalPayables = (aging?.payable || []).reduce((s, a) => s + a.total, 0);
   const highRiskRecv = (aging?.receivable || []).filter(a => a.overdue_over_90 > 0).length || 0;
