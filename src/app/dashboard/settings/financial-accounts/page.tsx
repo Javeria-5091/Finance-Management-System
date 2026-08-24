@@ -92,16 +92,31 @@ export default function FinancialAccountsPage() {
 
   const fetchAccounts = useCallback(async () => {
     setLoading(true);
-    const [{ data, error }, { data: coa }, { data: ctx }] = await Promise.all([
-      bankService.getFinancialAccounts(),
-      bankService.getAssetAccounts(),
-      supabase.rpc("get_my_org_context"),
+    // Resolve the caller's organization first. The bank service requires an
+    // explicit org id; passing an uninitialized value causes PostgreSQL UUID
+    // parsing errors such as: invalid input syntax for type uuid: "undefined".
+    const { data: orgData, error: orgError } = await supabase
+      .schema("core")
+      .rpc("current_user_org_id");
+    const resolvedOrgId = typeof orgData === "string" ? orgData : null;
+
+    if (orgError || !resolvedOrgId) {
+      setAccounts([]);
+      setLedgerAccounts([]);
+      setOrgId(null);
+      setLoading(false);
+      toast.error(orgError?.message || "Could not determine your organization");
+      return;
+    }
+
+    setOrgId(resolvedOrgId);
+    const [{ data, error }, { data: coa }] = await Promise.all([
+      bankService.getFinancialAccounts(resolvedOrgId),
+      bankService.getAssetAccounts(resolvedOrgId),
     ]);
     if (!error && data) setAccounts(data);
     else if (error) toast.error("Failed to load: " + error.message);
     if (coa) setLedgerAccounts(coa as any);
-    const myOrgId = Array.isArray(ctx) ? ctx[0]?.organization_id : (ctx as any)?.organization_id;
-    setOrgId(myOrgId || null);
     setLoading(false);
   }, []);
 

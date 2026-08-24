@@ -16,7 +16,7 @@ import { FileText, RefreshCw, TrendingUp, TrendingDown, BarChart3, DollarSign, A
 import type { PLData, BSData, CFData, SOCEData, ReportFilters } from '@/types/reports.types';
 
 const f = (n: number) => new Intl.NumberFormat('en-PK', { style: 'currency', currency: 'PKR', minimumFractionDigits: 0 }).format(n || 0);
-const sumArr = (arr: { total: number }[]) => arr.reduce((s, a) => s + a.total, 0);
+const sumArr = (arr?: { total?: number }[]) => (Array.isArray(arr) ? arr : []).reduce((s, a) => s + (Number(a?.total) || 0), 0);
 
 const COLORS = ['#22c55e', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
 
@@ -27,10 +27,10 @@ export default function FinancialStatementsPage() {
   const [filters, setFilters] = useState<ReportFilters>({});
   const [dataAsOf] = useState(new Date().toISOString());
 
-  const pl = useQuery({ queryKey: ['pl', filters.startDate, filters.endDate], queryFn: () => getProfitAndLoss(filters.startDate, filters.endDate), enabled: tab === 'pl' });
-  const bs = useQuery({ queryKey: ['bs'], queryFn: getBalanceSheet, enabled: tab === 'bs' });
-  const cf = useQuery({ queryKey: ['cf', filters.startDate, filters.endDate], queryFn: () => getCashFlow(filters.startDate, filters.endDate), enabled: tab === 'cf' });
-  const soce = useQuery({ queryKey: ['soce', filters.startDate, filters.endDate], queryFn: () => getStatementOfChangesInEquity(filters.startDate, filters.endDate), enabled: tab === 'soce' });
+  const pl = useQuery<PLData, Error>({ queryKey: ['pl', filters.startDate, filters.endDate], queryFn: () => getProfitAndLoss(filters.startDate, filters.endDate), enabled: tab === 'pl' });
+  const bs = useQuery<BSData, Error>({ queryKey: ['bs', filters.endDate], queryFn: () => getBalanceSheet(filters.endDate), enabled: tab === 'bs' });
+  const cf = useQuery<CFData, Error>({ queryKey: ['cf', filters.startDate, filters.endDate], queryFn: () => getCashFlow(filters.startDate, filters.endDate), enabled: tab === 'cf' });
+  const soce = useQuery<SOCEData, Error>({ queryKey: ['soce', filters.startDate, filters.endDate], queryFn: () => getStatementOfChangesInEquity(filters.startDate, filters.endDate), enabled: tab === 'soce' });
 
   const isLoading = tab === 'pl' ? pl.isLoading : tab === 'bs' ? bs.isLoading : tab === 'cf' ? cf.isLoading : soce.isLoading;
 
@@ -60,9 +60,12 @@ export default function FinancialStatementsPage() {
   const getCsv = (): string => {
     if (tab === 'pl' && pl.data) {
       let csv = 'Section,Account,Amount\n';
-      pl.data.revenue.forEach(a => csv += `Revenue,${a.account_name},${a.total}\n`);
-      pl.data.cost_of_sales.forEach(a => csv += `COGS,${a.account_name},${-a.total}\n`);
-      pl.data.operating_expenses.forEach(a => csv += `OpEx,${a.account_name},${-a.total}\n`);
+      const revenue = Array.isArray(pl.data.revenue) ? pl.data.revenue : [];
+      const costOfSales = Array.isArray(pl.data.cost_of_sales) ? pl.data.cost_of_sales : [];
+      const operatingExpenses = Array.isArray(pl.data.operating_expenses) ? pl.data.operating_expenses : [];
+      revenue.forEach(a => csv += `Revenue,${a.account_name},${a.total}\n`);
+      costOfSales.forEach(a => csv += `COGS,${a.account_name},${-a.total}\n`);
+      operatingExpenses.forEach(a => csv += `OpEx,${a.account_name},${-a.total}\n`);
       return csv;
     }
     return '';
@@ -115,24 +118,35 @@ export default function FinancialStatementsPage() {
         </div>
       )}
 
+      {(tab === 'pl' ? pl.error : tab === 'bs' ? bs.error : tab === 'cf' ? cf.error : soce.error) && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+          Failed to load this statement. {(tab === 'pl' ? pl.error : tab === 'bs' ? bs.error : tab === 'cf' ? cf.error : soce.error)?.message || 'Please retry.'}
+        </div>
+      )}
+
       {/* ═══════════ P&L TAB ═══════════ */}
       {tab === 'pl' && pl.data && !pl.isLoading && (() => {
         const d = pl.data;
-        const totalRev = sumArr(d.revenue);
-        const totalCos = sumArr(d.cost_of_sales);
-        const totalOpex = sumArr(d.operating_expenses);
-        const totalOtherInc = sumArr(d.other_income);
-        const totalOtherExp = sumArr(d.other_expenses);
+        const revenue = Array.isArray(d?.revenue) ? d.revenue : [];
+        const costOfSales = Array.isArray(d?.cost_of_sales) ? d.cost_of_sales : [];
+        const operatingExpenses = Array.isArray(d?.operating_expenses) ? d.operating_expenses : [];
+        const otherIncome = Array.isArray(d?.other_income) ? d.other_income : [];
+        const otherExpenses = Array.isArray(d?.other_expenses) ? d.other_expenses : [];
+        const totalRev = sumArr(revenue);
+        const totalCos = sumArr(costOfSales);
+        const totalOpex = sumArr(operatingExpenses);
+        const totalOtherInc = sumArr(otherIncome);
+        const totalOtherExp = sumArr(otherExpenses);
         const grossProfit = totalRev - totalCos;
         const netProfit = grossProfit - totalOpex + totalOtherInc - totalOtherExp;
         const isProfit = netProfit >= 0;
         const grossMargin = totalRev > 0 ? (grossProfit / totalRev * 100) : 0;
         const netMargin = totalRev > 0 ? (netProfit / totalRev * 100) : 0;
 
-        const revenueChartData = d.revenue.map(a => ({ name: a.account_name.length > 18 ? a.account_name.slice(0, 18) + '...' : a.account_name, value: a.total }));
+        const revenueChartData = revenue.map(a => ({ name: a.account_name.length > 18 ? a.account_name.slice(0, 18) + '...' : a.account_name, value: a.total }));
         const expenseChartData = [
-          ...d.cost_of_sales.slice(0, 5).map(a => ({ name: a.account_name.length > 18 ? a.account_name.slice(0, 18) + '...' : a.account_name, value: a.total, type: 'COGS' })),
-          ...d.operating_expenses.slice(0, 5).map(a => ({ name: a.account_name.length > 18 ? a.account_name.slice(0, 18) + '...' : a.account_name, value: a.total, type: 'OpEx' })),
+          ...costOfSales.slice(0, 5).map(a => ({ name: a.account_name.length > 18 ? a.account_name.slice(0, 18) + '...' : a.account_name, value: a.total, type: 'COGS' })),
+          ...operatingExpenses.slice(0, 5).map(a => ({ name: a.account_name.length > 18 ? a.account_name.slice(0, 18) + '...' : a.account_name, value: a.total, type: 'OpEx' })),
         ];
         const plWaterfallData = [
           { name: 'Revenue', value: totalRev, fill: '#22c55e' },
@@ -166,16 +180,16 @@ export default function FinancialStatementsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
-                    <PLTableSection title="Revenue" accounts={d.revenue} totalRev={totalRev} isExpense={false} />
-                    <PLTableSection title="Cost of Sales" accounts={d.cost_of_sales} totalRev={totalRev} isExpense={true} />
+                    <PLTableSection title="Revenue" accounts={revenue} totalRev={totalRev} isExpense={false} />
+                    <PLTableSection title="Cost of Sales" accounts={costOfSales} totalRev={totalRev} isExpense={true} />
                     <tr className="border-t-2 border-gray-300 dark:border-gray-600">
                       <td className="p-3 font-bold text-gray-900 dark:text-white">Gross Profit</td>
                       <td className={`p-3 text-right font-bold font-mono ${grossProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>{f(grossProfit)}</td>
                       <td className="p-3 text-right font-mono text-gray-500">{totalRev > 0 ? (grossProfit / totalRev * 100).toFixed(1) : '0.0'}%</td>
                     </tr>
-                    <PLTableSection title="Operating Expenses" accounts={d.operating_expenses} totalRev={totalRev} isExpense={true} />
-                    {d.other_income.length > 0 && <PLTableSection title="Other Income" accounts={d.other_income} totalRev={totalRev} isExpense={false} />}
-                    {d.other_expenses.length > 0 && <PLTableSection title="Other Expenses" accounts={d.other_expenses} totalRev={totalRev} isExpense={true} />}
+                    <PLTableSection title="Operating Expenses" accounts={operatingExpenses} totalRev={totalRev} isExpense={true} />
+                    {otherIncome.length > 0 && <PLTableSection title="Other Income" accounts={otherIncome} totalRev={totalRev} isExpense={false} />}
+                    {otherExpenses.length > 0 && <PLTableSection title="Other Expenses" accounts={otherExpenses} totalRev={totalRev} isExpense={true} />}
                     <tr className={`border-t-4 ${isProfit ? 'border-green-500' : 'border-red-500'}`}>
                       <td className="p-4 text-lg font-bold text-gray-900 dark:text-white">Net Profit</td>
                       <td className={`p-4 text-right text-lg font-bold font-mono ${isProfit ? 'text-green-600' : 'text-red-600'}`}>{f(netProfit)}</td>
@@ -196,7 +210,7 @@ export default function FinancialStatementsPage() {
                         <Pie data={revenueChartData} cx="50%" cy="50%" outerRadius={70} innerRadius={40} paddingAngle={2} dataKey="value" label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`} labelLine={false}>
                           {revenueChartData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                         </Pie>
-                        <Tooltip formatter={(v) => f(Number(v))} />
+                        <Tooltip formatter={(v: unknown) => f(Number(v))} />
                       </PieChart>
                     </ResponsiveContainer>
                   </div>
@@ -211,7 +225,7 @@ export default function FinancialStatementsPage() {
                         <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e5e7eb" />
                         <XAxis type="number" tickFormatter={(v) => `${(v / 1000).toFixed(0)}K`} fontSize={10} />
                         <YAxis type="category" dataKey="name" width={120} fontSize={10} />
-                        <Tooltip formatter={(v) => f(Number(v))} />
+                        <Tooltip formatter={(v: unknown) => f(Number(v))} />
                         <Bar dataKey="value" radius={[0, 4, 4, 0]}>
                           {expenseChartData.map((entry, i) => <Cell key={i} fill={entry.type === 'COGS' ? '#ef4444' : '#f97316'} />)}
                         </Bar>
@@ -228,12 +242,15 @@ export default function FinancialStatementsPage() {
       {/* ═══════════ BALANCE SHEET TAB ═══════════ */}
       {tab === 'bs' && bs.data && !bs.isLoading && (() => {
         const d = bs.data;
-        const totalAssets = sumArr(d.assets);
-        const totalLiab = sumArr(d.liabilities);
-        const totalEquity = sumArr(d.equity);
+        const assets = Array.isArray(d?.assets) ? d.assets : [];
+        const liabilities = Array.isArray(d?.liabilities) ? d.liabilities : [];
+        const equity = Array.isArray(d?.equity) ? d.equity : [];
+        const totalAssets = sumArr(assets);
+        const totalLiab = sumArr(liabilities);
+        const totalEquity = sumArr(equity);
         const isBalanced = Math.abs(totalAssets - (totalLiab + totalEquity)) < 1;
 
-        const assetPieData = d.assets.map(a => ({ name: a.account_name.length > 20 ? a.account_name.slice(0, 20) + '...' : a.account_name, value: Math.abs(a.total) }));
+        const assetPieData = assets.map(a => ({ name: a.account_name.length > 20 ? a.account_name.slice(0, 20) + '...' : a.account_name, value: Math.abs(a.total) }));
         const bsBarData = [
           { name: 'Assets', value: totalAssets, fill: '#22c55e' },
           { name: 'Liabilities', value: totalLiab, fill: '#ef4444' },
@@ -253,7 +270,7 @@ export default function FinancialStatementsPage() {
               <div className="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-5">
                 <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
                   <div className="bg-emerald-600 px-5 py-2.5 text-white font-bold text-xs uppercase tracking-wider">Assets</div>
-                  <BSSection accounts={d.assets} />
+                  <BSSection accounts={assets} />
                   <div className="px-5 py-3 bg-gray-50 dark:bg-gray-900/50 border-t-2 border-emerald-500 font-bold text-sm flex justify-between">
                     <span>Total Assets</span><span className="font-mono">{f(totalAssets)}</span>
                   </div>
@@ -261,14 +278,14 @@ export default function FinancialStatementsPage() {
                 <div className="space-y-5">
                   <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
                     <div className="bg-red-600 px-5 py-2.5 text-white font-bold text-xs uppercase tracking-wider">Liabilities</div>
-                    <BSSection accounts={d.liabilities} />
+                    <BSSection accounts={liabilities} />
                     <div className="px-5 py-3 bg-gray-50 dark:bg-gray-900/50 border-t-2 border-red-500 font-bold text-sm flex justify-between">
                       <span>Total Liabilities</span><span className="font-mono">{f(totalLiab)}</span>
                     </div>
                   </div>
                   <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
                     <div className="bg-blue-600 px-5 py-2.5 text-white font-bold text-xs uppercase tracking-wider">Equity</div>
-                    <BSSection accounts={d.equity} />
+                    <BSSection accounts={equity} />
                     <div className="px-5 py-3 bg-gray-50 dark:bg-gray-900/50 border-t-2 border-blue-500 font-bold text-sm flex justify-between">
                       <span>Total Equity</span><span className="font-mono">{f(totalEquity)}</span>
                     </div>
@@ -287,7 +304,7 @@ export default function FinancialStatementsPage() {
                         <Pie data={assetPieData} cx="50%" cy="50%" outerRadius={80} innerRadius={45} paddingAngle={2} dataKey="value">
                           {assetPieData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                         </Pie>
-                        <Tooltip formatter={(v) => f(Number(v))} />
+                        <Tooltip formatter={(v: unknown) => f(Number(v))} />
                         <Legend wrapperStyle={{ fontSize: '10px' }} />
                       </PieChart>
                     </ResponsiveContainer>
@@ -300,7 +317,7 @@ export default function FinancialStatementsPage() {
                       <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                       <XAxis dataKey="name" fontSize={11} />
                       <YAxis tickFormatter={(v) => `${(v / 1000).toFixed(0)}K`} fontSize={10} />
-                      <Tooltip formatter={(v) => f(Number(v))} />
+                      <Tooltip formatter={(v: unknown) => f(Number(v))} />
                       <Bar dataKey="value" radius={[6, 6, 0, 0]}>
                         {bsBarData.map((entry, i) => <Cell key={i} fill={entry.fill} />)}
                       </Bar>
@@ -316,9 +333,12 @@ export default function FinancialStatementsPage() {
       {/* ═══════════ CASH FLOW TAB ═══════════ */}
       {tab === 'cf' && cf.data && !cf.isLoading && (() => {
         const d = cf.data;
-        const opTotal = d.operating.reduce((s, a) => s + a.total, 0);
-        const invTotal = d.investing.reduce((s, a) => s + a.total, 0);
-        const finTotal = d.financing.reduce((s, a) => s + a.total, 0);
+        const operating = Array.isArray(d?.operating) ? d.operating : [];
+        const investing = Array.isArray(d?.investing) ? d.investing : [];
+        const financing = Array.isArray(d?.financing) ? d.financing : [];
+        const opTotal = sumArr(operating);
+        const invTotal = sumArr(investing);
+        const finTotal = sumArr(financing);
         const netCash = opTotal + invTotal + finTotal;
 
         const cfBarData = [
@@ -339,9 +359,9 @@ export default function FinancialStatementsPage() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
               <div className="lg:col-span-2 space-y-5">
                 {([
-                  { title: 'Operating Activities', items: d.operating, color: 'bg-blue-600', total: opTotal },
-                  { title: 'Investing Activities', items: d.investing, color: 'bg-purple-600', total: invTotal },
-                  { title: 'Financing Activities', items: d.financing, color: 'bg-gray-700', total: finTotal },
+                  { title: 'Operating Activities', items: operating, color: 'bg-blue-600', total: opTotal },
+                  { title: 'Investing Activities', items: investing, color: 'bg-purple-600', total: invTotal },
+                  { title: 'Financing Activities', items: financing, color: 'bg-gray-700', total: finTotal },
                 ] as const).map(section => (
                   <div key={section.title} className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
                     <div className={`${section.color} px-5 py-3 text-white font-bold text-sm`}>{section.title}</div>
@@ -374,7 +394,7 @@ export default function FinancialStatementsPage() {
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                     <XAxis dataKey="name" fontSize={11} />
                     <YAxis tickFormatter={(v) => `${(v / 1000).toFixed(0)}K`} fontSize={10} />
-                    <Tooltip formatter={(v) => f(Number(v))} />
+                    <Tooltip formatter={(v: unknown) => f(Number(v))} />
                     <Bar dataKey="value" radius={[6, 6, 0, 0]}>
                       {cfBarData.map((entry, i) => <Cell key={i} fill={entry.fill} />)}
                     </Bar>
@@ -443,7 +463,7 @@ export default function FinancialStatementsPage() {
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                     <XAxis dataKey="name" fontSize={10} />
                     <YAxis tickFormatter={(v) => `${(v / 1000).toFixed(0)}K`} fontSize={10} />
-                    <Tooltip formatter={(v) => f(Number(v))} />
+                    <Tooltip formatter={(v: unknown) => f(Number(v))} />
                     <Legend />
                     <Bar dataKey="opening" name="Opening" fill="#93c5fd" radius={[4, 4, 0, 0]} />
                     <Bar dataKey="closing" name="Closing" fill="#3b82f6" radius={[4, 4, 0, 0]} />

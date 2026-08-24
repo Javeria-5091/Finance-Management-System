@@ -74,7 +74,8 @@ export default function AgingReportPage() {
 }
 
 function AgingSection({ title, items, type }: { title: string; items: AgingItem[]; type: 'receivable' | 'payable' }) {
-  const totals = items.reduce((acc, r) => ({
+  const safeItems = items ?? [];
+  const totals = safeItems.reduce((acc, r) => ({
     total: acc.total + r.total,
     buckets: acc.buckets.map((b, i) => b + r[BUCKET_KEYS[i]]),
   }), { total: 0, buckets: [0, 0, 0, 0, 0] });
@@ -85,7 +86,7 @@ function AgingSection({ title, items, type }: { title: string; items: AgingItem[
     fill: BUCKET_COLORS[i],
   }));
 
-  const barData = items.slice(0, 10).map(r => ({
+  const barData = safeItems.slice(0, 10).map(r => ({
     name: ((type === 'receivable' ? r.client_name : r.vendor_name) || 'Unknown').slice(0, 15),
     current: r.current_amount,
     '1-30': r.overdue_1_30,
@@ -94,7 +95,7 @@ function AgingSection({ title, items, type }: { title: string; items: AgingItem[
     '90+': r.overdue_over_90,
   }));
 
-  if (!items.length) {
+  if (!safeItems.length) {
     return <EmptyReportState icon="chart" title={`No ${title}`} message={`No outstanding ${type} items found`} />;
   }
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { supabase } from "@/lib/supabase";
+import { supabase, financeDB } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import {
   Plus,
@@ -137,9 +137,9 @@ export default function CreditNotesPage() {
     setLoading(true);
     setFetchError(null);
 
-    const { data, error } = await supabase
+    const { data, error } = await financeDB
       .from("credit_notes")
-      .select("*, invoices(invoice_number, client_name)")
+      .select("*")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -147,7 +147,28 @@ export default function CreditNotesPage() {
       setFetchError(error.message);
       setCreditNotes([]);
     } else if (data) {
-      setCreditNotes(data as CreditNoteRow[]);
+      // credit_notes is in finance while invoices is in public.
+      // Do not use PostgREST embedding across schemas; hydrate invoice data separately.
+      const invoiceIds = Array.from(new Set((data as any[]).map((note) => note.invoice_id).filter(Boolean)));
+      let invoiceMap = new Map<string, { invoice_number: string | null; client_name: string | null }>();
+      if (invoiceIds.length > 0) {
+        const { data: invoiceData, error: invoiceError } = await supabase
+          .from("invoices")
+          .select("id, invoice_number, client_name")
+          .in("id", invoiceIds);
+        if (invoiceError) {
+          console.error("Fetch credit-note invoice details error:", invoiceError);
+        } else {
+          invoiceMap = new Map((invoiceData || []).map((invoice) => [
+            invoice.id,
+            { invoice_number: invoice.invoice_number, client_name: invoice.client_name },
+          ]));
+        }
+      }
+      setCreditNotes((data as any[]).map((note) => ({
+        ...note,
+        invoices: invoiceMap.get(note.invoice_id) ?? null,
+      })) as CreditNoteRow[]);
     }
 
     setLoading(false);
@@ -262,7 +283,7 @@ export default function CreditNotesPage() {
       const baseAmount = amountNum * exchangeRate;
 
       // 2. Insert Credit Note with pre-generated number
-      const { data: cn, error: cnError } = await supabase
+      const { data: cn, error: cnError } = await financeDB
         .from("credit_notes")
         .insert({
           credit_note_number: cnNumber,
@@ -274,7 +295,7 @@ export default function CreditNotesPage() {
           base_amount: baseAmount,
           status: "DRAFT",
         })
-        .select("*, invoices(invoice_number, client_name)")
+        .select("*")
         .single();
 
       if (cnError) throw cnError;

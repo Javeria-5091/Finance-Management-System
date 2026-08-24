@@ -36,42 +36,36 @@ const financeDb = () => supabase.schema('finance');
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getProfitAndLoss = async (start?: string, end?: string) => {
-  // FIX: Function is reporting.get_profit_and_loss with params p_start_date/p_end_date
-  const { data, error } = await reportingDb().rpc('get_profit_and_loss', {
-    p_start_date: start || null,
-    p_end_date: end || null,
-  });
+  const { data, error } = await supabase.rpc('profit_and_loss', { p_start: start || null, p_end: end || null });
   if (error) throw new Error(error.message);
-  return data as PLData;
+  const d = (data && typeof data === 'object' && !Array.isArray(data)) ? data as Record<string, unknown> : {};
+  const arr = (key: string) => Array.isArray(d[key]) ? d[key] : [];
+  return { revenue: arr('revenue'), cost_of_sales: arr('cost_of_sales'), operating_expenses: arr('operating_expenses'), other_income: arr('other_income'), other_expenses: arr('other_expenses') } as PLData;
 };
 
 export const getBalanceSheet = async (asOfDate?: string) => {
-  // FIX: Function is reporting.get_balance_sheet with param p_as_of_date
-  const { data, error } = await reportingDb().rpc('get_balance_sheet', {
-    p_as_of_date: asOfDate || null,
-  });
+  void asOfDate;
+  const { data, error } = await supabase.rpc('balance_sheet');
   if (error) throw new Error(error.message);
-  return data as BSData;
+  const d = (data && typeof data === 'object' && !Array.isArray(data)) ? data as Record<string, unknown> : {};
+  const arr = (key: string) => Array.isArray(d[key]) ? d[key] : [];
+  return { assets: arr('assets'), liabilities: arr('liabilities'), equity: arr('equity') } as BSData;
 };
 
 export const getCashFlow = async (start?: string, end?: string) => {
-  // FIX: Function is reporting.get_cash_flow with params p_start_date/p_end_date
-  const { data, error } = await reportingDb().rpc('get_cash_flow', {
-    p_start_date: start || null,
-    p_end_date: end || null,
-  });
+  const { data, error } = await supabase.rpc('cash_flow', { p_start: start || null, p_end: end || null });
   if (error) throw new Error(error.message);
-  return data as CFData;
+  const d = (data && typeof data === 'object' && !Array.isArray(data)) ? data as Record<string, unknown> : {};
+  const arr = (key: string) => Array.isArray(d[key]) ? d[key] : [];
+  return { operating: arr('operating'), investing: arr('investing'), financing: arr('financing'), cash_balance: Number(d.cash_balance ?? 0) || 0 } as CFData;
 };
 
 export const getStatementOfChangesInEquity = async (start?: string, end?: string) => {
-  // FIX: Function is reporting.get_statement_of_changes_in_equity with params p_period_start/p_period_end
-  const { data, error } = await reportingDb().rpc('get_statement_of_changes_in_equity', {
-    p_period_start: start || null,
-    p_period_end: end || null,
-  });
+  const { data, error } = await supabase.rpc('statement_of_changes_in_equity', { p_period_start: start || null, p_period_end: end || null });
   if (error) throw new Error(error.message);
-  return data as SOCEData;
+  const d = (data && typeof data === 'object' && !Array.isArray(data)) ? data as Record<string, unknown> : {};
+  const items = Array.isArray(d.items) ? d.items : [];
+  return { items, total_opening: Number(d.total_opening ?? 0) || 0, total_additions: Number(d.total_additions ?? 0) || 0, total_deductions: Number(d.total_deductions ?? 0) || 0, total_closing: Number(d.total_closing ?? 0) || 0 } as SOCEData;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -79,23 +73,15 @@ export const getStatementOfChangesInEquity = async (start?: string, end?: string
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getAgingReport = async () => {
-  // FIX: No function named aging_report exists. Views reporting.receivable_aging and
-  // reporting.payable_aging exist. Query both views and combine the results.
-  const { data: receivable, error: arErr } = await reportingDb()
-    .from('receivable_aging')
-    .select('*');
-  if (arErr) throw new Error(arErr.message);
-
-  const { data: payable, error: apErr } = await reportingDb()
-    .from('payable_aging')
-    .select('*');
-  if (apErr) throw new Error(apErr.message);
-
-  const combined = [
-    ...(receivable || []).map((r: any) => ({ ...r, aging_type: 'receivable' })),
-    ...(payable || []).map((p: any) => ({ ...p, aging_type: 'payable' })),
-  ];
-  return combined as unknown as AgingData;
+  const { data, error } = await supabase.rpc('aging_report');
+  if (error) throw new Error(error.message);
+  const d = (data && typeof data === 'object' && !Array.isArray(data)) ? data as Record<string, unknown> : {};
+  const normalize = (rows: unknown) => Array.isArray(rows) ? rows.map((r: any) => ({
+    client_name: r.client_name ?? undefined, vendor_name: r.vendor_name ?? undefined, invoice_number: r.invoice_number ?? undefined, bill_number: r.bill_number ?? undefined,
+    due_date: r.due_date ?? '', total: Number(r.total ?? 0) || 0, current_amount: Number(r.current_amount ?? 0) || 0,
+    overdue_1_30: Number(r.overdue_1_30 ?? 0) || 0, overdue_31_60: Number(r.overdue_31_60 ?? 0) || 0, overdue_61_90: Number(r.overdue_61_90 ?? 0) || 0, overdue_over_90: Number(r.overdue_over_90 ?? 0) || 0,
+  })) : [];
+  return { receivable: normalize(d.receivable), payable: normalize(d.payable) } as AgingData;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
