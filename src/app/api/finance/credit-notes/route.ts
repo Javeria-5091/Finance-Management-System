@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { creditNoteCreateSchema, validateBody, sanitizeSearch, validateExchangeRate } from '@/lib/validations';
+import { enforceMFA } from '@/lib/mfa-middleware';
 
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -22,9 +23,8 @@ export async function GET(req: NextRequest) {
     const invoiceId = searchParams.get('invoice_id') || '';
 
     let query = supabase
-      .schema('finance')
       .from('credit_notes')
-      .select('*', { count: 'exact' })
+      .select('*, invoice:invoices(id, invoice_number, client_id)', { count: 'exact' })
       .eq('organization_id', auth.orgId);
 
     if (search) {
@@ -49,19 +49,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    const invoiceIds = Array.from(new Set((data || []).map((note: any) => note.invoice_id).filter(Boolean)));
-    const invoiceMap = new Map<string, any>();
-    if (invoiceIds.length > 0) {
-      const { data: invoices, error: invoiceError } = await supabase
-        .from('invoices')
-        .select('id, invoice_number, client_id')
-        .in('id', invoiceIds)
-        .eq('organization_id', auth.orgId);
-      if (invoiceError) return NextResponse.json({ error: invoiceError.message }, { status: 500 });
-      for (const invoice of invoices || []) invoiceMap.set(invoice.id, invoice);
-    }
-    const hydrated = (data || []).map((note: any) => ({ ...note, invoice: invoiceMap.get(note.invoice_id) ?? null }));
-    return NextResponse.json({ data: hydrated, total: count || 0, page, pageSize });
+    return NextResponse.json({ data, total: count || 0, page, pageSize });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
@@ -71,6 +59,8 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('INVOICE_CREATE');
   if (auth instanceof NextResponse) return auth;
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
 
   try {
@@ -92,7 +82,7 @@ export async function POST(req: NextRequest) {
     // Validate the referenced invoice exists and belongs to org
     const invoice = getData(await supabase
       .from('invoices')
-      .select('id, invoice_number, client_id, total_amount, status, currency')
+      .select('id, invoice_number, client_id, total_amount, amount_paid, status, currency')
       .eq('id', invoice_id)
       .eq('organization_id', auth.orgId)
       .single());
@@ -101,12 +91,33 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Referenced invoice not found' }, { status: 404 });
     }
 
+    const { data: existingCreditNotes, error: creditNoteLookupError } = await supabase
+      .from('credit_notes')
+      .select('total_amount, status')
+      .eq('invoice_id', invoice_id)
+      .eq('organization_id', auth.orgId)
+      .neq('status', 'REVERSED');
+
+    if (creditNoteLookupError) {
+      return NextResponse.json({ error: 'Unable to validate existing credit notes: ' + creditNoteLookupError.message }, { status: 500 });
+    }
+
+    const invoiceTotal = Number(invoice.total_amount) || 0;
+    const amountPaid = Number(invoice.amount_paid) || 0;
+    const previouslyCredited = (existingCreditNotes || []).reduce((sum: number, cn: any) => sum + (Number(cn.total_amount) || 0), 0);
+    const remainingCreditable = Math.max(0, invoiceTotal - amountPaid - previouslyCredited);
+
+    if (Number(total_amount) > remainingCreditable + 0.01) {
+      return NextResponse.json({
+        error: `Credit note amount ${Number(total_amount).toFixed(2)} exceeds the remaining invoice balance available for credit (${remainingCreditable.toFixed(2)}).`,
+      }, { status: 400 });
+    }
+
     // Generate credit note number
     const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'CN' });
     const creditNoteNumber = numData || `CN-${Date.now().toString().slice(-6)}`;
 
     const { data: creditNote, error } = await supabase
-      .schema('finance')
       .from('credit_notes')
       .insert({
         credit_note_number: creditNoteNumber,

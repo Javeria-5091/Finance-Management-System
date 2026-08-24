@@ -11,7 +11,7 @@ interface AuthContextType {
   profile: UserProfile | null;
   role: string;
   loading: boolean;
-  signUp: (email: string, password: string) => Promise<string | null>;
+  signUp: (email: string, password: string, organizationName: string) => Promise<string | null>;
   signIn: (email: string, password: string) => Promise<string | null>;
   signOut: () => Promise<void>;
   hasPermission: (permission: keyof UserProfile) => boolean;
@@ -159,8 +159,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return Boolean(profile[permission]);
   };
 
-  const signUp = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signUp({ email, password });
+  const signUp = async (email: string, password: string, organizationName: string) => {
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { organization_name: organizationName.trim() } },
+    });
     return error?.message || null;
   };
 

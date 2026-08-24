@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
 
     let query = supabase
       .schema('finance').from('payment_receipts')
-      .select('*, allocations:payment_allocations(id, invoice_id, allocated_amount)', { count: 'exact' })
+      .select('*, client:clients(id, name, client_code), allocations:payment_allocations(id, invoice_id, allocated_amount)', { count: 'exact' })
       .eq('organization_id', auth.orgId);
 
     if (search) {
@@ -49,30 +49,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
-    // payment_receipts.client_id references the legacy/public clients table
-    // only logically; there is no FK relationship in the authoritative schema.
-    // Do the client lookup explicitly instead of asking PostgREST to infer a
-    // relationship that does not exist in its schema cache.
-    const receiptRows = (data || []) as any[];
-    const clientIds = [...new Set(receiptRows.map((r) => r.client_id).filter(Boolean))];
-    let clientsById = new Map<string, any>();
-    if (clientIds.length) {
-      const { data: clients, error: clientsError } = await supabase
-        .from('clients')
-        .select('id, name, client_code')
-        .in('id', clientIds)
-        .eq('organization_id', auth.orgId);
-      if (clientsError) {
-        return NextResponse.json({ error: clientsError.message }, { status: 500 });
-      }
-      clientsById = new Map((clients || []).map((c: any) => [c.id, c]));
-    }
-    const enrichedData = receiptRows.map((r) => ({
-      ...r,
-      client: clientsById.get(r.client_id) || null,
-    }));
-
-    return NextResponse.json({ data: enrichedData, total: count || 0, page, pageSize });
+    return NextResponse.json({ data, total: count || 0, page, pageSize });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }

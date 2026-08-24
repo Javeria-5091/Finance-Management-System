@@ -21,6 +21,7 @@ import type {
 // ─── Asset Categories ────────────────────────────────────────────────────────
 
 export const getAssetCategories = async (): Promise<AssetCategory[]> => {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await financeDB
     .from('asset_categories')
     .select(`
@@ -30,6 +31,7 @@ export const getAssetCategories = async (): Promise<AssetCategory[]> => {
       expense_account:linked_expense_account_id(name)
     `)
     .eq('active', true)
+    .eq('organization_id', orgId)
     .order('code');
 
   if (error) throw new Error(`Failed to fetch asset categories: ${error.message}`);
@@ -37,6 +39,7 @@ export const getAssetCategories = async (): Promise<AssetCategory[]> => {
 };
 
 export const getAssetCategoryById = async (id: string): Promise<AssetCategory | null> => {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await financeDB
     .from('asset_categories')
     .select(`
@@ -46,6 +49,7 @@ export const getAssetCategoryById = async (id: string): Promise<AssetCategory | 
       expense_account:linked_expense_account_id(name)
     `)
     .eq('id', id)
+    .eq('organization_id', orgId)
     .single();
 
   if (error) throw new Error(`Failed to fetch asset category: ${error.message}`);
@@ -53,9 +57,10 @@ export const getAssetCategoryById = async (id: string): Promise<AssetCategory | 
 };
 
 export const createAssetCategory = async (input: AssetCategoryFormInput, userId: string): Promise<AssetCategory> => {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await financeDB
     .from('asset_categories')
-    .insert({ ...input, created_by: userId })
+    .insert({ ...input, created_by: userId, organization_id: orgId })
     .select()
     .single();
 
@@ -64,10 +69,12 @@ export const createAssetCategory = async (input: AssetCategoryFormInput, userId:
 };
 
 export const updateAssetCategory = async (id: string, input: Partial<AssetCategoryFormInput>): Promise<AssetCategory> => {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await financeDB
     .from('asset_categories')
     .update(input)
     .eq('id', id)
+    .eq('organization_id', orgId)
     .select()
     .single();
 
@@ -83,6 +90,7 @@ export const getFixedAssets = async (filters?: {
   project_id?: string;
   search?: string;
 }): Promise<FixedAsset[]> => {
+  const orgId = await getCurrentOrgId();
   let query = financeDB
     .from('fixed_assets')
     .select(`
@@ -108,6 +116,7 @@ export const getFixedAssets = async (filters?: {
 };
 
 export const getFixedAssetById = async (id: string): Promise<FixedAsset | null> => {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await financeDB
     .from('fixed_assets')
     .select(`
@@ -119,6 +128,7 @@ export const getFixedAssetById = async (id: string): Promise<FixedAsset | null> 
       expense_account:linked_expense_account_id(name)
     `)
     .eq('id', id)
+    .eq('organization_id', orgId)
     .single();
 
   if (error) throw new Error(`Failed to fetch fixed asset: ${error.message}`);
@@ -126,6 +136,7 @@ export const getFixedAssetById = async (id: string): Promise<FixedAsset | null> 
 };
 
 export const createFixedAsset = async (input: FixedAssetFormInput, userId: string): Promise<FixedAsset> => {
+  const orgId = await getCurrentOrgId();
   // If no override accounts, get from category
   let assetAccountId = input.linked_asset_account_id;
   let depAccountId = input.linked_depreciation_account_id;
@@ -136,6 +147,7 @@ export const createFixedAsset = async (input: FixedAssetFormInput, userId: strin
       .from('asset_categories')
       .select('linked_asset_account_id, linked_depreciation_account_id, linked_expense_account_id')
       .eq('id', input.category_id)
+      .eq('organization_id', orgId)
       .single();
 
     if (cat) {
@@ -154,7 +166,8 @@ export const createFixedAsset = async (input: FixedAssetFormInput, userId: strin
     linked_depreciation_account_id: depAccountId,
     linked_expense_account_id: expAccountId,
     status: 'pending_capitalization',
-    created_by: userId
+    created_by: userId,
+    organization_id: orgId
   };
 
   const { data, error } = await financeDB
@@ -168,6 +181,7 @@ export const createFixedAsset = async (input: FixedAssetFormInput, userId: strin
 };
 
 export const updateFixedAsset = async (id: string, input: Partial<FixedAssetFormInput & { status?: AssetStatus }>): Promise<FixedAsset> => {
+  const orgId = await getCurrentOrgId();
   // Convert empty strings to null for date columns
   const updatePayload: Record<string, unknown> = { ...input, updated_at: new Date().toISOString() };
   if ('warranty_start' in updatePayload) updatePayload.warranty_start = (updatePayload.warranty_start as string) || null;
@@ -177,6 +191,7 @@ export const updateFixedAsset = async (id: string, input: Partial<FixedAssetForm
     .from('fixed_assets')
     .update(updatePayload)
     .eq('id', id)
+    .eq('organization_id', orgId)
     .select()
     .single();
 

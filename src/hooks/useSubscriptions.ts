@@ -1,7 +1,7 @@
 // =============================================================================
 // P1 Hook: Subscriptions — TanStack React Query pattern
 // File: src/hooks/useSubscriptions.ts
-// Convention: Follows usepayroll.ts exactly
+// Convention: Follows usePayroll.ts exactly
 // =============================================================================
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';

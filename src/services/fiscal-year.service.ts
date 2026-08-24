@@ -83,15 +83,26 @@ export async function softCloseFiscalYear(fyId: string, reason: string): Promise
   }
 
   // ✅ FIX: Pass closed_by
+  const { data: fiscalYear, error: fyErr } = await db()
+    .from('fiscal_years')
+    .select('id, organization_id')
+    .eq('id', fyId)
+    .maybeSingle();
+
+  if (fyErr) throw fyErr;
+  if (!fiscalYear) throw new Error('Fiscal year not found');
+  if (!fiscalYear.organization_id) throw new Error('Fiscal year has no organization context');
+
   const { error } = await db()
     .from('fiscal_years')
     .update({
       status: 'SOFT_CLOSED',
       reopening_reason: reason,
       closed_at: new Date().toISOString(),
-      closed_by: userId,  // ✅ FIX
+      closed_by: userId,
     })
-    .eq('id', fyId).eq('organization_id', (await db().from('fiscal_years').select('organization_id').eq('id', fyId).single()).data?.organization_id || '');
+    .eq('id', fyId)
+    .eq('organization_id', fiscalYear.organization_id);
 
   if (error) throw error;
 }

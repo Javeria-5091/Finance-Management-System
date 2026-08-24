@@ -22,9 +22,8 @@ export async function GET(
     const { id } = params;
 
     const { data: creditNote, error } = await supabase
-      .schema('finance')
       .from('credit_notes')
-      .select('*')
+      .select('*, invoice:invoices(id, invoice_number, client_id, total_amount)')
       .eq('id', id)
       .eq('organization_id', auth.orgId)
       .single();
@@ -33,18 +32,7 @@ export async function GET(
       return NextResponse.json({ error: 'Credit note not found' }, { status: 404 });
     }
 
-    let invoice = null;
-    if (creditNote.invoice_id) {
-      const { data: invoiceData } = await supabase
-        .from('invoices')
-        .select('id, invoice_number, client_id, total_amount')
-        .eq('id', creditNote.invoice_id)
-        .eq('organization_id', auth.orgId)
-        .maybeSingle();
-      invoice = invoiceData ?? null;
-    }
-
-    return NextResponse.json({ creditNote: { ...creditNote, invoice } });
+    return NextResponse.json({ creditNote });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
@@ -66,7 +54,6 @@ export async function PATCH(
     const body = bodyValidation.data as any;
 
     const existing = getData(await supabase
-      .schema('finance')
       .from('credit_notes')
       .select('id, status, credit_note_number')
       .eq('id', id)
@@ -84,7 +71,6 @@ export async function PATCH(
     const { credit_note_number, organization_id, created_by, created_at, id: _id, ...updates } = body;
 
     const { data: updated, error } = await supabase
-      .schema('finance')
       .from('credit_notes')
       .update(updates)
       .eq('id', id)
@@ -150,7 +136,6 @@ export async function POST(
     if (!validation.success) return NextResponse.json({ error: validation.error }, { status: 400 });
 
     const creditNote = getData(await supabase
-      .schema('finance')
       .from('credit_notes')
       .select('*')
       .eq('id', id)
@@ -278,7 +263,7 @@ export async function POST(
     const reference = journal.reference || `JE-CN-${journalId}`;
 
     // Update credit note status
-    await supabase.schema('finance').from('credit_notes').update({
+    await supabase.from('credit_notes').update({
       status: 'POSTED',
       posted_at: new Date().toISOString(),
       journal_entry_id: journalId,

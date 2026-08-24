@@ -1,7 +1,6 @@
 // =============================================================================
 // P1 Hook: Payroll — REWRITTEN to follow P0's TanStack React Query pattern
 // Convention: P0 uses src/hooks/use*.ts with @tanstack/react-query
-// File: src/hooks/usePayroll.ts (rename from usepayroll.ts → usePayroll.ts)
 // ★★★ FIX #4: Converted from useState/useEffect to React Query pattern ★★★
 // =============================================================================
 

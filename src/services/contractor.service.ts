@@ -21,6 +21,7 @@ function resolveClient(override?: SClient | null): SClient {
 // Backward-compat alias: existing function bodies
 // continue to reference `supabase` directly.
 const supabase = browserSupabase;
+import { getCurrentOrganizationId } from '@/lib/organization';
 import type {
   ContractorRow,
   ContractorExpirationRow,
@@ -62,10 +63,12 @@ export async function fetchContractors(filters?: {
   role?: string;
   status?: string;
 }) {
+  const orgId = await getCurrentOrganizationId();
   let query = supabase
     .schema('finance')
     .from('contractors')
     .select('*')
+    .eq('organization_id', orgId)
     .order('created_at', { ascending: false });
 
   if (filters?.search) {
@@ -86,11 +89,13 @@ export async function fetchContractors(filters?: {
 
 // ─── Fetch single contractor ───
 export async function fetchContractorById(id: string) {
+  const orgId = await getCurrentOrganizationId();
   const { data, error } = await supabase
     .schema('finance')
     .from('contractors')
     .select('*')
     .eq('id', id)
+    .eq('organization_id', orgId)
     .single();
   if (error) throw new Error(error.message);
   return data as ContractorRow;
@@ -98,9 +103,11 @@ export async function fetchContractorById(id: string) {
 
 // ─── Create contractor ───
 export async function createContractor(contractorData: Record<string, any>) {
+  const orgId = await getCurrentOrganizationId();
   const cleaned = emptyToNull({
     ...contractorData,
     status: contractorData.status || 'ACTIVE',
+    organization_id: orgId,
   });
   if (typeof cleaned.rate === 'string') {
     cleaned.rate = parseFloat(cleaned.rate) || 0;
@@ -121,6 +128,7 @@ export async function createContractor(contractorData: Record<string, any>) {
 
 // ─── Update contractor ───
 export async function updateContractor(id: string, updates: Record<string, any>) {
+  const orgId = await getCurrentOrganizationId();
   const { created_by, id: _id, ...rest } = updates as any;
   const cleaned = emptyToNull(rest);
 
@@ -136,6 +144,7 @@ export async function updateContractor(id: string, updates: Record<string, any>)
     .from('contractors')
     .update(cleaned)
     .eq('id', id)
+    .eq('organization_id', orgId)
     .select('*')
     .single();
   if (error) throw new Error(error.message);
@@ -144,20 +153,24 @@ export async function updateContractor(id: string, updates: Record<string, any>)
 
 // ─── Delete contractor ───
 export async function deleteContractor(id: string) {
+  const orgId = await getCurrentOrganizationId();
   const { error } = await supabase
     .schema('finance')
     .from('contractors')
     .delete()
-    .eq('id', id);
+    .eq('id', id)
+    .eq('organization_id', orgId);
   if (error) throw new Error(error.message);
 }
 
 // ─── Fetch expiring contracts (from view) ───
 export async function fetchExpiringContracts() {
+  const orgId = await getCurrentOrganizationId();
   const { data, error } = await supabase
     .schema('reporting')
     .from('v_contractor_expirations')
     .select('*')
+    .eq('organization_id', orgId)
     .order('contract_end', { ascending: true });
   if (error) throw new Error(error.message);
   return (data as ContractorExpirationRow[]) || [];
@@ -165,36 +178,43 @@ export async function fetchExpiringContracts() {
 
 // ─── Fetch cost summary by role (from view) ───
 export async function fetchCostByRole() {
+  const orgId = await getCurrentOrganizationId();
   const { data, error } = await supabase
     .schema('reporting')
     .from('v_contractor_costs')
-    .select('*');
+    .select('*')
+    .eq('organization_id', orgId);
   if (error) throw new Error(error.message);
   return (data as ContractorCostRow[]) || [];
 }
 
 // ─── Fetch cost summary by project (from view) ───
 export async function fetchCostByProject() {
+  const orgId = await getCurrentOrganizationId();
   const { data, error } = await supabase
     .schema('reporting')
     .from('v_contractor_project_costs')
-    .select('*');
+    .select('*')
+    .eq('organization_id', orgId);
   if (error) throw new Error(error.message);
   return (data as ContractorProjectCostRow[]) || [];
 }
 
 // ─── Fetch contractor stats ───
 export async function fetchContractorStats(): Promise<ContractorStats> {
+  const orgId = await getCurrentOrganizationId();
   const [activeRes, expirationsRes] = await Promise.all([
     supabase
       .schema('finance')
       .from('contractors')
       .select('id, rate, rate_type, currency')
-      .eq('status', 'ACTIVE'),
+      .eq('status', 'ACTIVE')
+      .eq('organization_id', orgId),
     supabase
       .schema('reporting')
       .from('v_contractor_expirations')
-      .select('id, expiry_bucket'),
+      .select('id, expiry_bucket')
+      .eq('organization_id', orgId),
   ]);
 
   const active = activeRes.data || [];

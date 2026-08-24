@@ -11,11 +11,16 @@ export default function SignupPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [organizationName, setOrganizationName] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (!organizationName.trim()) {
+      setError("Organization name is required");
+      return;
+    }
     if (password.length < 6) {
       setError("Password must be at least 6 characters");
       return;
@@ -23,7 +28,7 @@ export default function SignupPage() {
     setError("");
     setLoading(true);
 
-    const errMsg = await signUp(email, password);
+    const errMsg = await signUp(email, password, organizationName);
     setLoading(false);
 
     if (errMsg) {
@@ -60,6 +65,15 @@ export default function SignupPage() {
             value={email} 
             onChange={e => setEmail(e.target.value)} 
             required 
+          />
+          <Input
+            id="organizationName"
+            label="Organization Name"
+            type="text"
+            placeholder="Your company or organization"
+            value={organizationName}
+            onChange={e => setOrganizationName(e.target.value)}
+            required
           />
           <Input 
             id="password" 

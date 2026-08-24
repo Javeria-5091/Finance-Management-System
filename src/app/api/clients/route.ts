@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { getAuthUser, requirePermission } from '@/lib/api-auth';
 import { sanitizeSearch } from '@/lib/validations';
+import { z } from 'zod';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -60,6 +61,12 @@ export async function GET(req: NextRequest) {
   }
 }
  
+const clientCreateSchema = z.object({
+  name: z.string().trim().min(1).max(200), contact_person: z.string().max(200).optional().nullable(), email: z.string().email().optional().nullable(), phone: z.string().max(50).optional().nullable(),
+  address: z.string().max(500).optional().nullable(), city: z.string().max(100).optional().nullable(), country: z.string().max(100).optional().nullable(),
+  tax_registration: z.string().max(100).optional().nullable(), tax_type: z.string().max(100).optional().nullable(), payment_terms: z.string().max(50).optional(), default_currency: z.string().length(3).optional(), notes: z.string().max(2000).optional().nullable(), website: z.string().url().optional().nullable()
+});
+
 // ─── POST: Create a new client ───
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('CLIENT_CREATE');
@@ -67,12 +74,13 @@ export async function POST(req: NextRequest) {
   const { supabase } = await getAuthSupabase(req);
  
   try {
-    const body = await req.json();
+    const parsed = clientCreateSchema.safeParse(await req.json());
+    if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message || 'Invalid client data' }, { status: 400 });
     const {
       name, contact_person, email, phone, address, city, country,
       tax_registration, tax_type, payment_terms, default_currency,
       notes, website,
-    } = body;
+    } = parsed.data;
  
     if (!name) {
       return NextResponse.json({ error: 'Client name is required' }, { status: 400 });

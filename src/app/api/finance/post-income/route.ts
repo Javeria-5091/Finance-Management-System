@@ -17,6 +17,7 @@ export async function POST(req: NextRequest) {
   const mfaCheck = await enforceMFA(auth);
   if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
+  if (!auth.orgId) return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
 
   try {
     const rawBody = await req.json();

@@ -1,4 +1,5 @@
 import { supabase as browserSupabase } from '@/lib/supabase';
+import { getCurrentOrganizationId } from '@/lib/organization';
 
 // BUG-007 FIX: This service previously imported the browser supabase client
 // directly. When called from an API route, the browser client has no
@@ -19,7 +20,8 @@ export const vendorService = {
     page?: number;
     pageSize?: number;
   }) {
-    let query = db.from('vendors').select('*', { count: 'exact' });
+    const orgId = await getCurrentOrganizationId();
+    let query = db.from('vendors').select('*', { count: 'exact' }).eq('organization_id', orgId);
 
     //  is_active is boolean, not status enum
     if (filters?.is_active !== undefined) {
@@ -46,10 +48,12 @@ export const vendorService = {
 
   // ── Fetch single vendor by ID ──
   async fetchVendorById(id: string) {
+    const orgId = await getCurrentOrganizationId();
     const { data, error } = await db
       .from('vendors')
       .select('*')
       .eq('id', id)
+      .eq('organization_id', orgId)
       .single();
 
     if (error) throw error;
@@ -73,6 +77,7 @@ export const vendorService = {
     bank_account?: string;
     notes?: string;
   }) {
+    const orgId = await getCurrentOrganizationId();
     const code = `VND-${Date.now().toString().slice(-5)}`;
 
     const { data, error } = await db
@@ -80,6 +85,7 @@ export const vendorService = {
       .insert({
         vendor_code: code,
         is_active: true,
+        organization_id: orgId,
         ...vendor,
       })
       .select()
@@ -91,10 +97,12 @@ export const vendorService = {
 
   // ── Update vendor ──
   async updateVendor(id: string, updates: Record<string, any>) {
+    const orgId = await getCurrentOrganizationId();
     const { data, error } = await db
       .from('vendors')
       .update(updates)
       .eq('id', id)
+      .eq('organization_id', orgId)
       .select()
       .single();
 
@@ -104,10 +112,12 @@ export const vendorService = {
 
   // ── Toggle active/inactive ──
   async toggleVendorStatus(id: string, isActive: boolean) {
+    const orgId = await getCurrentOrganizationId();
     const { data, error } = await db
       .from('vendors')
       .update({ is_active: isActive })
       .eq('id', id)
+      .eq('organization_id', orgId)
       .select()
       .single();
 
@@ -117,15 +127,18 @@ export const vendorService = {
 
   // ── Vendor stats for dashboard ──
   async getVendorStats() {
+    const orgId = await getCurrentOrganizationId();
     const { count: activeCount } = await db
       .from('vendors')
       .select('id', { count: 'exact', head: true })
-      .eq('is_active', true);
+      .eq('is_active', true)
+      .eq('organization_id', orgId);
 
     const { count: inactiveCount } = await db
       .from('vendors')
       .select('id', { count: 'exact', head: true })
-      .eq('is_active', false);
+      .eq('is_active', false)
+      .eq('organization_id', orgId);
 
     return {
       active: activeCount || 0,

@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { NextRequest, NextResponse } from 'next/server';
 import { requirePermission, getAuthSupabase } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
@@ -21,7 +22,12 @@ export async function POST(req: NextRequest) {
   if (mfaCheck) return mfaCheck;
 
   try {
-    const { action, rows, fiscalYearId } = await req.json();
+    const body = await req.json();
+    const rowSchema = z.object({ account_code: z.string().min(1), account_id: z.string().uuid().optional().nullable(), account_name: z.string().optional().nullable(), debit_amount: z.coerce.number().finite().min(0).optional(), credit_amount: z.coerce.number().finite().min(0).optional(), currency: z.string().length(3).optional(), exchange_rate: z.coerce.number().finite().positive().optional() });
+    const bodySchema = z.object({ action: z.enum(['import','preview']), rows: z.array(rowSchema).min(1), fiscalYearId: z.string().uuid().optional().nullable() });
+    const parsed = bodySchema.safeParse(body);
+    if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message || 'Invalid opening balance data' }, { status: 400 });
+    const { action, rows, fiscalYearId } = parsed.data;
     const { supabase } = await getAuthSupabase(req);
  
     if (action === 'import') {

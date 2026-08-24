@@ -21,6 +21,7 @@ function resolveClient(override?: SClient | null): SClient {
 // Backward-compat alias: existing function bodies
 // continue to reference `supabase` directly.
 const supabase = browserSupabase;
+import { getCurrentOrganizationId } from '@/lib/organization';
 import type {
   SubscriptionRow,
   SubscriptionRenewalRow,
@@ -64,10 +65,12 @@ export async function fetchSubscriptions(filters?: {
   category?: string;
   status?: string;
 }) {
+  const orgId = await getCurrentOrganizationId();
   let query = supabase
     .schema('finance')
     .from('subscriptions')
     .select('*')
+    .eq('organization_id', orgId)
     .order('created_at', { ascending: false });
 
   if (filters?.search) {
@@ -89,11 +92,13 @@ export async function fetchSubscriptions(filters?: {
 
 // ─── Fetch single subscription ───
 export async function fetchSubscriptionById(id: string) {
+  const orgId = await getCurrentOrganizationId();
   const { data, error } = await supabase
     .schema('finance')
     .from('subscriptions')
     .select('*')
     .eq('id', id)
+    .eq('organization_id', orgId)
     .single();
   if (error) throw new Error(error.message);
   return data as SubscriptionRow;
@@ -101,9 +106,11 @@ export async function fetchSubscriptionById(id: string) {
 
 // ─── Create subscription ───
 export async function createSubscription(subData: Record<string, any>) {
+  const orgId = await getCurrentOrganizationId();
   const cleaned = emptyToNull({
     ...subData,
     status: subData.status || 'ACTIVE',
+    organization_id: orgId,
   });
   // Ensure amount is a number, not a string from form
   if (typeof cleaned.amount === 'string') {
@@ -126,6 +133,7 @@ export async function createSubscription(subData: Record<string, any>) {
 // ─── Update subscription ───
 // FIX #9: Don't pass created_by in updates — it should never change
 export async function updateSubscription(id: string, updates: Record<string, any>) {
+  const orgId = await getCurrentOrganizationId();
   const { created_by, id: _id, ...rest } = updates as any;
   const cleaned = emptyToNull(rest);
 
@@ -142,6 +150,7 @@ export async function updateSubscription(id: string, updates: Record<string, any
     .from('subscriptions')
     .update(cleaned)
     .eq('id', id)
+    .eq('organization_id', orgId)
     .select('*')
     .single();
   if (error) throw new Error(error.message);
@@ -150,20 +159,24 @@ export async function updateSubscription(id: string, updates: Record<string, any
 
 // ─── Delete subscription ───
 export async function deleteSubscription(id: string) {
+  const orgId = await getCurrentOrganizationId();
   const { error } = await supabase
     .schema('finance')
     .from('subscriptions')
     .delete()
-    .eq('id', id);
+    .eq('id', id)
+    .eq('organization_id', orgId);
   if (error) throw new Error(error.message);
 }
 
 // ─── Fetch upcoming renewals (from view) ───
 export async function fetchUpcomingRenewals() {
+  const orgId = await getCurrentOrganizationId();
   const { data, error } = await supabase
     .schema('reporting')
     .from('v_subscription_renewals')
     .select('*')
+    .eq('organization_id', orgId)
     .order('renewal_date', { ascending: true });
   if (error) throw new Error(error.message);
   return (data as SubscriptionRenewalRow[]) || [];
@@ -171,26 +184,31 @@ export async function fetchUpcomingRenewals() {
 
 // ─── Fetch spend summary (from view) ───
 export async function fetchSpendSummary() {
+  const orgId = await getCurrentOrganizationId();
   const { data, error } = await supabase
     .schema('reporting')
     .from('v_subscription_spend')
-    .select('*');
+    .select('*')
+    .eq('organization_id', orgId);
   if (error) throw new Error(error.message);
   return (data as SubscriptionSpendRow[]) || [];
 }
 
 // ─── Fetch subscription stats ───
 export async function fetchSubscriptionStats(): Promise<SubscriptionStats> {
+  const orgId = await getCurrentOrganizationId();
   const [activeRes, renewalsRes] = await Promise.all([
     supabase
       .schema('finance')
       .from('subscriptions')
       .select('id, amount, billing_frequency')
-      .eq('status', 'ACTIVE'),
+      .eq('status', 'ACTIVE')
+      .eq('organization_id', orgId),
     supabase
       .schema('reporting')
       .from('v_subscription_renewals')
-      .select('id, renewal_bucket'),
+      .select('id, renewal_bucket')
+      .eq('organization_id', orgId),
   ]);
 
   const active = activeRes.data || [];

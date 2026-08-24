@@ -77,7 +77,7 @@ export async function fetchCommissions(orgId: string, filters?: {
   contractor_id?: string;
 }) {
   let query = supabase
-    .from('commissions')
+    .schema('public').from('commissions')
     .select('*')
     .eq('organization_id', orgId)
     .order('created_at', { ascending: false });
@@ -110,7 +110,7 @@ export async function fetchCommissions(orgId: string, filters?: {
 // ─── Fetch single commission ───
 export async function fetchCommissionById(orgId: string, id: string) {
   const { data, error } = await supabase
-    .from('commissions')
+    .schema('public').from('commissions')
     .select('*')
     .eq('organization_id', orgId)
     .eq('id', id)
@@ -152,7 +152,7 @@ export async function createCommission(commissionData: Record<string, any>) {
   }
 
   const { data, error } = await supabase
-    .from('commissions')
+    .schema('public').from('commissions')
     .insert(cleaned)
     .select('*')
     .single();
@@ -188,7 +188,7 @@ export async function updateCommission(orgId: string, id: string, updates: Recor
   }
 
   const { data, error } = await supabase
-    .from('commissions')
+    .schema('public').from('commissions')
     .update(cleaned)
     .eq('organization_id', orgId)
     .eq('id', id)
@@ -202,7 +202,7 @@ export async function updateCommission(orgId: string, id: string, updates: Recor
 export async function deleteCommission(id: string) {
   const orgId = await getCurrentOrgId();
   const { error } = await supabase
-    .from('commissions')
+    .schema('public').from('commissions')
     .delete()
     .eq('organization_id', orgId)
     .eq('id', id);
@@ -228,7 +228,7 @@ export async function markCommissionPaid(id: string, paymentDate: string, paymen
   // Payment metadata is non-accounting detail; update it after the atomic GL payment.
   if (paymentDate || paymentRef) {
     const { data: updated, error: metaError } = await supabase
-      .from('commissions')
+      .schema('public').from('commissions')
       .update({ payment_date: paymentDate || new Date().toISOString().slice(0,10), payment_ref: paymentRef || null })
       .eq('id', id)
       .eq('organization_id', await getCurrentOrgId())
@@ -286,7 +286,7 @@ export async function fetchCommissionStatusSummary(orgId: string) {
 // ─── Fetch commission stats ───
 export async function fetchCommissionStats(orgId: string): Promise<CommissionStats> {
   const { data, error } = await supabase
-    .from('commissions')
+    .schema('public').from('commissions')
     .select('id, commission_amount, tax_withheld, net_amount, status, currency')
     .eq('organization_id', orgId);
   if (error) throw new Error(error.message);

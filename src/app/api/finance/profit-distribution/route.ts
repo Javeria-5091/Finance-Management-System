@@ -8,10 +8,18 @@ import {
   type PostDistributionWithWHTInput,
 } from '@/services/distribution-wht.service';
 import { validateExchangeRate } from '@/lib/validations';
+import { z } from 'zod';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
+
+const profitDistributionPostSchema = z.object({
+  distribution_id: z.string().uuid(),
+  description: z.string().trim().max(500).optional().nullable(),
+  distribution_date: z.string().date().optional().nullable(),
+  withholding_override: z.number().finite().min(0).optional().nullable(),
+});
  
 // ─── POST: Post approved profit distribution to General Ledger with WHT ───
 // Spec 5.13: "Calculate distributable profit only after approved expenses,
@@ -55,13 +63,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
   }
  
-  try {
-    const body = await req.json();
-    const { distribution_id, description, distribution_date, withholding_override } = body;
- 
-    if (!distribution_id) {
-      return NextResponse.json({ error: 'distribution_id is required' }, { status: 400 });
+  try {    const rawBody = await req.json();
+    const parsed = profitDistributionPostSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: parsed.error.issues[0]?.message || 'Invalid request data' },
+        { status: 400 }
+      );
     }
+    const { distribution_id, description, distribution_date, withholding_override } = parsed.data;
  
     // 1. Fetch the distribution
     const distribution = getData(

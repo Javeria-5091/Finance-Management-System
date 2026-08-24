@@ -123,12 +123,12 @@ export async function POST(req: NextRequest) {
       reversed_by: auth.userId,
       reversal_reason: reason,
       reversal_journal_id: journalId,
-    }).eq('id', payment_receipt_id);
+    }).eq('id', payment_receipt_id).eq('organization_id', auth.orgId);
 
     // Reverse invoice payment statuses
     const allocations = getData(await supabase
       .from('payment_allocations')
-      .select('id, invoice_id, amount')
+      .select('id, invoice_id, allocated_amount')
       .eq('payment_receipt_id', payment_receipt_id));
 
     if (allocations) {
@@ -145,10 +145,11 @@ export async function POST(req: NextRequest) {
           .from('invoices')
           .select('id, total_amount, amount_paid')
           .eq('id', alloc.invoice_id)
+          .eq('organization_id', auth.orgId)
           .single());
 
         if (invoice) {
-          const newPaid = Math.max(0, Number(invoice.amount_paid || 0) - Number(alloc.amount));
+          const newPaid = Math.max(0, Number(invoice.amount_paid || 0) - Number(alloc.allocated_amount));
           const total = Number(invoice.total_amount);
           const newStatus = newPaid <= 0.01 ? 'ISSUED' : 'PARTIALLY_PAID';
 
