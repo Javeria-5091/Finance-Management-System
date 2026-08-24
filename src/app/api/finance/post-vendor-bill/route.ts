@@ -213,9 +213,14 @@ export async function POST(req: NextRequest) {
     }
     if (totalTax > 0) rpcLines.push({ account_id: inputTaxAccount.id, debit_amount: totalTax, credit_amount: 0, description: `Input tax: ${bill.bill_number || 'N/A'}` });
     if (withholdingAmount > 0) rpcLines.push({ account_id: withholdingReceivableAccount.id, debit_amount: withholdingAmount, credit_amount: 0, description: `Withholding tax receivable: ${bill.bill_number || 'N/A'}` });
-    const netPayable = totalAmount - withholdingAmount;
-    if (netPayable < 0) return NextResponse.json({ error: 'Withholding amount cannot exceed vendor bill total.' }, { status: 400 });
-    rpcLines.push({ account_id: creditAccountId, debit_amount: 0, credit_amount: netPayable, description: `Vendor payable: ${bill.bill_number || 'N/A'}` });
+    // C-03 fix: the debit side already includes withholdingAmount as its own
+    // DR line above (in addition to the expense/tax lines), so DR total =
+    // totalAmount + withholdingAmount. Crediting AP for the *net* payable
+    // (totalAmount - withholdingAmount) therefore left the journal unbalanced
+    // by 2x withholdingAmount. AP must be credited for the gross totalAmount;
+    // the WHT debit line is what nets AP down to the actual amount owed.
+    if (withholdingAmount > totalAmount) return NextResponse.json({ error: 'Withholding amount cannot exceed vendor bill total.' }, { status: 400 });
+    rpcLines.push({ account_id: creditAccountId, debit_amount: 0, credit_amount: totalAmount, description: `Vendor payable: ${bill.bill_number || 'N/A'}` });
 
     const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${bill.vendor_id || 'Vendor'} - ${bill.description || ''}`,

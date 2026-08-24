@@ -2419,10 +2419,22 @@ ALTER FUNCTION "finance"."manual_match_statement_line"("p_line_id" "uuid", "p_jo
 CREATE OR REPLACE FUNCTION "finance"."mark_overdue_invoices"() RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ 
+    AS $$
 DECLARE
   v_count INTEGER := 0;
+  v_org_id UUID;
 BEGIN
+  -- C-09 fix: scope to caller's own organization and require an authorized
+  -- role, so this SECURITY DEFINER function can no longer touch every
+  -- organization's invoices when called by any authenticated user.
+  v_org_id := core.current_user_org_id();
+  IF v_org_id IS NULL THEN
+    RAISE EXCEPTION 'Access denied: no organization context for caller';
+  END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to mark invoices overdue';
+  END IF;
+
   -- Sirf un invoices ko OVERDUE mark karo jo ISSUED ya PARTIALLY_PAID hain
   -- AUR unka due_date ho chuka ho aur outstanding_amount > 0 ho
   UPDATE public.invoices
@@ -2432,10 +2444,11 @@ BEGIN
     WHERE status IN ('ISSUED', 'PARTIALLY_PAID')
       AND due_date < CURRENT_DATE
       AND outstanding_amount > 0
+      AND organization_id = v_org_id
   );
-  
-  GET DIAGNOSTICS v_count = ROW_COUNT; -- Fixed the syntax here as well
-  
+
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+
   RETURN v_count;
 END;
 $$;
@@ -2447,10 +2460,21 @@ ALTER FUNCTION "finance"."mark_overdue_invoices"() OWNER TO "postgres";
 CREATE OR REPLACE FUNCTION "finance"."mark_paid_invoices"() RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ 
+    AS $$
 DECLARE
   v_count INTEGER := 0;
+  v_org_id UUID;
 BEGIN
+  -- C-10 fix: scope to caller's own organization and require an authorized
+  -- role, matching the C-09 fix applied to mark_overdue_invoices().
+  v_org_id := core.current_user_org_id();
+  IF v_org_id IS NULL THEN
+    RAISE EXCEPTION 'Access denied: no organization context for caller';
+  END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to mark invoices paid';
+  END IF;
+
   -- Agar outstanding 0 se kam ya barabar hai toh PAID kar do
   UPDATE public.invoices
   SET status = 'PAID'
@@ -2458,9 +2482,10 @@ BEGIN
     SELECT id FROM public.invoices
     WHERE status IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE')
       AND outstanding_amount <= 0
+      AND organization_id = v_org_id
   );
-  
-  GET DIAGNOSTICS v_count = ROW_COUNT; -- Fixed the syntax here as well
+
+  GET DIAGNOSTICS v_count = ROW_COUNT;
   RETURN v_count;
 END;
 $$;
@@ -2607,11 +2632,11 @@ BEGIN
 
     -- Same currency
     IF v_t.from_currency = v_t.to_currency THEN
-        v_lines := jsonb_build_object('account_id', v_to_ledger, 'debit_amount', v_t.to_amount, 'credit_amount', 0, 'description', 'Transfer TO: ' || v_t.transfer_number);
+        v_lines := v_lines || jsonb_build_object('account_id', v_to_ledger, 'debit_amount', v_t.to_amount, 'credit_amount', 0, 'description', 'Transfer TO: ' || v_t.transfer_number);
         v_lines := v_lines || jsonb_build_object('account_id', v_from_ledger, 'debit_amount', 0, 'credit_amount', v_t.from_amount, 'description', 'Transfer FROM: ' || v_t.transfer_number);
     ELSE
         v_fx_diff := v_to_base - v_from_base;
-        v_lines := jsonb_build_object('account_id', v_to_ledger, 'debit_amount', v_to_base, 'credit_amount', 0, 'description', 'Transfer TO: ' || v_t.transfer_number || ' (' || v_t.to_amount || ' ' || v_t.to_currency || ')');
+        v_lines := v_lines || jsonb_build_object('account_id', v_to_ledger, 'debit_amount', v_to_base, 'credit_amount', 0, 'description', 'Transfer TO: ' || v_t.transfer_number || ' (' || v_t.to_amount || ' ' || v_t.to_currency || ')');
         v_lines := v_lines || jsonb_build_object('account_id', v_from_ledger, 'debit_amount', 0, 'credit_amount', v_from_base, 'description', 'Transfer FROM: ' || v_t.transfer_number || ' (' || v_t.from_amount || ' ' || v_t.from_currency || ')');
         IF v_fx_diff > 0 AND v_fx_gain IS NOT NULL THEN
             v_lines := v_lines || jsonb_build_object('account_id', v_fx_gain, 'debit_amount', 0, 'credit_amount', v_fx_diff, 'description', 'FX Gain: ' || v_t.transfer_number);
@@ -2649,7 +2674,7 @@ BEGIN
     SELECT id INTO v_rev_account FROM finance.chart_of_accounts WHERE code = '4110' LIMIT 1;
     SELECT id INTO v_ar_account FROM finance.chart_of_accounts WHERE code = '1210' LIMIT 1;
 
-    v_lines := jsonb_build_object(
+    v_lines := v_lines || jsonb_build_object(
         'account_id', v_rev_account,
         'debit_amount', v_cn.base_amount,
         'credit_amount', 0,
@@ -2694,10 +2719,10 @@ BEGIN
     SELECT id INTO v_payable FROM finance.chart_of_accounts WHERE code = '2410' LIMIT 1;
     SELECT linked_ledger_account_id INTO v_bank_ledger FROM finance.financial_accounts WHERE id = p_bank_account_id;
 
-    v_lines := jsonb_build_object('account_id', v_payable, 'debit_amount', v_line.final_amount, 'credit_amount', 0, 'description', 'Payout to ' || v_owner_name);
+    v_lines := v_lines || jsonb_build_object('account_id', v_payable, 'debit_amount', v_line.final_amount, 'credit_amount', 0, 'description', 'Payout to ' || v_owner_name);
     v_lines := v_lines || jsonb_build_object('account_id', v_bank_ledger, 'debit_amount', 0, 'credit_amount', v_line.final_amount, 'description', 'Payout to ' || v_owner_name);
 
-    RETURN finance.post_journal_entry('Owner Payout', p_transaction_date, p_period_id, 'PKR', 1.0, 'DISTRIBUTION_PAYMENT', p_line_id, NULL, NULL, v_lines);
+    RETURN finance.post_journal_entry('Owner Payout', p_transaction_date, p_period_id, v_lines, 'PKR', 1.0, 'DISTRIBUTION_PAYMENT', p_line_id, NULL, NULL);
 END;
  $$;
 
@@ -2742,7 +2767,7 @@ BEGIN
     IF v_rev_account IS NULL THEN RAISE EXCEPTION 'Revenue account 4110 not found'; END IF;
 
     -- Line 1: Debit AR (full invoice amount)
-    v_lines := jsonb_build_object(
+    v_lines := v_lines || jsonb_build_object(
         'account_id', v_dr_account,
         'debit_amount', v_inv.base_total_amount,
         'credit_amount', 0,
@@ -2941,7 +2966,7 @@ BEGIN
     IF v_bank_account IS NULL THEN RAISE EXCEPTION 'Bank account 1110 not found'; END IF;
     IF v_ar_account IS NULL THEN RAISE EXCEPTION 'AR account 1210 not found'; END IF;
 
-    v_lines := jsonb_build_object(
+    v_lines := v_lines || jsonb_build_object(
         'account_id', v_bank_account,
         'debit_amount', v_receipt.base_amount,
         'credit_amount', 0,
@@ -2973,6 +2998,131 @@ $$;
 ALTER FUNCTION "finance"."post_payment_receipt"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text" DEFAULT 'PKR'::"text", "p_exchange_rate" numeric DEFAULT 1.0000, "p_payment_date" "date" DEFAULT CURRENT_DATE, "p_payment_method" "text" DEFAULT 'BANK_TRANSFER'::"text", "p_reference" "text" DEFAULT NULL::"text", "p_financial_account_id" "uuid" DEFAULT NULL::"uuid", "p_notes" "text" DEFAULT NULL::"text", "p_allocations" "jsonb" DEFAULT '[]'::"jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org_id UUID := core.current_user_org_id();
+  v_receipt_id UUID;
+  v_receipt_number TEXT;
+  v_period_id UUID;
+  v_journal_id UUID;
+  v_alloc JSONB;
+  v_invoice RECORD;
+  v_alloc_amount NUMERIC(18,2);
+  v_base_alloc_amount NUMERIC(18,2);
+  v_total_allocated NUMERIC(18,2) := 0;
+BEGIN
+  IF v_org_id IS NULL THEN
+    RAISE EXCEPTION 'Access denied: no organization context for caller';
+  END IF;
+
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to record a payment receipt';
+  END IF;
+
+  IF p_amount IS NULL OR p_amount <= 0 THEN
+    RAISE EXCEPTION 'Payment amount must be greater than zero';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM public.clients WHERE id = p_client_id AND organization_id = v_org_id) THEN
+    RAISE EXCEPTION 'Client not found in your organization';
+  END IF;
+
+  IF p_financial_account_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM finance.financial_accounts WHERE id = p_financial_account_id AND organization_id = v_org_id
+  ) THEN
+    RAISE EXCEPTION 'Financial account not found in your organization';
+  END IF;
+
+  SELECT id INTO v_period_id
+  FROM finance.accounting_periods
+  WHERE status = 'OPEN' AND organization_id = v_org_id
+  ORDER BY start_date DESC
+  LIMIT 1;
+  IF v_period_id IS NULL THEN
+    RAISE EXCEPTION 'No OPEN accounting period found';
+  END IF;
+
+  v_receipt_number := finance.get_next_number('PMT-RC', v_org_id);
+  IF v_receipt_number IS NULL THEN
+    v_receipt_number := 'PMT-RC-' || to_char(now(), 'YYYYMMDDHH24MISS');
+  END IF;
+
+  INSERT INTO finance.payment_receipts (
+    receipt_number, payment_date, amount, currency, exchange_rate,
+    base_amount, client_id, financial_account_id, payment_method,
+    reference, description, status, period_id, created_by, organization_id
+  ) VALUES (
+    v_receipt_number, p_payment_date, p_amount, COALESCE(p_currency, 'PKR'), COALESCE(p_exchange_rate, 1),
+    ROUND(p_amount * COALESCE(p_exchange_rate, 1), 2), p_client_id, p_financial_account_id, COALESCE(p_payment_method, 'BANK_TRANSFER'),
+    p_reference, p_notes, 'DRAFT', v_period_id, auth.uid(), v_org_id
+  ) RETURNING id INTO v_receipt_id;
+
+  IF p_allocations IS NOT NULL THEN
+    FOR v_alloc IN SELECT * FROM jsonb_array_elements(p_allocations)
+    LOOP
+      SELECT * INTO v_invoice FROM public.invoices
+      WHERE id = (v_alloc->>'invoice_id')::UUID AND organization_id = v_org_id
+      FOR UPDATE;
+
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'Invoice % not found in your organization', (v_alloc->>'invoice_id');
+      END IF;
+
+      v_alloc_amount := (v_alloc->>'amount')::NUMERIC(18,2);
+      IF v_alloc_amount IS NULL OR v_alloc_amount <= 0 THEN
+        RAISE EXCEPTION 'Invalid allocation amount for invoice %', v_invoice.invoice_number;
+      END IF;
+      IF v_alloc_amount > (v_invoice.total_amount - COALESCE(v_invoice.amount_paid, 0)) THEN
+        RAISE EXCEPTION 'Allocation exceeds outstanding balance for invoice %', v_invoice.invoice_number;
+      END IF;
+
+      v_base_alloc_amount := ROUND(v_alloc_amount * COALESCE(p_exchange_rate, 1), 2);
+      v_total_allocated := v_total_allocated + v_alloc_amount;
+
+      INSERT INTO finance.payment_allocations (
+        payment_receipt_id, invoice_id, allocated_amount, base_allocated_amount, allocated_by
+      ) VALUES (
+        v_receipt_id, v_invoice.id, v_alloc_amount, v_base_alloc_amount, auth.uid()
+      );
+
+      UPDATE public.invoices
+      SET amount_paid = COALESCE(amount_paid, 0) + v_alloc_amount,
+          base_amount_paid = COALESCE(base_amount_paid, 0) + v_base_alloc_amount,
+          outstanding_amount = GREATEST(total_amount - (COALESCE(amount_paid, 0) + v_alloc_amount), 0),
+          base_outstanding_amount = GREATEST(base_total_amount - (COALESCE(base_amount_paid, 0) + v_base_alloc_amount), 0),
+          status = CASE
+                     WHEN (COALESCE(amount_paid, 0) + v_alloc_amount) >= total_amount THEN 'PAID'
+                     ELSE 'PARTIALLY_PAID'
+                   END
+      WHERE id = v_invoice.id;
+    END LOOP;
+  END IF;
+
+  IF ABS(v_total_allocated - p_amount) > 0.01 THEN
+    RAISE EXCEPTION 'Total allocations (%) must equal payment amount (%)', v_total_allocated, p_amount;
+  END IF;
+
+  v_journal_id := finance.post_payment_receipt(v_receipt_id, v_period_id, p_payment_date);
+
+  UPDATE finance.payment_receipts
+  SET status = 'POSTED', journal_entry_id = v_journal_id, posted_by = auth.uid(), posted_at = now()
+  WHERE id = v_receipt_id;
+
+  RETURN jsonb_build_object(
+    'receipt_id', v_receipt_id,
+    'journal_id', v_journal_id,
+    'receipt_number', v_receipt_number
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."post_profit_distribution"("p_distribution_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
@@ -2988,17 +3138,17 @@ BEGIN
     SELECT id INTO v_reserve FROM finance.chart_of_accounts WHERE code = '3310' LIMIT 1;
     SELECT id INTO v_payable FROM finance.chart_of_accounts WHERE code = '2410' LIMIT 1;
 
-    v_lines := jsonb_build_object('account_id', v_pnl, 'debit_amount', v_dist.total_available_profit, 'credit_amount', 0, 'description', 'Close P&L & Transfer to Reserves/Distributions');
-    
+    v_lines := v_lines || jsonb_build_object('account_id', v_pnl, 'debit_amount', v_dist.total_available_profit, 'credit_amount', 0, 'description', 'Close P&L & Transfer to Reserves/Distributions');
+
     IF v_dist.reserve_amount > 0 THEN
         v_lines := v_lines || jsonb_build_object('account_id', v_reserve, 'debit_amount', 0, 'credit_amount', v_dist.reserve_amount, 'description', 'Transfer to Reserves');
     END IF;
-    
+
     IF v_dist.distributable_amount > 0 THEN
         v_lines := v_lines || jsonb_build_object('account_id', v_payable, 'debit_amount', 0, 'credit_amount', v_dist.distributable_amount, 'description', 'Profit Distribution Payable');
     END IF;
 
-    RETURN finance.post_journal_entry('Profit Distribution', p_transaction_date, p_period_id, 'PKR', 1.0, 'PROFIT_DISTRIBUTION', p_distribution_id, NULL, NULL, v_lines);
+    RETURN finance.post_journal_entry('Profit Distribution', p_transaction_date, p_period_id, v_lines, 'PKR', 1.0, 'PROFIT_DISTRIBUTION', p_distribution_id, NULL, NULL);
 END;
  $$;
 
@@ -3164,11 +3314,13 @@ BEGIN
         RAISE EXCEPTION 'A discount was taken on this payment but no "Purchase Discounts Received" GL account exists. Run the BUG-001 fix migration or create one manually before posting.';
     END IF;
 
-    -- Debit AP for the FULL bill amount being cleared (allocated + discount)
-    IF (v_total_allocated + v_total_discount) > 0 THEN
-        v_lines := jsonb_build_object(
+    -- Debit AP for the FULL bill amount being cleared (allocated + discount + withholding).
+    -- C-05 fix: withholding must be included here too, since it is credited to WHT
+    -- Payable below; omitting it left the journal unbalanced by v_total_withholding.
+    IF (v_total_allocated + v_total_discount + v_total_withholding) > 0 THEN
+        v_lines := v_lines || jsonb_build_object(
             'account_id', v_ap_account,
-            'debit_amount', v_total_allocated + v_total_discount,
+            'debit_amount', v_total_allocated + v_total_discount + v_total_withholding,
             'credit_amount', 0,
             'description', 'AP Cleared: ' || v_pay.payment_number
         );
@@ -3829,7 +3981,16 @@ BEGIN
     SELECT
       coa.name AS account_name,
       coa.account_type,
-      SUM(CASE WHEN coa.normal_balance = 'CREDIT' THEN jl.base_credit ELSE -jl.base_debit END) AS total
+      -- C-12 fix: net both sides of every account instead of summing only one
+      -- side. Previously a revenue account only summed credits (ignoring debit
+      -- contra-entries like sales returns) and an expense account only summed
+      -- debits (ignoring credit contra-entries like purchase returns), so those
+      -- returns were silently dropped from the cash flow statement. For this
+      -- operating-activities cash-flow sign convention, "credit_total -
+      -- debit_total" is the correct net contribution for BOTH a credit-normal
+      -- revenue account (net revenue) and a debit-normal expense account
+      -- (negative of net expense) -- the sign flip is already built in.
+      (COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)) AS total
     FROM finance.journal_lines jl
     JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
       AND je.status = 'POSTED' AND je.organization_id = v_org_id
@@ -3838,7 +3999,7 @@ BEGIN
     WHERE ap.start_date >= v_start AND ap.end_date <= v_end
       AND coa.account_type IN ('REVENUE', 'COST_OF_SALES', 'OPERATING_EXPENSE')
     GROUP BY coa.name, coa.account_type
-    HAVING SUM(CASE WHEN coa.normal_balance = 'CREDIT' THEN jl.base_credit ELSE -jl.base_debit END) != 0
+    HAVING (COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)) != 0
 
     UNION ALL
 
@@ -14822,9 +14983,11 @@ CREATE POLICY "sec_events_service_all" ON "audit"."security_events" TO "service_
 ALTER TABLE "audit"."security_events" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "Admins manage organizations" ON "core"."organizations" USING ((EXISTS ( SELECT 1
+CREATE POLICY "Admins manage organizations" ON "core"."organizations" FOR UPDATE USING (((EXISTS ( SELECT 1
    FROM "public"."profiles" "p"
-  WHERE (("p"."user_id" = "auth"."uid"()) AND ("p"."role" = ANY (ARRAY['CEO'::"text", 'Admin'::"text"]))))));
+  WHERE (("p"."user_id" = "auth"."uid"()) AND ("p"."role" = ANY (ARRAY['CEO'::"text", 'Admin'::"text"]))))) AND "core"."same_org"("id"))) WITH CHECK (((EXISTS ( SELECT 1
+   FROM "public"."profiles" "p"
+  WHERE (("p"."user_id" = "auth"."uid"()) AND ("p"."role" = ANY (ARRAY['CEO'::"text", 'Admin'::"text"]))))) AND "core"."same_org"("id")));
 
 
 
@@ -14920,7 +15083,7 @@ CREATE POLICY "delegations_manage_org_scoped" ON "core"."delegations" USING (("c
 
 
 
-CREATE POLICY "delegations_select_own" ON "core"."delegations" FOR SELECT USING ((("from_user_id" = "auth"."uid"()) OR ("to_user_id" = "auth"."uid"()) OR "core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text")));
+CREATE POLICY "delegations_select_own" ON "core"."delegations" FOR SELECT USING ((("from_user_id" = "auth"."uid"()) OR ("to_user_id" = "auth"."uid"()) OR ("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND "core"."same_org"("organization_id"))));
 
 
 
@@ -16665,6 +16828,10 @@ ALTER TABLE "public"."user_mfa" ENABLE ROW LEVEL SECURITY;
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
 
 
+
+
+
+
 GRANT USAGE ON SCHEMA "audit" TO "authenticated";
 
 
@@ -16756,7 +16923,23 @@ GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", 
 
 
 
+
 GRANT ALL ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."mark_overdue_invoices"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."mark_overdue_invoices"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."mark_paid_invoices"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."mark_paid_invoices"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") TO "authenticated";
 
 
 
@@ -17015,13 +17198,6 @@ GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
 
 
 
-
-
-
-
-
-
-
 GRANT SELECT,INSERT ON TABLE "audit"."audit_log" TO "authenticated";
 GRANT ALL ON TABLE "audit"."audit_log" TO "service_role";
 
@@ -17138,10 +17314,6 @@ GRANT ALL ON TABLE "core"."user_permission_overrides" TO "service_role";
 
 GRANT ALL ON TABLE "core"."user_roles" TO "authenticated";
 GRANT ALL ON TABLE "core"."user_roles" TO "service_role";
-
-
-
-
 
 
 
