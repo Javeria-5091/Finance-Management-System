@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
     // ── 1. Fetch fiscal year (WITH org_id filter — Spec 4.2 FIX) ──
     const fiscalYear = getData(
       await supabase
-        .from('finance.fiscal_years')
+        .schema('finance').from('fiscal_years')
         .select('*')
         .eq('id', fiscal_year_id)
         .eq('organization_id', orgId)   // ← SECURITY FIX: was missing
@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
     // ── 2. Verify all periods belong to this fiscal year ──
     const periods = getData(
       await supabase
-        .from('finance.accounting_periods')
+        .schema('finance').from('accounting_periods')
         .select('id, status, start_date, end_date')
         .eq('fiscal_year_id', fiscal_year_id)
         .eq('organization_id', orgId)   // ← SECURITY FIX
@@ -134,7 +134,7 @@ export async function POST(req: NextRequest) {
     // ── 5. Get Retained Earnings account ──
     const retainedEarningsAccount = getData(
       await supabase
-        .from('finance.chart_of_accounts')
+        .schema('finance').from('chart_of_accounts')
         .select('id, code, name')
         .eq('account_type', 'EQUITY')
         .eq('organization_id', orgId)
@@ -233,7 +233,7 @@ export async function POST(req: NextRequest) {
     // 7.5.1. Try next fiscal year's first OPEN period.
     const nextFiscalYear = getData(
       await supabase
-        .from('finance.fiscal_years')
+        .schema('finance').from('fiscal_years')
         .select('id, name, start_date, end_date')
         .eq('organization_id', orgId)
         .gt('start_date', fiscalYear.end_date)
@@ -245,7 +245,7 @@ export async function POST(req: NextRequest) {
     if (nextFiscalYear) {
       const nextPeriod = getData(
         await supabase
-          .from('finance.accounting_periods')
+          .schema('finance').from('accounting_periods')
           .select('id, status')
           .eq('fiscal_year_id', nextFiscalYear.id)
           .eq('organization_id', orgId)
@@ -263,7 +263,7 @@ export async function POST(req: NextRequest) {
     if (!closingPeriodId) {
       const openPeriod = getData(
         await supabase
-          .from('finance.accounting_periods')
+          .schema('finance').from('accounting_periods')
           .select('id, status')
           .eq('fiscal_year_id', fiscal_year_id)
           .eq('organization_id', orgId)
@@ -303,7 +303,7 @@ export async function POST(req: NextRequest) {
     // Fetch the created journal for reference
     const journal = getData(
       await supabase
-        .from('finance.journal_entries')
+        .schema('finance').from('journal_entries')
         .select('id, reference')
         .eq('id', journalId)
         .single()
@@ -316,7 +316,7 @@ export async function POST(req: NextRequest) {
  
     // H11 FIX: Treat fiscal year update failure as ERROR, not silent log
     const { error: fyErr } = await supabase
-      .from('finance.fiscal_years')
+      .schema('finance').from('fiscal_years')
       .update({
         status: 'CLOSED',
         closed_at: new Date().toISOString(),
@@ -402,7 +402,7 @@ export async function GET(req: NextRequest) {
  
     const fiscalYear = getData(
       await supabase
-        .from('finance.fiscal_years')
+        .schema('finance').from('fiscal_years')
         .select('*')
         .eq('id', fiscalYearId)
         .eq('organization_id', orgId)
@@ -415,7 +415,7 @@ export async function GET(req: NextRequest) {
  
     const periods = getData(
       await supabase
-        .from('finance.accounting_periods')
+        .schema('finance').from('accounting_periods')
         .select('id, status, start_date, end_date')
         .eq('fiscal_year_id', fiscalYearId)
         .eq('organization_id', orgId)

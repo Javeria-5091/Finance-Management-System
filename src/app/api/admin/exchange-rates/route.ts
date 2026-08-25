@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
     const pageSize = parseInt(searchParams.get('pageSize') || '50');
  
     let query = supabase
-      .from('core.exchange_rates')
+      .schema('core').from('exchange_rates')
       .select('*', { count: 'exact' })
       .eq('organization_id', auth.orgId);
  
@@ -94,7 +94,7 @@ export async function POST(req: NextRequest) {
         // Spec: Exchange rates are entered manually by authorized user
         // Deactivate previous rates for same currency pair
         await supabase
-          .from('core.exchange_rates')
+          .schema('core').from('exchange_rates')
           .update({ is_active: false, valid_until: effective_date })
           .eq('from_currency', from_currency)
           .eq('to_currency', to_currency)
@@ -102,7 +102,7 @@ export async function POST(req: NextRequest) {
           .eq('organization_id', auth.orgId);
 
         const { data, error } = await supabase
-          .from('core.exchange_rates')
+          .schema('core').from('exchange_rates')
           .insert({
             from_currency,
             to_currency,

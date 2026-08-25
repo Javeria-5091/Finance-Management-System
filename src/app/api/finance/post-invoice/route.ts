@@ -59,7 +59,7 @@ export async function POST(req: NextRequest) {
 
     // 2. Idempotency check
     const existingJournal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference')
       .eq('source_type', 'INVOICE')
       .eq('source_id', invoiceId)
@@ -109,7 +109,7 @@ export async function POST(req: NextRequest) {
 
     // 3. Get open period
     const period = getData(await supabase
-      .from('finance.accounting_periods')
+      .schema('finance').from('accounting_periods')
       .select('id, start_date, end_date')
       .eq('status', 'OPEN')
       .eq('organization_id', orgId)
@@ -133,7 +133,7 @@ export async function POST(req: NextRequest) {
     // (could match either 2210 or 2220). All three now resolve by exact,
     // seeded control-account code instead of fuzzy/unfiltered matching.
     const receivableAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'ASSET')
       .eq('is_active', true)
@@ -142,7 +142,7 @@ export async function POST(req: NextRequest) {
       .maybeSingle());
 
     const revenueAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'REVENUE')
       .eq('is_active', true)
@@ -151,7 +151,7 @@ export async function POST(req: NextRequest) {
       .maybeSingle());
 
     const taxAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'LIABILITY')
       .eq('is_active', true)
@@ -214,7 +214,7 @@ export async function POST(req: NextRequest) {
 
     // Fetch the created journal to get reference and totals
     const journal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference, total_debit, total_credit')
       .eq('id', journalId)
       .single());

@@ -31,7 +31,7 @@ export async function GET(
  
     // Get client AR summary
     const { data: arSummary } = await supabase
-      .from('reporting.v_ar_aging')
+      .schema('reporting').from('v_ar_aging')
       .select('*')
       .eq('client_id', id);
  

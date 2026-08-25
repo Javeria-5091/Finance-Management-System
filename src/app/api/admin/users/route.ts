@@ -152,7 +152,7 @@ export async function POST(req: NextRequest) {
       // Assign role via user_roles table
       if (role) {
         const { error: roleErr } = await supabase
-          .from('core.user_roles')
+          .schema('core').from('user_roles')
           .insert({
             user_id: profile.id,
             role,
@@ -213,9 +213,10 @@ export async function POST(req: NextRequest) {
  
       // Deactivate existing active roles
       const { error: deactivateErr } = await supabase
-        .from('core.user_roles')
+        .schema('core').from('user_roles')
         .update({ is_active: false, effective_to: new Date().toISOString().split('T')[0] })
         .eq('user_id', userId)
+        .eq('organization_id', organizationId)
         .eq('is_active', true);
  
       if (deactivateErr) {
@@ -224,7 +225,7 @@ export async function POST(req: NextRequest) {
  
       // Insert new role assignment
       const { data: newRole, error: roleErr } = await supabase
-        .from('core.user_roles')
+        .schema('core').from('user_roles')
         .insert({
           user_id: userId,
           role,

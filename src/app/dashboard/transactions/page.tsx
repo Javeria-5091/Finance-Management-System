@@ -358,7 +358,7 @@ export default function TransactionsPage() {
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Transaction Ledger</h2>
           <p className="text-sm text-gray-500 dark:text-gray-400">General Ledger — Source of Truth for all financial entries</p>
         </div>
-        <Link href="/dashboard/journal-entries/new" className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors">
+        <Link href="/dashboard/accounting/journal-entries" className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors">
           + New Entry
         </Link>
       </div>

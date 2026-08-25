@@ -152,7 +152,7 @@ async function assertPeriodOpenForTransition(
 
   if (config.periodIdField && record[config.periodIdField]) {
     const { data } = await supabase
-      .from('finance.accounting_periods')
+      .schema('finance').from('accounting_periods')
       .select('id, status')
       .eq('id', record[config.periodIdField])
       .eq('organization_id', orgId)
@@ -160,7 +160,7 @@ async function assertPeriodOpenForTransition(
     period = data ?? null;
   } else if (config.periodDateField && record[config.periodDateField]) {
     const { data } = await supabase
-      .from('finance.accounting_periods')
+      .schema('finance').from('accounting_periods')
       .select('id, status')
       .eq('organization_id', orgId)
       .lte('start_date', record[config.periodDateField])

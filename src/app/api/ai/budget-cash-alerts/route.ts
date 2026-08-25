@@ -84,6 +84,7 @@ export async function POST(req: Request) {
     }
     const { data: cashPosition } = await supabase.rpc('execute_ai_readonly_query', {
       query_string: cashQuery,
+      p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false,
     });
     alertData.cash_position = cashPosition || [];
 
@@ -102,6 +103,7 @@ export async function POST(req: Request) {
     }
     const { data: budgetVsActual } = await supabase.rpc('execute_ai_readonly_query', {
       query_string: budgetQuery,
+      p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false,
     });
     alertData.budget_overruns = budgetVsActual || [];
 
@@ -123,6 +125,7 @@ export async function POST(req: Request) {
     }
     const { data: upcomingPayables } = await supabase.rpc('execute_ai_readonly_query', {
       query_string: payableQuery,
+      p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false,
     });
     alertData.upcoming_obligations = upcomingPayables || [];
 
@@ -140,6 +143,7 @@ export async function POST(req: Request) {
     }
     const { data: collectionRisk } = await supabase.rpc('execute_ai_readonly_query', {
       query_string: receivableQuery,
+      p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false,
     });
     alertData.collection_risk = collectionRisk || [];
 

@@ -17,7 +17,6 @@ export async function POST(req: NextRequest) {
   const mfaCheck = await enforceMFA(auth);
   if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
-  if (!auth.orgId) return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
 
   try {
     const rawBody = await req.json();
@@ -47,7 +46,7 @@ export async function POST(req: NextRequest) {
 
     // 2. Already posted? (Idempotency check)
     const existingJournal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference')
       .eq('source_type', 'INCOME')
       .eq('source_id', incomeId)
@@ -62,7 +61,7 @@ export async function POST(req: NextRequest) {
 
     // 3. Open period
     const period = getData(await supabase
-      .from('finance.accounting_periods')
+      .schema('finance').from('accounting_periods')
       .select('id')
       .eq('status', 'OPEN')
       .eq('organization_id', auth.orgId)
@@ -80,7 +79,7 @@ export async function POST(req: NextRequest) {
     // account). Resolved by exact seeded control-account code instead.
     // 4. Revenue account
     const revenueAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'REVENUE')
       .eq('is_active', true)
@@ -90,7 +89,7 @@ export async function POST(req: NextRequest) {
 
     // 5. Receivable / Asset account
     const receivableAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'ASSET')
       .eq('is_active', true)
@@ -141,7 +140,7 @@ export async function POST(req: NextRequest) {
 
     // Fetch the created journal to get reference number
     const journal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference')
       .eq('id', journalId)
       .single());

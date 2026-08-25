@@ -59,7 +59,7 @@ export async function POST(req: NextRequest) {
 
     // 2. Idempotency check
     const existingJournal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference')
       .eq('source_type', 'VENDOR_BILL')
       .eq('source_id', vendorBillId)
@@ -116,7 +116,7 @@ export async function POST(req: NextRequest) {
 
     // 3. Get open period
     const period = getData(await supabase
-      .from('finance.accounting_periods')
+      .schema('finance').from('accounting_periods')
       .select('id')
       .eq('status', 'OPEN')
       .eq('organization_id', orgId)
@@ -139,15 +139,15 @@ export async function POST(req: NextRequest) {
     // correctly fails closed with a clear setup error rather than silently
     // posting to the wrong account.
     const payableAccount = getData(await supabase
-      .from('finance.chart_of_accounts').select('id, code, name')
+      .schema('finance').from('chart_of_accounts').select('id, code, name')
       .eq('account_type', 'LIABILITY').eq('is_active', true).eq('code', '2110').eq('organization_id', auth.orgId).maybeSingle());
 
     const inputTaxAccount = getData(await supabase
-      .from('finance.chart_of_accounts').select('id, code, name')
+      .schema('finance').from('chart_of_accounts').select('id, code, name')
       .eq('account_type', 'ASSET').eq('is_active', true).eq('organization_id', auth.orgId).ilike('name', '%input tax%').order('code').limit(1).maybeSingle());
 
     const withholdingReceivableAccount = getData(await supabase
-      .from('finance.chart_of_accounts').select('id, code, name')
+      .schema('finance').from('chart_of_accounts').select('id, code, name')
       .eq('account_type', 'ASSET').eq('is_active', true).eq('code', '1410').eq('organization_id', auth.orgId).maybeSingle());
 
     const creditAccountId = payableAccount?.id;
@@ -183,7 +183,7 @@ export async function POST(req: NextRequest) {
         if (!expenseAccountId && line.category) {
           const escapedCategory = line.category.replace(/[%_]/g, '\\$&');
           const matched = getData(await supabase
-            .from('finance.chart_of_accounts').select('id')
+            .schema('finance').from('chart_of_accounts').select('id')
             .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true)
             .eq('organization_id', auth.orgId)
             .ilike('name', `%${escapedCategory}%`).order('code').limit(1).maybeSingle());
@@ -191,7 +191,7 @@ export async function POST(req: NextRequest) {
         }
         if (!expenseAccountId) {
           const defaultExp = getData(await supabase
-            .from('finance.chart_of_accounts').select('id')
+            .schema('finance').from('chart_of_accounts').select('id')
             .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).eq('organization_id', auth.orgId).order('code').limit(1).maybeSingle());
           expenseAccountId = defaultExp?.id || null;
         }
@@ -205,7 +205,7 @@ export async function POST(req: NextRequest) {
     }
     if (expenseTotal === 0) {
       const expenseAccount = getData(await supabase
-        .from('finance.chart_of_accounts').select('id, code, name')
+        .schema('finance').from('chart_of_accounts').select('id, code, name')
         .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).eq('organization_id', auth.orgId).order('code').limit(1).maybeSingle());
       if (!expenseAccount) return NextResponse.json({ error: 'No OPERATING_EXPENSE account found in Chart of Accounts.' }, { status: 400 });
       expenseTotal = subtotal;
@@ -239,7 +239,7 @@ export async function POST(req: NextRequest) {
     }
 
     const journal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference, total_debit, total_credit')
       .eq('id', journalId).single());
     // C6 FIX: Null guard

@@ -73,8 +73,18 @@ export async function enforceMFA(auth: AuthResult): Promise<NextResponse | null>
     );
   }
  
-  // MFA is set up and verified — allow through
-  // (Actual TOTP verification happens at login via Supabase Auth)
+  // A verified factor alone is not enough: the current authenticated session
+  // must have reached AAL2. Otherwise a session authenticated only at AAL1
+  // could use a previously-enrolled factor to bypass the per-session MFA
+  // requirement.
+  const { data: assurance, error: assuranceError } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (assuranceError || assurance?.currentLevel !== 'aal2') {
+    return NextResponse.json(
+      { error: 'MFA verification required for this session.', code: 'MFA_SESSION_REQUIRED' },
+      { status: 403 }
+    );
+  }
+
   return null;
 }
  

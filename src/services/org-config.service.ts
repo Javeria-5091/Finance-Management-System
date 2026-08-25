@@ -21,10 +21,20 @@ import type { OrganizationConfig } from '@/types/accounting.types';
 const SCHEMA = 'core';
 
 export async function getOrgConfig(): Promise<OrganizationConfig> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Authentication required');
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('organization_id')
+    .eq('user_id', user.id)
+    .maybeSingle();
+  if (profileError) throw profileError;
+  if (!profile?.organization_id) throw new Error('Organization context missing');
   const { data, error } = await supabase
     .schema(SCHEMA)
     .from('organization_config')
     .select('*')
+    .eq('organization_id', profile.organization_id)
     .eq('active', true)
     .single();
 
@@ -36,11 +46,21 @@ export async function updateOrgConfig(
   id: string,
   updates: Partial<OrganizationConfig>
 ): Promise<OrganizationConfig> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Authentication required');
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('organization_id')
+    .eq('user_id', user.id)
+    .maybeSingle();
+  if (profileError) throw profileError;
+  if (!profile?.organization_id) throw new Error('Organization context missing');
   const { data, error } = await supabase
     .schema(SCHEMA)
     .from('organization_config')
     .update(updates)
     .eq('id', id)
+    .eq('organization_id', profile.organization_id)
     .select()
     .single();
 

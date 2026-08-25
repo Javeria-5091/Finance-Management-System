@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
     const unreadOnly = searchParams.get('unread') === 'true';
  
     let query = supabase
-      .from('core.notifications')
+      .schema('core').from('notifications')
       .select('*', { count: 'exact' })
       .eq('user_id', auth.userId);
  
@@ -45,7 +45,7 @@ export async function GET(req: NextRequest) {
  
     // Get unread count
     const { count: unreadCount } = await supabase
-      .from('core.notifications')
+      .schema('core').from('notifications')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', auth.userId)
       .eq('is_read', false);
@@ -116,7 +116,7 @@ export async function POST(req: NextRequest) {
     }
  
     const { data, error } = await supabase
-      .from('core.notifications')
+      .schema('core').from('notifications')
       .insert({
         user_id: targetUserId,
         title,
@@ -159,7 +159,7 @@ export async function PATCH(req: NextRequest) {
  
     if (mark_all_read) {
       const { error } = await supabase
-        .from('core.notifications')
+        .schema('core').from('notifications')
         .update({ is_read: true, read_at: new Date().toISOString() })
         .eq('user_id', auth.userId)
         .eq('is_read', false);
@@ -173,7 +173,7 @@ export async function PATCH(req: NextRequest) {
  
     if (notification_ids && Array.isArray(notification_ids)) {
       const { error } = await supabase
-        .from('core.notifications')
+        .schema('core').from('notifications')
         .update({ is_read: true, read_at: new Date().toISOString() })
         .in('id', notification_ids)
         .eq('user_id', auth.userId);

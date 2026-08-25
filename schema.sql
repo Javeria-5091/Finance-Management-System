@@ -130,57 +130,21 @@ ALTER FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "u
 
 CREATE OR REPLACE FUNCTION "audit"."ai_audit_report"("p_start" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_end" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_user_id" "uuid" DEFAULT NULL::"uuid", "p_tool" "text" DEFAULT NULL::"text", "p_status" "text" DEFAULT NULL::"text", "p_page" integer DEFAULT 1, "p_page_size" integer DEFAULT 50) RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'audit', 'public'
+    SET "search_path" TO 'pg_catalog', 'audit', 'public', 'core'
     AS $$
-DECLARE
-  v_offset INTEGER := GREATEST(p_page - 1, 0) * p_page_size;
-  v_rows JSONB := '[]'::JSONB;
-  v_total INTEGER := 0;
+DECLARE v_org uuid:=core.current_user_org_id(); v_offset integer:=greatest(p_page-1,0)*p_page_size; v_rows jsonb:='[]'::jsonb; v_total integer:=0;
 BEGIN
-  SELECT COUNT(*) INTO v_total
-  FROM audit.audit_log al
-  WHERE al.source_module = 'ai'
-    AND (p_start IS NULL OR al.created_at >= p_start)
-    AND (p_end IS NULL OR al.created_at <= p_end)
-    AND (p_user_id IS NULL OR al.user_id = p_user_id)
-    AND (p_tool IS NULL OR al.ai_selected_tool = p_tool)
-    AND (p_status IS NULL OR al.status = p_status);
-
-  SELECT jsonb_agg(
-    jsonb_build_object(
-      'id', al.id::TEXT,
-      'timestamp', al.created_at::TEXT,
-      'user_id', al.user_id::TEXT,
-      'user_email', COALESCE(al.user_email, ''),
-      'action', al.action,
-      'status', al.status,
-      'question', COALESCE(al.ai_question, ''),
-      'normalized_intent', COALESCE(al.ai_normalized_intent, ''),
-      'selected_tool', COALESCE(al.ai_selected_tool, ''),
-      'template_id', COALESCE(al.ai_template_id, ''),
-      'row_count', al.ai_row_count,
-      'model', COALESCE(al.ai_model, ''),
-      'latency_ms', al.ai_latency_ms,
-      'cost_usd', al.ai_cost_usd,
-      'input_tokens', al.ai_input_tokens,
-      'output_tokens', al.ai_output_tokens,
-      'refusal_reason', COALESCE(al.ai_refusal_reason, '')
-    )
-    ORDER BY al.created_at DESC
-  ) INTO v_rows
-  FROM audit.audit_log al
-  WHERE al.source_module = 'ai'
-    AND (p_start IS NULL OR al.created_at >= p_start)
-    AND (p_end IS NULL OR al.created_at <= p_end)
-    AND (p_user_id IS NULL OR al.user_id = p_user_id)
-    AND (p_tool IS NULL OR al.ai_selected_tool = p_tool)
-    AND (p_status IS NULL OR al.status = p_status)
-  ORDER BY al.created_at DESC
+  IF v_org IS NULL OR NOT (core.has_role('CEO') OR core.has_role('FINANCE_HEAD') OR core.has_role('AUDITOR') OR core.has_role('Admin')) THEN RAISE EXCEPTION 'Access denied'; END IF;
+  SELECT count(*) INTO v_total FROM audit.audit_log al WHERE al.organization_id=v_org AND al.source_module='ai'
+    AND (p_start IS NULL OR al.created_at>=p_start) AND (p_end IS NULL OR al.created_at<=p_end)
+    AND (p_user_id IS NULL OR al.user_id=p_user_id) AND (p_tool IS NULL OR al.ai_selected_tool=p_tool) AND (p_status IS NULL OR al.status=p_status);
+  SELECT jsonb_agg(jsonb_build_object('id',al.id::text,'timestamp',al.created_at::text,'user_id',al.user_id::text,'user_email',coalesce(al.user_email,''),'action',al.action,'status',al.status,'question',coalesce(al.ai_question,''),'normalized_intent',coalesce(al.ai_normalized_intent,''),'selected_tool',coalesce(al.ai_selected_tool,''),'template_id',coalesce(al.ai_template_id,''),'row_count',al.ai_row_count,'model',coalesce(al.ai_model,''),'latency_ms',al.ai_latency_ms,'cost_usd',al.ai_cost_usd,'input_tokens',al.ai_input_tokens,'output_tokens',al.ai_output_tokens,'refusal_reason',coalesce(al.ai_refusal_reason,'')) ORDER BY al.created_at DESC)
+  INTO v_rows FROM audit.audit_log al WHERE al.organization_id=v_org AND al.source_module='ai'
+    AND (p_start IS NULL OR al.created_at>=p_start) AND (p_end IS NULL OR al.created_at<=p_end)
+    AND (p_user_id IS NULL OR al.user_id=p_user_id) AND (p_tool IS NULL OR al.ai_selected_tool=p_tool) AND (p_status IS NULL OR al.status=p_status)
   LIMIT p_page_size OFFSET v_offset;
-
-  RETURN jsonb_build_object('rows', COALESCE(v_rows, '[]'::JSONB), 'total_count', v_total);
-END;
-$$;
+  RETURN jsonb_build_object('rows',coalesce(v_rows,'[]'::jsonb),'total_count',v_total);
+END; $$;
 
 
 ALTER FUNCTION "audit"."ai_audit_report"("p_start" timestamp with time zone, "p_end" timestamp with time zone, "p_user_id" "uuid", "p_tool" "text", "p_status" "text", "p_page" integer, "p_page_size" integer) OWNER TO "postgres";
@@ -188,69 +152,27 @@ ALTER FUNCTION "audit"."ai_audit_report"("p_start" timestamp with time zone, "p_
 
 CREATE OR REPLACE FUNCTION "audit"."audit_log_report"("p_start" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_end" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_user_id" "uuid" DEFAULT NULL::"uuid", "p_action" "text" DEFAULT NULL::"text", "p_entity_type" "text" DEFAULT NULL::"text", "p_severity" "text" DEFAULT NULL::"text", "p_approval_level" "text" DEFAULT NULL::"text", "p_source_module" "text" DEFAULT NULL::"text", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_min_amount" numeric DEFAULT NULL::numeric, "p_max_amount" numeric DEFAULT NULL::numeric, "p_page" integer DEFAULT 1, "p_page_size" integer DEFAULT 50) RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'audit', 'public'
+    SET "search_path" TO 'pg_catalog', 'audit', 'public', 'core'
     AS $$
-DECLARE
-  v_offset INTEGER := GREATEST(p_page - 1, 0) * p_page_size;
-  v_rows JSONB := '[]'::JSONB;
-  v_total INTEGER := 0;
+DECLARE v_org uuid:=core.current_user_org_id(); v_offset integer:=greatest(p_page-1,0)*p_page_size; v_rows jsonb:='[]'::jsonb; v_total integer:=0;
 BEGIN
-  SELECT COUNT(*) INTO v_total
-  FROM audit.audit_log al
-  WHERE (p_start IS NULL OR al.created_at >= p_start)
-    AND (p_end IS NULL OR al.created_at <= p_end)
-    AND (p_user_id IS NULL OR al.user_id = p_user_id)
-    AND (p_action IS NULL OR al.action ILIKE '%' || p_action || '%')
-    AND (p_entity_type IS NULL OR al.entity_type ILIKE '%' || p_entity_type || '%')
-    AND (p_severity IS NULL OR al.severity = p_severity)
-    AND (p_approval_level IS NULL OR al.approval_level = p_approval_level)
-    AND (p_source_module IS NULL OR al.source_module = p_source_module)
-    AND (p_project_id IS NULL OR al.project_id = p_project_id)
-    AND (p_min_amount IS NULL OR al.amount >= p_min_amount)
-    AND (p_max_amount IS NULL OR al.amount <= p_max_amount);
-
-  SELECT jsonb_agg(
-    jsonb_build_object(
-      'id', al.id::TEXT,
-      'timestamp', al.created_at::TEXT,
-      'user_id', al.user_id::TEXT,
-      'user_email', COALESCE(al.user_email, ''),
-      'user_name', COALESCE(al.user_name, ''),
-      'role_snapshot', COALESCE(al.role_snapshot, ''),
-      'action', al.action,
-      'entity_type', COALESCE(al.entity_type, ''),
-      'entity_id', COALESCE(al.entity_id::TEXT, ''),
-      'description', COALESCE(al.description, ''),
-      'status', al.status,
-      'severity', al.severity,
-      'reason', COALESCE(al.reason, ''),
-      'approval_level', COALESCE(al.approval_level, ''),
-      'source_module', COALESCE(al.source_module, ''),
-      'project_id', COALESCE(al.project_id::TEXT, ''),
-      'amount', al.amount,
-      'amount_currency', COALESCE(al.amount_currency, ''),
-      'ip_address', COALESCE(al.ip_address::TEXT, '')
-    )
-    ORDER BY al.created_at DESC
-  ) INTO v_rows
-  FROM audit.audit_log al
-  WHERE (p_start IS NULL OR al.created_at >= p_start)
-    AND (p_end IS NULL OR al.created_at <= p_end)
-    AND (p_user_id IS NULL OR al.user_id = p_user_id)
-    AND (p_action IS NULL OR al.action ILIKE '%' || p_action || '%')
-    AND (p_entity_type IS NULL OR al.entity_type ILIKE '%' || p_entity_type || '%')
-    AND (p_severity IS NULL OR al.severity = p_severity)
-    AND (p_approval_level IS NULL OR al.approval_level = p_approval_level)
-    AND (p_source_module IS NULL OR al.source_module = p_source_module)
-    AND (p_project_id IS NULL OR al.project_id = p_project_id)
-    AND (p_min_amount IS NULL OR al.amount >= p_min_amount)
-    AND (p_max_amount IS NULL OR al.amount <= p_max_amount)
-  ORDER BY al.created_at DESC
+  IF v_org IS NULL OR NOT (core.has_role('CEO') OR core.has_role('FINANCE_HEAD') OR core.has_role('AUDITOR') OR core.has_role('Admin')) THEN RAISE EXCEPTION 'Access denied'; END IF;
+  SELECT count(*) INTO v_total FROM audit.audit_log al WHERE al.organization_id=v_org
+    AND (p_start IS NULL OR al.created_at>=p_start) AND (p_end IS NULL OR al.created_at<=p_end) AND (p_user_id IS NULL OR al.user_id=p_user_id)
+    AND (p_action IS NULL OR al.action ILIKE '%'||p_action||'%') AND (p_entity_type IS NULL OR al.entity_type ILIKE '%'||p_entity_type||'%')
+    AND (p_severity IS NULL OR al.severity=p_severity) AND (p_approval_level IS NULL OR al.approval_level=p_approval_level)
+    AND (p_source_module IS NULL OR al.source_module=p_source_module) AND (p_project_id IS NULL OR al.project_id=p_project_id)
+    AND (p_min_amount IS NULL OR al.amount>=p_min_amount) AND (p_max_amount IS NULL OR al.amount<=p_max_amount);
+  SELECT jsonb_agg(jsonb_build_object('id',al.id::text,'timestamp',al.created_at::text,'user_id',al.user_id::text,'user_email',coalesce(al.user_email,''),'user_name',coalesce(al.user_name,''),'role_snapshot',coalesce(al.role_snapshot,''),'action',al.action,'entity_type',coalesce(al.entity_type,''),'entity_id',coalesce(al.entity_id::text,''),'description',coalesce(al.description,''),'status',al.status,'severity',al.severity,'reason',coalesce(al.reason,''),'approval_level',coalesce(al.approval_level,''),'source_module',coalesce(al.source_module,''),'project_id',coalesce(al.project_id::text,''),'amount',al.amount,'amount_currency',coalesce(al.amount_currency,''),'ip_address',coalesce(al.ip_address::text,'')) ORDER BY al.created_at DESC)
+  INTO v_rows FROM audit.audit_log al WHERE al.organization_id=v_org
+    AND (p_start IS NULL OR al.created_at>=p_start) AND (p_end IS NULL OR al.created_at<=p_end) AND (p_user_id IS NULL OR al.user_id=p_user_id)
+    AND (p_action IS NULL OR al.action ILIKE '%'||p_action||'%') AND (p_entity_type IS NULL OR al.entity_type ILIKE '%'||p_entity_type||'%')
+    AND (p_severity IS NULL OR al.severity=p_severity) AND (p_approval_level IS NULL OR al.approval_level=p_approval_level)
+    AND (p_source_module IS NULL OR al.source_module=p_source_module) AND (p_project_id IS NULL OR al.project_id=p_project_id)
+    AND (p_min_amount IS NULL OR al.amount>=p_min_amount) AND (p_max_amount IS NULL OR al.amount<=p_max_amount)
   LIMIT p_page_size OFFSET v_offset;
-
-  RETURN jsonb_build_object('rows', COALESCE(v_rows, '[]'::JSONB), 'total_count', v_total);
-END;
-$$;
+  RETURN jsonb_build_object('rows',coalesce(v_rows,'[]'::jsonb),'total_count',v_total);
+END; $$;
 
 
 ALTER FUNCTION "audit"."audit_log_report"("p_start" timestamp with time zone, "p_end" timestamp with time zone, "p_user_id" "uuid", "p_action" "text", "p_entity_type" "text", "p_severity" "text", "p_approval_level" "text", "p_source_module" "text", "p_project_id" "uuid", "p_min_amount" numeric, "p_max_amount" numeric, "p_page" integer, "p_page_size" integer) OWNER TO "postgres";
@@ -1920,6 +1842,41 @@ COMMENT ON FUNCTION "finance"."enforce_maker_checker"() IS 'P1_060 SECURITY FIX 
 
 
 
+CREATE OR REPLACE FUNCTION "finance"."enforce_payment_receipt_client_org"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_client_org uuid;
+BEGIN
+  IF NEW.client_id IS NULL THEN
+    RAISE EXCEPTION 'Payment receipt client_id is required';
+  END IF;
+
+  SELECT c.organization_id INTO v_client_org
+  FROM public.clients c
+  WHERE c.id = NEW.client_id;
+
+  IF v_client_org IS NULL THEN
+    RAISE EXCEPTION 'Client % does not exist or has no organization', NEW.client_id;
+  END IF;
+
+  IF NEW.organization_id IS NULL THEN
+    RAISE EXCEPTION 'Payment receipt organization_id is required';
+  END IF;
+
+  IF v_client_org IS DISTINCT FROM NEW.organization_id THEN
+    RAISE EXCEPTION 'Payment receipt client belongs to a different organization';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."enforce_payment_receipt_client_org"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."enforce_postable_account"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
@@ -2018,13 +1975,24 @@ COMMENT ON FUNCTION "finance"."enforce_transition_year_period_13"() IS 'BUG-027 
 
 CREATE OR REPLACE FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason" "text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ BEGIN
-    IF p_reason IS NULL OR p_reason = '' THEN RAISE EXCEPTION 'Reason required'; END IF;
-    UPDATE finance.statement_lines SET reconciliation_status = 'EXCLUDED', exclusion_reason = p_reason
-    WHERE id = p_line_id AND reconciliation_status = 'UNRECONCILED';
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_org uuid := core.current_user_org_id();
+BEGIN
+  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+  IF p_reason IS NULL OR btrim(p_reason) = '' THEN RAISE EXCEPTION 'Reason required'; END IF;
+  UPDATE finance.statement_lines sl
+  SET reconciliation_status='EXCLUDED', exclusion_reason=p_reason, updated_at=now()
+  FROM finance.bank_statements bs
+  WHERE sl.id=p_line_id
+    AND bs.id=sl.bank_statement_id
+    AND bs.organization_id=v_org
+    AND sl.reconciliation_status='UNRECONCILED';
+  IF NOT FOUND THEN RAISE EXCEPTION 'Statement line not found or access denied'; END IF;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason" "text") OWNER TO "postgres";
@@ -2388,19 +2356,19 @@ ALTER FUNCTION "finance"."fn_validate_fa_ledger"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."get_current_open_period_id"() RETURNS "uuid"
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ 
-DECLARE
-  v_period_id UUID;
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_org uuid := core.current_user_org_id(); v_period uuid;
 BEGIN
-  SELECT id INTO v_period_id
-  FROM finance.accounting_periods
-  WHERE CURRENT_DATE BETWEEN start_date AND end_date
-    AND status = 'OPEN'
-  ORDER BY start_date DESC
-  LIMIT 1;
-  
-  RETURN v_period_id; -- NULL agar koi open period nahi mila
+  IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context missing'; END IF;
+  SELECT ap.id INTO v_period
+  FROM finance.accounting_periods ap
+  JOIN finance.fiscal_years fy ON fy.id=ap.fiscal_year_id
+  WHERE ap.organization_id=v_org AND fy.organization_id=v_org
+    AND ap.status='OPEN' AND fy.status='OPEN'
+    AND CURRENT_DATE BETWEEN ap.start_date AND ap.end_date
+  ORDER BY ap.start_date DESC LIMIT 1;
+  RETURN v_period;
 END;
 $$;
 
@@ -2410,26 +2378,20 @@ ALTER FUNCTION "finance"."get_current_open_period_id"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."get_current_period"() RETURNS TABLE("period_id" "uuid", "fiscal_year_id" "uuid", "fiscal_year_name" "text", "period_number" integer, "period_name" "text", "period_start" "date", "period_end" "date", "period_status" "text")
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ BEGIN
-    RETURN QUERY
-    SELECT 
-        ap.id,
-        ap.fiscal_year_id,
-        fy.name,
-        ap.period_number,
-        ap.name,
-        ap.start_date,
-        ap.end_date,
-        ap.status
-    FROM finance.accounting_periods ap
-    JOIN finance.fiscal_years fy ON ap.fiscal_year_id = fy.id
-    WHERE ap.status = 'OPEN'
-      AND fy.status = 'OPEN'
-      AND CURRENT_DATE BETWEEN ap.start_date AND ap.end_date
-    LIMIT 1;
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_org uuid := core.current_user_org_id();
+BEGIN
+  IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context missing'; END IF;
+  RETURN QUERY
+  SELECT ap.id,ap.fiscal_year_id,fy.name,ap.period_number,ap.name,ap.start_date,ap.end_date,ap.status
+  FROM finance.accounting_periods ap JOIN finance.fiscal_years fy ON fy.id=ap.fiscal_year_id
+  WHERE ap.organization_id=v_org AND fy.organization_id=v_org
+    AND ap.status='OPEN' AND fy.status='OPEN'
+    AND CURRENT_DATE BETWEEN ap.start_date AND ap.end_date
+  ORDER BY ap.start_date DESC LIMIT 1;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."get_current_period"() OWNER TO "postgres";
@@ -2488,48 +2450,71 @@ COMMENT ON FUNCTION "finance"."get_next_number"("p_type" "text", "p_organization
 
 CREATE OR REPLACE FUNCTION "finance"."get_period_by_date"("p_date" "date") RETURNS TABLE("period_id" "uuid", "fiscal_year_id" "uuid", "fiscal_year_name" "text", "period_number" integer, "period_name" "text", "period_start" "date", "period_end" "date", "period_status" "text", "fy_status" "text")
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ BEGIN
-    RETURN QUERY
-    SELECT 
-        ap.id,
-        ap.fiscal_year_id,
-        fy.name,
-        ap.period_number,
-        ap.name,
-        ap.start_date,
-        ap.end_date,
-        ap.status,
-        fy.status
-    FROM finance.accounting_periods ap
-    JOIN finance.fiscal_years fy ON ap.fiscal_year_id = fy.id
-    WHERE p_date BETWEEN ap.start_date AND ap.end_date
-    LIMIT 1;
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_org uuid := core.current_user_org_id();
+BEGIN
+  IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context missing'; END IF;
+  RETURN QUERY
+  SELECT ap.id,ap.fiscal_year_id,fy.name,ap.period_number,ap.name,ap.start_date,ap.end_date,ap.status,fy.status
+  FROM finance.accounting_periods ap JOIN finance.fiscal_years fy ON fy.id=ap.fiscal_year_id
+  WHERE ap.organization_id=v_org AND fy.organization_id=v_org
+    AND p_date BETWEEN ap.start_date AND ap.end_date
+  ORDER BY ap.start_date DESC LIMIT 1;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."get_period_by_date"("p_date" "date") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p_organization_id" "uuid", "p_account_type" "text") RETURNS TABLE("account_id" "uuid", "code" "text", "name" "text", "balance" numeric)
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+BEGIN
+  IF p_organization_id IS DISTINCT FROM core.current_user_org_id() THEN RAISE EXCEPTION 'Access denied'; END IF;
+  IF p_account_type NOT IN ('REVENUE','EXPENSE') THEN RAISE EXCEPTION 'Invalid P&L account type'; END IF;
+  RETURN QUERY
+  SELECT coa.id,coa.code,coa.name,
+    CASE WHEN p_account_type='REVENUE' THEN
+      coalesce(sum(coalesce(jl.base_credit,jl.credit_amount)-coalesce(jl.base_debit,jl.debit_amount)),0)
+    ELSE
+      coalesce(sum(coalesce(jl.base_debit,jl.debit_amount)-coalesce(jl.base_credit,jl.credit_amount)),0)
+    END AS balance
+  FROM finance.chart_of_accounts coa
+  LEFT JOIN finance.journal_lines jl ON jl.account_id=coa.id
+  LEFT JOIN finance.journal_entries je ON je.id=jl.journal_entry_id
+    AND je.status='POSTED' AND je.fiscal_year_id=p_fiscal_year_id AND je.organization_id=p_organization_id
+  WHERE coa.organization_id=p_organization_id AND coa.account_type=p_account_type
+  GROUP BY coa.id,coa.code,coa.name
+  ORDER BY coa.code;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p_organization_id" "uuid", "p_account_type" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p_organization_id" "uuid", "p_account_type" "text") IS 'Confirmed audit fix: organization-scoped P&L balances for fiscal close.';
+
+
+
 CREATE OR REPLACE FUNCTION "finance"."is_date_in_open_period"("p_date" "date") RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ DECLARE
-    v_is_open BOOLEAN;
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_org uuid := core.current_user_org_id(); v_open boolean;
 BEGIN
-    SELECT EXISTS (
-        SELECT 1 
-        FROM finance.accounting_periods ap
-        JOIN finance.fiscal_years fy ON ap.fiscal_year_id = fy.id
-        WHERE ap.status = 'OPEN'
-          AND fy.status = 'OPEN'
-          AND p_date BETWEEN ap.start_date AND ap.end_date
-    ) INTO v_is_open;
-    
-    RETURN v_is_open;
+  IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context missing'; END IF;
+  SELECT EXISTS(
+    SELECT 1 FROM finance.accounting_periods ap JOIN finance.fiscal_years fy ON fy.id=ap.fiscal_year_id
+    WHERE ap.organization_id=v_org AND fy.organization_id=v_org AND ap.status='OPEN' AND fy.status='OPEN'
+      AND p_date BETWEEN ap.start_date AND ap.end_date
+  ) INTO v_open;
+  RETURN v_open;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."is_date_in_open_period"("p_date" "date") OWNER TO "postgres";
@@ -2537,30 +2522,34 @@ ALTER FUNCTION "finance"."is_date_in_open_period"("p_date" "date") OWNER TO "pos
 
 CREATE OR REPLACE FUNCTION "finance"."manual_match_statement_line"("p_line_id" "uuid", "p_journal_line_id" "uuid", "p_reason" "text" DEFAULT NULL::"text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ DECLARE v_sl RECORD; v_ledger UUID;
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_org uuid := core.current_user_org_id(); v_sl record; v_ledger uuid;
 BEGIN
-    SELECT * INTO v_sl FROM finance.statement_lines WHERE id = p_line_id;
-    IF NOT FOUND THEN RAISE EXCEPTION 'Line not found'; END IF;
-    IF v_sl.reconciliation_status != 'UNRECONCILED' THEN RAISE EXCEPTION 'Not unreconciled: %', v_sl.reconciliation_status; END IF;
-
-    SELECT fa.linked_ledger_account_id INTO v_ledger
-    FROM finance.bank_statements bs JOIN finance.financial_accounts fa ON fa.id = bs.financial_account_id
-    WHERE bs.id = v_sl.bank_statement_id;
-
-    IF EXISTS (SELECT 1 FROM finance.journal_lines WHERE id = p_journal_line_id AND account_id != v_ledger) THEN
-        RAISE EXCEPTION 'Journal line does not belong to this financial account';
-    END IF;
-    IF EXISTS (SELECT 1 FROM finance.statement_lines WHERE matched_journal_line_id = p_journal_line_id AND id != p_line_id AND reconciliation_status IN ('MATCHED','MANUAL_MATCH')) THEN
-        RAISE EXCEPTION 'Journal line already matched';
-    END IF;
-
-    UPDATE finance.statement_lines SET
-        reconciliation_status = 'MANUAL_MATCH', matched_journal_line_id = p_journal_line_id,
-        matched_at = NOW(), matched_by = auth.uid(), match_method = 'MANUAL', exclusion_reason = p_reason
-    WHERE id = p_line_id;
+  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Access denied'; END IF;
+  SELECT sl.*, bs.organization_id, fa.linked_ledger_account_id AS ledger_id
+  INTO v_sl
+  FROM finance.statement_lines sl
+  JOIN finance.bank_statements bs ON bs.id=sl.bank_statement_id
+  JOIN finance.financial_accounts fa ON fa.id=bs.financial_account_id
+  WHERE sl.id=p_line_id AND bs.organization_id=v_org;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Statement line not found or access denied'; END IF;
+  IF v_sl.reconciliation_status <> 'UNRECONCILED' THEN RAISE EXCEPTION 'Statement line is not unreconciled'; END IF;
+  v_ledger := v_sl.ledger_id;
+  IF NOT EXISTS (
+    SELECT 1 FROM finance.journal_lines jl
+    JOIN finance.journal_entries je ON je.id=jl.journal_entry_id
+    WHERE jl.id=p_journal_line_id AND jl.account_id=v_ledger AND je.organization_id=v_org
+  ) THEN RAISE EXCEPTION 'Journal line does not belong to this organization/account'; END IF;
+  IF EXISTS (SELECT 1 FROM finance.statement_lines sl2 WHERE sl2.matched_journal_line_id=p_journal_line_id AND sl2.reconciliation_status IN ('MATCHED','MANUAL_MATCH') AND sl2.id<>p_line_id) THEN
+    RAISE EXCEPTION 'Journal line already matched';
+  END IF;
+  UPDATE finance.statement_lines
+  SET reconciliation_status='MANUAL_MATCH', matched_journal_line_id=p_journal_line_id,
+      matched_at=now(), matched_by=auth.uid(), match_method='MANUAL', exclusion_reason=p_reason, updated_at=now()
+  WHERE id=p_line_id;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."manual_match_statement_line"("p_line_id" "uuid", "p_journal_line_id" "uuid", "p_reason" "text") OWNER TO "postgres";
@@ -2878,6 +2867,34 @@ END;
 
 
 ALTER FUNCTION "finance"."post_distribution_payment"("p_line_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_bank_account_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_existing_journal_entry"("p_journal_id" "uuid", "p_posted_by" "uuid") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_org uuid := core.current_user_org_id(); v_j record; v_period text; v_debit numeric; v_credit numeric;
+BEGIN
+  IF v_org IS NULL OR p_posted_by IS DISTINCT FROM auth.uid() THEN RAISE EXCEPTION 'Access denied'; END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Insufficient privileges'; END IF;
+  SELECT * INTO v_j FROM finance.journal_entries WHERE id=p_journal_id AND organization_id=v_org FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Journal not found or access denied'; END IF;
+  IF v_j.status<>'APPROVED' THEN RAISE EXCEPTION 'Only APPROVED journals can be posted'; END IF;
+  SELECT status INTO v_period FROM finance.accounting_periods WHERE id=v_j.period_id AND organization_id=v_org;
+  IF v_period<>'OPEN' THEN RAISE EXCEPTION 'Journal period is not OPEN'; END IF;
+  SELECT coalesce(sum(debit_amount),0),coalesce(sum(credit_amount),0) INTO v_debit,v_credit FROM finance.journal_lines WHERE journal_entry_id=p_journal_id;
+  IF abs(v_debit-v_credit)>0.01 THEN RAISE EXCEPTION 'Journal is unbalanced: debit %, credit %',v_debit,v_credit; END IF;
+  UPDATE finance.journal_entries SET status='POSTED',posted_by=p_posted_by,posted_at=now(),posting_date=current_date,total_debit=v_debit,total_credit=v_credit WHERE id=p_journal_id;
+  RETURN p_journal_id;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_existing_journal_entry"("p_journal_id" "uuid", "p_posted_by" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_existing_journal_entry"("p_journal_id" "uuid", "p_posted_by" "uuid") IS 'Confirmed audit fix: atomically posts an already-approved journal in place, with organization, role, period and balance checks.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_invoice_ar"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
@@ -3311,90 +3328,37 @@ CREATE OR REPLACE FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_p
     SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
     AS $$
 DECLARE
-    v_bill RECORD;
-    v_fy_id UUID;
-    v_lines JSONB := '[]'::JSONB;
-    v_ap_account UUID;
-    v_wht_account UUID;
-    v_line RECORD;
-    v_total_debit NUMERIC(18,2) := 0;
-    v_total_credit NUMERIC(18,2) := 0;
+  v_bill record; v_ap uuid; v_wht uuid; v_lines jsonb:='[]'::jsonb; v_gross numeric:=0; v_wht_total numeric:=0;
+  v_fy uuid; v_line record;
 BEGIN
-    IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
-        RAISE EXCEPTION 'Insufficient privileges to post a vendor bill to the general ledger. Requires Finance Head, CEO, or Accountant.';
-    END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Insufficient privileges'; END IF;
+  SELECT * INTO v_bill FROM finance.vendor_bills WHERE id=p_bill_id AND organization_id=core.current_user_org_id();
+  IF NOT FOUND THEN RAISE EXCEPTION 'Bill not found or access denied'; END IF;
+  IF v_bill.status<>'APPROVED' THEN RAISE EXCEPTION 'Bill must be APPROVED before posting'; END IF;
+  SELECT fiscal_year_id INTO v_fy FROM finance.accounting_periods WHERE id=p_period_id AND organization_id=v_bill.organization_id AND status='OPEN';
+  IF v_fy IS NULL THEN RAISE EXCEPTION 'Invalid or closed accounting period'; END IF;
+  SELECT id INTO v_ap FROM finance.chart_of_accounts WHERE code='2110' AND organization_id=v_bill.organization_id AND is_active=true AND posting_allowed=true;
+  SELECT id INTO v_wht FROM finance.chart_of_accounts WHERE code='2210' AND organization_id=v_bill.organization_id AND is_active=true AND posting_allowed=true;
+  IF v_ap IS NULL THEN RAISE EXCEPTION 'AP account 2110 not found'; END IF;
 
-    SELECT * INTO v_bill FROM finance.vendor_bills WHERE id = p_bill_id;
-    IF NOT FOUND THEN RAISE EXCEPTION 'Bill not found'; END IF;
+  FOR v_line IN SELECT account_id,line_total,description,coalesce(withholding_amount,0) AS withholding_amount FROM finance.vendor_bill_lines WHERE vendor_bill_id=p_bill_id ORDER BY line_number LOOP
+    v_lines := v_lines || jsonb_build_object('account_id',v_line.account_id,'debit_amount',v_line.line_total,'credit_amount',0,'description',v_line.description);
+    v_gross := v_gross + v_line.line_total;
+    v_wht_total := v_wht_total + v_line.withholding_amount;
+  END LOOP;
 
-    IF NOT core.same_org(v_bill.organization_id) THEN
-        RAISE EXCEPTION 'Access denied: vendor bill % does not belong to your organization', p_bill_id;
-    END IF;
+  IF v_wht_total > 0 AND v_wht IS NULL THEN RAISE EXCEPTION 'WHT Payable account 2210 not found'; END IF;
+  IF v_gross <= 0 THEN RAISE EXCEPTION 'Vendor bill has no positive posting amount'; END IF;
+  IF abs(v_gross - (v_bill.total_amount + v_wht_total)) > 0.02 THEN
+    RAISE EXCEPTION 'Vendor bill totals do not reconcile: gross %, net AP %, WHT %',v_gross,v_bill.total_amount,v_wht_total;
+  END IF;
 
-    IF v_bill.status != 'APPROVED' THEN
-        RAISE EXCEPTION 'Bill must be APPROVED before posting, current: %', v_bill.status;
-    END IF;
+  v_lines := v_lines || jsonb_build_object('account_id',v_ap,'debit_amount',0,'credit_amount',v_bill.total_amount,'description','AP: '||v_bill.bill_number);
+  IF v_wht_total > 0 THEN
+    v_lines := v_lines || jsonb_build_object('account_id',v_wht,'debit_amount',0,'credit_amount',v_wht_total,'description','WHT Payable: '||v_bill.bill_number);
+  END IF;
 
-    SELECT fiscal_year_id INTO v_fy_id FROM finance.accounting_periods WHERE id = p_period_id;
-    IF v_fy_id IS NULL THEN RAISE EXCEPTION 'Invalid period'; END IF;
-
-    SELECT id INTO v_ap_account FROM finance.chart_of_accounts WHERE code = '2110' LIMIT 1;
-    IF v_ap_account IS NULL THEN RAISE EXCEPTION 'AP account 2110 not found'; END IF;
-
-    SELECT id INTO v_wht_account FROM finance.chart_of_accounts WHERE code = '1401' LIMIT 1;
-    IF v_wht_account IS NULL THEN RAISE EXCEPTION 'WHT Receivable account 1401 not found'; END IF;
-
-    FOR v_line IN (
-        SELECT id, account_id, line_total AS line_amount, description,
-               COALESCE(withholding_amount, 0) AS wht_amount
-        FROM finance.vendor_bill_lines
-        WHERE vendor_bill_id = p_bill_id
-        ORDER BY line_number
-    ) LOOP
-        v_lines := v_lines || jsonb_build_object(
-            'account_id', v_line.account_id,
-            'debit_amount', v_line.line_amount - v_line.wht_amount,
-            'credit_amount', 0,
-            'description', v_line.description
-        );
-        v_total_debit := v_total_debit + (v_line.line_amount - v_line.wht_amount);
-
-        IF v_line.wht_amount > 0 THEN
-            v_lines := v_lines || jsonb_build_object(
-                'account_id', v_wht_account,
-                'debit_amount', v_line.wht_amount,
-                'credit_amount', 0,
-                'description', 'WHT on Bill ' || v_bill.bill_number
-            );
-            v_total_debit := v_total_debit + v_line.wht_amount;
-        END IF;
-    END LOOP;
-
-    v_lines := v_lines || jsonb_build_object(
-        'account_id', v_ap_account,
-        'debit_amount', 0,
-        'credit_amount', v_bill.total_amount,
-        'description', 'AP: ' || v_bill.bill_number || ' - ' || COALESCE((SELECT name FROM finance.vendors WHERE id = v_bill.vendor_id), '')
-    );
-    v_total_credit := v_bill.total_amount;
-
-    IF ABS(v_total_debit - v_total_credit) > 0.02 THEN
-        RAISE EXCEPTION 'Journal unbalanced: DR=% CR=%', v_total_debit, v_total_credit;
-    END IF;
-
-    -- BUG-006 FIX: use the bill's OWN currency and exchange rate instead
-    -- of hard-coding 'PKR' / 1.0000, so FX exposure on foreign-currency
-    -- bills (line amounts already include tax via line_total, and the
-    -- AP credit is the tax-inclusive total_amount) is correctly recorded
-    -- in the journal rather than silently discarded.
-    RETURN finance.post_journal_entry(
-        'AP Bill: ' || v_bill.bill_number,
-        p_transaction_date, p_period_id,
-        v_lines,
-        COALESCE(v_bill.currency, 'PKR'), COALESCE(v_bill.exchange_rate, 1.0000),
-        'VENDOR_BILL', p_bill_id,
-        v_bill.project_id, NULL
-    );
+  RETURN finance.post_journal_entry('AP Bill: '||v_bill.bill_number,p_transaction_date,p_period_id,v_lines,coalesce(v_bill.currency,'PKR'),coalesce(v_bill.exchange_rate,1),'VENDOR_BILL',p_bill_id,v_bill.project_id,NULL);
 END;
 $$;
 
@@ -3758,78 +3722,34 @@ ALTER FUNCTION "finance"."reset_sequence"("p_type" "text", "p_fy_id" "uuid") OWN
 
 CREATE OR REPLACE FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
-DECLARE
-  v_original RECORD;
-  v_reversal_id UUID;
-  v_ref TEXT;
-  v_period_status TEXT;
+DECLARE v_original record; v_reversal_id uuid; v_ref text; v_period_status text; v_org uuid := core.current_user_org_id();
 BEGIN
-  -- 1. Fetch original
-  SELECT * INTO v_original
-  FROM finance.journal_entries WHERE id = p_journal_id;
+  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Access denied'; END IF;
+  SELECT * INTO v_original FROM finance.journal_entries WHERE id=p_journal_id AND organization_id=v_org FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Journal not found or access denied'; END IF;
+  IF v_original.status<>'POSTED' OR v_original.reversal_of_id IS NOT NULL THEN RAISE EXCEPTION 'Only original POSTED journal entries can be reversed'; END IF;
+  IF p_reason IS NULL OR btrim(p_reason)='' THEN RAISE EXCEPTION 'Reversal reason is mandatory'; END IF;
+  SELECT status INTO v_period_status FROM finance.accounting_periods WHERE id=v_original.period_id AND organization_id=v_org;
+  IF v_period_status IS NULL OR v_period_status <> 'OPEN' THEN RAISE EXCEPTION 'Journal reversal requires an OPEN accounting period'; END IF;
 
-  IF NOT FOUND THEN RAISE EXCEPTION 'Journal not found'; END IF;
-  IF v_original.status != 'POSTED' THEN RAISE EXCEPTION 'Can only reverse POSTED entries'; END IF;
-  IF v_original.reversal_of_id IS NOT NULL THEN RAISE EXCEPTION 'This is already a reversal'; END IF;
-  IF p_reason IS NULL OR TRIM(p_reason) = '' THEN RAISE EXCEPTION 'Reversal reason is mandatory'; END IF;
-
-  -- BUG-005 FIX: explicit fiscal-period-lock check, in addition to the
-  -- table trigger. Reversal always posts into the ORIGINAL entry's
-  -- period (see INSERT below), so that is the period we must validate.
-  SELECT status INTO v_period_status
-  FROM finance.accounting_periods
-  WHERE id = v_original.period_id;
-
-  IF v_period_status IS NULL THEN
-    RAISE EXCEPTION 'Cannot reverse journal %: its accounting period no longer exists', p_journal_id;
-  END IF;
-
-  IF v_period_status = 'HARD_CLOSED' THEN
-    RAISE EXCEPTION 'Cannot reverse journal %: fiscal period is HARD CLOSED', p_journal_id;
-  END IF;
-
-  IF v_period_status = 'SOFT_CLOSED' THEN
-    RAISE EXCEPTION 'Cannot reverse journal %: fiscal period is SOFT CLOSED. Reopen the period or post the reversal into a later open period.', p_journal_id;
-  END IF;
-
-  v_ref := finance.get_next_number('JOURNAL_ENTRY');
-
-  -- 2. Mark original as REVERSED
-  UPDATE finance.journal_entries
-  SET status = 'REVERSED', reversed_by = auth.uid(), reversed_at = NOW(), reversal_reason = p_reason
-  WHERE id = p_journal_id;
-
-  -- 3. Create Reversal Header (Swapped totals)
-  INSERT INTO finance.journal_entries (
-    reference, description, status, transaction_date, posting_date,
-    period_id, fiscal_year_id, currency, exchange_rate, base_currency,
-    total_debit, total_credit, source_type, source_id, project_id, department_id,
-    reversal_of_id, reversal_reason,
-    created_by, posted_by, posted_at
-  ) VALUES (
-    v_ref, 'REVERSAL: ' || v_original.description, 'POSTED', p_reversal_date, CURRENT_DATE,
-    v_original.period_id, v_original.fiscal_year_id, v_original.currency, v_original.exchange_rate, v_original.base_currency,
-    v_original.total_credit, v_original.total_debit, -- SWAPPED
-    'REVERSAL', p_journal_id, v_original.project_id, v_original.department_id,
-    p_journal_id, p_reason,
-    auth.uid(), auth.uid(), NOW()
+  v_ref := finance.get_next_number('JOURNAL_ENTRY',v_org);
+  UPDATE finance.journal_entries SET status='REVERSED',reversed_by=auth.uid(),reversed_at=now(),reversal_reason=p_reason WHERE id=p_journal_id;
+  INSERT INTO finance.journal_entries(
+    reference,description,status,transaction_date,posting_date,period_id,fiscal_year_id,currency,exchange_rate,base_currency,
+    total_debit,total_credit,source_type,source_id,project_id,department_id,reversal_of_id,reversal_reason,created_by,posted_by,posted_at,organization_id
+  ) VALUES(
+    v_ref,'REVERSAL: '||v_original.description,'POSTED',p_reversal_date,current_date,v_original.period_id,v_original.fiscal_year_id,
+    v_original.currency,v_original.exchange_rate,v_original.base_currency,v_original.total_credit,v_original.total_debit,
+    'REVERSAL',p_journal_id,v_original.project_id,v_original.department_id,p_journal_id,p_reason,auth.uid(),auth.uid(),now(),v_org
   ) RETURNING id INTO v_reversal_id;
 
-  -- 4. Create Reversal Lines (Swapped Dr/Cr)
-  INSERT INTO finance.journal_lines (
-    journal_entry_id, line_number, account_id, description,
-    debit_amount, credit_amount, currency, exchange_rate, base_debit, base_credit,
-    project_id, department_id, created_by
+  INSERT INTO finance.journal_lines(
+    journal_entry_id,line_number,account_id,description,debit_amount,credit_amount,currency,exchange_rate,base_debit,base_credit,project_id,department_id,created_by,organization_id
   )
-  SELECT
-    v_reversal_id, line_number, account_id, 'REVERSAL: ' || COALESCE(description, ''),
-    credit_amount, debit_amount, -- SWAPPED
-    currency, exchange_rate, base_credit, base_debit, -- SWAPPED
-    project_id, department_id, auth.uid()
-  FROM finance.journal_lines WHERE journal_entry_id = p_journal_id;
-
+  SELECT v_reversal_id,line_number,account_id,'REVERSAL: '||coalesce(description,''),credit_amount,debit_amount,currency,exchange_rate,base_credit,base_debit,project_id,department_id,auth.uid(),v_org
+  FROM finance.journal_lines WHERE journal_entry_id=p_journal_id;
   RETURN v_reversal_id;
 END;
 $$;
@@ -3839,6 +3759,65 @@ ALTER FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "p_rever
 
 
 COMMENT ON FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "p_reversal_date" "date", "p_reason" "text") IS 'BUG-005 fix (database audit): added an explicit fiscal-period-lock check as defense-in-depth alongside the existing trg_prevent_closed_period_posting table trigger.';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_org uuid:=core.current_user_org_id(); v_r record; v_j record; v_new uuid; v_lines jsonb; v_ref text;
+BEGIN
+  IF v_org IS NULL OR p_reversed_by IS DISTINCT FROM auth.uid() THEN RAISE EXCEPTION 'Access denied'; END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Insufficient privileges'; END IF;
+  IF p_reason IS NULL OR btrim(p_reason)='' THEN RAISE EXCEPTION 'Reason is required'; END IF;
+  SELECT * INTO v_r FROM finance.payment_receipts WHERE id=p_receipt_id AND organization_id=v_org FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Payment receipt not found or access denied'; END IF;
+  IF v_r.status='REVERSED' THEN RAISE EXCEPTION 'Payment receipt is already reversed'; END IF;
+  SELECT * INTO v_j FROM finance.journal_entries WHERE id=v_r.journal_entry_id AND organization_id=v_org FOR UPDATE;
+  IF NOT FOUND OR v_j.status<>'POSTED' THEN RAISE EXCEPTION 'Original payment journal is not POSTED'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM finance.accounting_periods WHERE id=p_period_id AND organization_id=v_org AND status='OPEN') THEN RAISE EXCEPTION 'Reversal period is not OPEN'; END IF;
+
+  SELECT jsonb_agg(jsonb_build_object(
+    'account_id',jl.account_id,
+    'debit_amount',jl.credit_amount,
+    'credit_amount',jl.debit_amount,
+    'description','REVERSAL: '||coalesce(jl.description,'')
+  ) ORDER BY jl.line_number) INTO v_lines
+  FROM finance.journal_lines jl WHERE jl.journal_entry_id=v_j.id;
+
+  v_new := finance.post_journal_entry(
+    'REVERSAL: Payment Receipt '||coalesce(v_r.receipt_number,p_receipt_id::text)||' - '||p_reason,
+    p_reversal_date,p_period_id,v_lines,v_r.currency,coalesce(v_r.exchange_rate,1),'PAYMENT_REVERSAL',p_receipt_id,v_r.project_id,NULL
+  );
+
+  SELECT reference INTO v_ref FROM finance.journal_entries WHERE id=v_new;
+  UPDATE finance.payment_receipts SET status='REVERSED',updated_at=now(),posted_by=coalesce(posted_by,p_reversed_by) WHERE id=p_receipt_id;
+
+  UPDATE finance.payment_allocations pa
+  SET status='REVERSED',reversed_at=now(),reversed_by=p_reversed_by
+  WHERE pa.payment_receipt_id=p_receipt_id AND pa.status='ACTIVE';
+
+  UPDATE public.invoices i
+  SET amount_paid=greatest(0,coalesce(i.amount_paid,0)-x.allocated_amount),
+      base_amount_paid=greatest(0,coalesce(i.base_amount_paid,0)-x.base_allocated_amount),
+      status=CASE WHEN greatest(0,coalesce(i.amount_paid,0)-x.allocated_amount)<=0.01 THEN 'ISSUED' ELSE 'PARTIALLY_PAID' END
+  FROM (
+    SELECT pa.invoice_id,sum(pa.allocated_amount) allocated_amount,sum(pa.base_allocated_amount) base_allocated_amount
+    FROM finance.payment_allocations pa WHERE pa.payment_receipt_id=p_receipt_id AND pa.reversed_by=p_reversed_by AND pa.reversed_at IS NOT NULL
+    GROUP BY pa.invoice_id
+  ) x
+  WHERE i.id=x.invoice_id AND i.organization_id=v_org;
+
+  RETURN v_new;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") IS 'Confirmed audit fix: atomic payment reversal across GL, receipt, allocations and invoice balances.';
 
 
 
@@ -4304,64 +4283,101 @@ ALTER FUNCTION "public"."ensure_profile_exists"("target_user_id" "uuid") OWNER T
 
 CREATE OR REPLACE FUNCTION "public"."execute_ai_readonly_query"("query_string" "text", "p_org_id" "uuid", "p_user_id" "uuid", "p_enforce_user_scope" boolean DEFAULT true) RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'public', 'reporting'
+    SET "search_path" TO 'pg_catalog', 'public', 'reporting', 'core'
     AS $$
 DECLARE
   result jsonb;
   wrapped_sql text;
-  user_filter text := '';
+  q text := btrim(query_string);
+  v_org uuid := core.current_user_org_id();
+  v_user uuid := auth.uid();
 BEGIN
-  -- Switch into the restricted, minimal-privilege role for the duration of
-  -- this statement only. SET LOCAL automatically reverts at the end of the
-  -- current transaction even if we forget to RESET, but we also RESET
-  -- explicitly on every path below for clarity and defense-in-depth.
+  IF v_org IS NULL OR v_org <> p_org_id OR v_user IS NULL OR v_user <> p_user_id THEN
+    RAISE EXCEPTION 'Access denied: AI scope must match authenticated user and organization';
+  END IF;
+
+  IF q = '' OR q ~ E'[;]' OR q ~ E'(--|/\\*|\\*/)' THEN
+    RAISE EXCEPTION 'AI query rejected: comments and multiple statements are not allowed';
+  END IF;
+
+  IF q !~* E'^SELECT[[:space:]]' AND q !~* E'^WITH[[:space:]]' THEN
+    RAISE EXCEPTION 'AI query rejected: only SELECT/WITH queries are allowed';
+  END IF;
+
+  IF q ~* E'\\m(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|COPY|CALL|DO|EXECUTE|SET|RESET)\\M' THEN
+    RAISE EXCEPTION 'AI query rejected: unsafe SQL keyword detected';
+  END IF;
+
+  IF q ~* E'\\m(JOIN|UNION|INTERSECT|EXCEPT|LATERAL)\\M' THEN
+    RAISE EXCEPTION 'AI query rejected: joins/set operations are not permitted';
+  END IF;
+
+  -- Only reporting views plus the organization-scoped policy_documents table
+  -- are exposed to AI. No direct finance/core/audit/auth/system relation access.
+  IF q ~* E'\\m(finance|core|audit|auth|pg_catalog|information_schema)\\.' THEN
+    RAISE EXCEPTION 'AI query rejected: non-reporting objects are not allowed';
+  END IF;
+
+  IF q !~* E'\\mreporting\\.(general_ledger|trial_balance|balance_sheet|budget_vs_actual|budget_category_summary|budget_gl_actual|cash_flow|changes_in_equity|payable_aging|pnl|receivable_aging|reconciliation_summary|unreconciled_lines|v_asset_register|v_cash_position|v_depreciation_summary|v_project_profitability|v_tax_computation_summary|ai_fiscal_close_context)\\M'
+     AND q !~* E'\\mpublic\\.policy_documents\\M' THEN
+    RAISE EXCEPTION 'AI query rejected: source is not on the approved allowlist';
+  END IF;
+
   SET LOCAL ROLE ai_readonly_role;
   SET LOCAL statement_timeout = '5s';
 
+  -- Every approved source query must carry an organization predicate. We
+  -- normalize the predicate to the authenticated organization so a direct RPC
+  -- caller cannot substitute another UUID. Aggregate-style queries used by the
+  -- existing AI routes are executed as-is after this normalization; raw SELECTs
+  -- are additionally wrapped with a server-side tenant predicate and LIMIT.
+  IF q !~* E'organization_id[[:space:]]*=[[:space:]]*''[0-9a-fA-F-]{36}''' THEN
+    RAISE EXCEPTION 'AI query rejected: organization_id predicate is required';
+  END IF;
+  q := regexp_replace(q, '(organization_id[[:space:]]*=[[:space:]]*)''[0-9a-fA-F-]{36}''', E'\\1' || quote_literal(p_org_id), 'gi');
+
   IF p_enforce_user_scope THEN
-    user_filter := format('AND user_id = %L', p_user_id);
+    IF q !~* E'user_id[[:space:]]*=[[:space:]]*''[0-9a-fA-F-]{36}''' THEN
+      RAISE EXCEPTION 'AI query rejected: user_id predicate is required for this tool';
+    END IF;
+    q := regexp_replace(q, '(user_id[[:space:]]*=[[:space:]]*)''[0-9a-fA-F-]{36}''', E'\\1' || quote_literal(p_user_id), 'gi');
   END IF;
 
-  -- org_id/user_id are typed uuid parameters here — they never come from
-  -- LLM output or raw app-level string concatenation, so %L is
-  -- defense-in-depth on top of that, not the sole safety mechanism.
-  wrapped_sql := format(
-    'SELECT COALESCE(jsonb_agg(t), ''[]''::jsonb) FROM (
-       WITH llm_query AS ( %s )
-       SELECT * FROM llm_query
-       WHERE organization_id = %L
-       %s
-       LIMIT 200
-     ) t',
-    query_string,
-    p_org_id,
-    user_filter
-  );
+  IF q ~* E'jsonb_agg[[:space:]]*\(' THEN
+    wrapped_sql := q;
+  ELSE
+    wrapped_sql := format(
+      'SELECT COALESCE(jsonb_agg(t), ''[]''::jsonb) FROM (SELECT * FROM (%s) llm_query LIMIT 200) t',
+      q
+    );
+  END IF;
 
   EXECUTE wrapped_sql INTO result;
-
   RESET ROLE;
   RESET statement_timeout;
-
-  RETURN result;
+  RETURN COALESCE(result, '[]'::jsonb);
 EXCEPTION
   WHEN query_canceled THEN
     RESET ROLE;
-    RAISE EXCEPTION 'AI query timed out after 5 seconds. Please refine your question.';
+    RAISE EXCEPTION 'AI query timed out after 5 seconds';
   WHEN insufficient_privilege THEN
     RESET ROLE;
-    RAISE EXCEPTION 'Access denied. AI can only query approved reporting views.';
+    RAISE EXCEPTION 'Access denied: AI can only query approved read-only sources';
   WHEN undefined_column THEN
     RESET ROLE;
-    RAISE EXCEPTION 'That view does not expose an organization_id/user_id column needed for scoping.';
+    RAISE EXCEPTION 'Approved AI source does not expose the required organization/user scope';
   WHEN OTHERS THEN
     RESET ROLE;
-    RAISE EXCEPTION 'Query execution failed: %', SQLERRM;
+    RAISE EXCEPTION 'AI query rejected or failed: %', SQLERRM;
 END;
 $$;
 
 
 ALTER FUNCTION "public"."execute_ai_readonly_query"("query_string" "text", "p_org_id" "uuid", "p_user_id" "uuid", "p_enforce_user_scope" boolean) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."execute_ai_readonly_query"("query_string" "text", "p_org_id" "uuid", "p_user_id" "uuid", "p_enforce_user_scope" boolean) IS 'Confirmed audit fix: database-side AI SQL allowlist, tenant scope and ai_readonly_role execution.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."execute_sql_query"("query_string" "text") RETURNS json
@@ -7801,7 +7817,11 @@ CREATE TABLE IF NOT EXISTS "finance"."payment_allocations" (
     "base_allocated_amount" numeric(18,2) NOT NULL,
     "allocated_by" "uuid" NOT NULL,
     "allocated_at" timestamp with time zone DEFAULT "now"(),
-    CONSTRAINT "payment_allocations_allocated_amount_check" CHECK (("allocated_amount" > (0)::numeric))
+    "status" "text" DEFAULT 'ACTIVE'::"text" NOT NULL,
+    "reversed_at" timestamp with time zone,
+    "reversed_by" "uuid",
+    CONSTRAINT "payment_allocations_allocated_amount_check" CHECK (("allocated_amount" > (0)::numeric)),
+    CONSTRAINT "payment_allocations_status_check" CHECK (("status" = ANY (ARRAY['ACTIVE'::"text", 'REVERSED'::"text"])))
 );
 
 
@@ -9021,7 +9041,8 @@ CREATE TABLE IF NOT EXISTS "public"."invoices" (
     "voided_by" "uuid",
     "voided_at" timestamp with time zone,
     "organization_id" "uuid" NOT NULL,
-    CONSTRAINT "invoices_amounts_non_negative_check" CHECK ((("amount" >= (0)::numeric) AND ("subtotal" >= (0)::numeric) AND ("tax_amount" >= (0)::numeric) AND ("discount_amount" >= (0)::numeric) AND ("total_amount" >= (0)::numeric) AND ("base_subtotal" >= (0)::numeric) AND ("base_tax_amount" >= (0)::numeric) AND ("base_discount_amount" >= (0)::numeric) AND ("base_total_amount" >= (0)::numeric) AND ("amount_paid" >= (0)::numeric) AND ("base_amount_paid" >= (0)::numeric) AND ("outstanding_amount" >= (0)::numeric) AND ("base_outstanding_amount" >= (0)::numeric)))
+    CONSTRAINT "invoices_amounts_non_negative_check" CHECK ((("amount" >= (0)::numeric) AND ("subtotal" >= (0)::numeric) AND ("tax_amount" >= (0)::numeric) AND ("discount_amount" >= (0)::numeric) AND ("total_amount" >= (0)::numeric) AND ("base_subtotal" >= (0)::numeric) AND ("base_tax_amount" >= (0)::numeric) AND ("base_discount_amount" >= (0)::numeric) AND ("base_total_amount" >= (0)::numeric) AND ("amount_paid" >= (0)::numeric) AND ("base_amount_paid" >= (0)::numeric) AND ("outstanding_amount" >= (0)::numeric) AND ("base_outstanding_amount" >= (0)::numeric))),
+    CONSTRAINT "invoices_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'SUBMITTED'::character varying, 'PENDING_APPROVAL'::character varying, 'VERIFIED'::character varying, 'APPROVED'::character varying, 'ISSUED'::character varying, 'PARTIALLY_PAID'::character varying, 'PAID'::character varying, 'OVERDUE'::character varying, 'VOID'::character varying, 'CREDITED'::character varying, 'REFUNDED'::character varying])::"text"[])))
 );
 
 
@@ -9232,7 +9253,7 @@ CREATE TABLE IF NOT EXISTS "public"."payments" (
     "status" "text" DEFAULT 'Pending'::"text" NOT NULL,
     "notes" "text",
     "created_at" timestamp with time zone DEFAULT "now"(),
-    "organization_id" "uuid",
+    "organization_id" "uuid" NOT NULL,
     "journal_entry_id" "uuid",
     CONSTRAINT "payments_amount_check" CHECK (("amount" >= (0)::numeric)),
     CONSTRAINT "payments_status_check" CHECK (("status" = ANY (ARRAY['Pending'::"text", 'Paid'::"text", 'Partial Payment'::"text", 'Overdue'::"text"])))
@@ -11466,11 +11487,6 @@ ALTER TABLE ONLY "public"."invoices"
 
 
 
-ALTER TABLE "public"."invoices"
-    ADD CONSTRAINT "invoices_status_check" CHECK ((("status")::"text" = ANY (ARRAY['DRAFT'::"text", 'PENDING_APPROVAL'::"text", 'ISSUED'::"text", 'PARTIALLY_PAID'::"text", 'PAID'::"text", 'OVERDUE'::"text", 'VOID'::"text", 'CREDITED'::"text", 'REFUNDED'::"text"]))) NOT VALID;
-
-
-
 ALTER TABLE ONLY "public"."notification_deliveries"
     ADD CONSTRAINT "notification_deliveries_pkey" PRIMARY KEY ("id");
 
@@ -12085,6 +12101,10 @@ CREATE UNIQUE INDEX "idx_ns_type_fy_org_unique" ON "finance"."numbering_sequence
 
 
 CREATE INDEX "idx_oh_owner" ON "finance"."ownership_history" USING "btree" ("owner_id");
+
+
+
+CREATE INDEX "idx_payment_receipts_client_id" ON "finance"."payment_receipts" USING "btree" ("client_id");
 
 
 
@@ -13032,6 +13052,10 @@ CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "financ
 
 
 CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "finance"."vendor_bills" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_payment_receipt_client_org" BEFORE INSERT OR UPDATE OF "client_id", "organization_id" ON "finance"."payment_receipts" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_payment_receipt_client_org"();
 
 
 
@@ -14213,6 +14237,11 @@ ALTER TABLE ONLY "finance"."payment_allocations"
 
 
 ALTER TABLE ONLY "finance"."payment_receipts"
+    ADD CONSTRAINT "payment_receipts_client_id_fkey" FOREIGN KEY ("client_id") REFERENCES "public"."clients"("id") ON DELETE RESTRICT NOT VALID;
+
+
+
+ALTER TABLE ONLY "finance"."payment_receipts"
     ADD CONSTRAINT "payment_receipts_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
 
 
@@ -14966,11 +14995,11 @@ ALTER TABLE "ai"."ai_tool_calls" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ai"."ai_user_cost_tracking" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "authenticated_read_model_registry" ON "ai"."ai_model_registry" FOR SELECT TO "authenticated" USING (true);
+CREATE POLICY "authenticated_read_model_registry" ON "ai"."ai_model_registry" FOR SELECT TO "authenticated" USING (("core"."has_role"('CEO'::"text") OR "core"."has_role"('FINANCE_HEAD'::"text") OR "core"."has_role"('Admin'::"text") OR "core"."has_role"('TECHNICAL_ADMIN'::"text")));
 
 
 
-CREATE POLICY "authenticated_read_prompts" ON "ai"."ai_prompt_versions" FOR SELECT TO "authenticated" USING (true);
+CREATE POLICY "authenticated_read_prompts" ON "ai"."ai_prompt_versions" FOR SELECT TO "authenticated" USING (("core"."has_role"('CEO'::"text") OR "core"."has_role"('FINANCE_HEAD'::"text") OR "core"."has_role"('Admin'::"text") OR "core"."has_role"('TECHNICAL_ADMIN'::"text")));
 
 
 
@@ -17018,6 +17047,7 @@ ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
 
 
 GRANT USAGE ON SCHEMA "audit" TO "authenticated";
+GRANT USAGE ON SCHEMA "audit" TO "service_role";
 
 
 
@@ -17049,6 +17079,43 @@ GRANT ALL ON SCHEMA "reporting" TO "authenticated";
 GRANT ALL ON SCHEMA "reporting" TO "service_role";
 GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
@@ -17108,12 +17175,714 @@ GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", 
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
 
 
 GRANT ALL ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason" "text") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."get_current_open_period_id"() TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."get_current_period"() TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."get_period_by_date"("p_date" "date") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p_organization_id" "uuid", "p_account_type" "text") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."is_date_in_open_period"("p_date" "date") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."manual_match_statement_line"("p_line_id" "uuid", "p_journal_line_id" "uuid", "p_reason" "text") TO "authenticated";
 
 
 
@@ -17127,12 +17896,24 @@ GRANT ALL ON FUNCTION "finance"."mark_paid_invoices"() TO "authenticated";
 
 
 
+GRANT ALL ON FUNCTION "finance"."post_existing_journal_entry"("p_journal_id" "uuid", "p_posted_by" "uuid") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") TO "authenticated";
 
 
 
 REVOKE ALL ON FUNCTION "finance"."prevent_posted_capital_transaction_edit"() FROM PUBLIC;
+
+
+
+GRANT ALL ON FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "p_reversal_date" "date", "p_reason" "text") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") TO "authenticated";
 
 
 
@@ -17357,6 +18138,15 @@ GRANT ALL ON FUNCTION "reporting"."transaction_summary"() TO "authenticated";
 
 REVOKE ALL ON FUNCTION "reporting"."unreconciled_summary"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
+
+
+
+
+
+
+
+
+
 
 
 
@@ -18239,4 +19029,35 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

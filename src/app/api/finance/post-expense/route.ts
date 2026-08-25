@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
 
     // 2. Already posted? (Idempotency check)
     const existingJournal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference')
       .eq('source_type', 'EXPENSE')
       .eq('source_id', expenseId)
@@ -148,7 +148,7 @@ export async function POST(req: NextRequest) {
     // 3. Open period
     let auditLogFailed = false;
     const period = getData(await supabase
-      .from('finance.accounting_periods')
+      .schema('finance').from('accounting_periods')
       .select('id')
       .eq('status', 'OPEN')
       .eq('organization_id', orgId)
@@ -188,7 +188,7 @@ export async function POST(req: NextRequest) {
       const escapedCategory = expense.category.replace(/[%_]/g, '\\$&');
 
       const exactMatches = (await supabase
-        .from('finance.chart_of_accounts')
+        .schema('finance').from('chart_of_accounts')
         .select('id, code, name')
         .eq('account_type', 'OPERATING_EXPENSE')
         .eq('is_active', true)
@@ -203,7 +203,7 @@ export async function POST(req: NextRequest) {
         accountResolutionWarning = `Category "${expense.category}" exactly matched ${exactMatches.length} active expense accounts (${exactMatches.map((a: any) => a.code).join(', ')}); posted to ${exactMatches[0].code} deterministically (lowest code). Consider renaming duplicate accounts.`;
       } else {
         const substringMatches = (await supabase
-          .from('finance.chart_of_accounts')
+          .schema('finance').from('chart_of_accounts')
           .select('id, code, name')
           .eq('account_type', 'OPERATING_EXPENSE')
           .eq('is_active', true)
@@ -224,7 +224,7 @@ export async function POST(req: NextRequest) {
  
     if (!expenseAccountId) {
       const opex = getData(await supabase
-        .from('finance.chart_of_accounts')
+        .schema('finance').from('chart_of_accounts')
         .select('id, code, name')
         .eq('account_type', 'OPERATING_EXPENSE')
         .eq('is_active', true)
@@ -240,7 +240,7 @@ export async function POST(req: NextRequest) {
  
     // 5. Payable / Liability account
     const payableAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'LIABILITY')
       .eq('is_active', true)
@@ -252,7 +252,7 @@ export async function POST(req: NextRequest) {
     let fallbackLiability = null;
     if (!payableAccount) {
       fallbackLiability = getData(await supabase
-        .from('finance.chart_of_accounts')
+        .schema('finance').from('chart_of_accounts')
         .select('id, code, name')
         .eq('account_type', 'LIABILITY')
         .eq('is_active', true)
@@ -309,7 +309,7 @@ export async function POST(req: NextRequest) {
  
     // Fetch the created journal to get reference number
     const journal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference')
       .eq('id', journalId)
       .single());

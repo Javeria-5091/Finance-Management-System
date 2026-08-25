@@ -44,7 +44,7 @@ export default function JournalEntriesPage() {
   const fetchJournals = useCallback(async () => {
     setLoading(true);
     const { data, error } = await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select(`*, journal_lines:finance.journal_lines(*, chart_of_accounts:account_id(code, name))`)
       .order('created_at', { ascending: false })
       .limit(100);
@@ -54,7 +54,7 @@ export default function JournalEntriesPage() {
 
   const fetchAccounts = useCallback(async () => {
     const { data } = await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name, account_type, is_active, posting_allowed')
       .eq('is_active', true)
       .eq('posting_allowed', true)
@@ -96,7 +96,7 @@ export default function JournalEntriesPage() {
     try {
       // Get open period
       const { data: period } = await supabase
-        .from('finance.accounting_periods')
+        .schema('finance').from('accounting_periods')
         .select('id')
         .eq('status', 'OPEN')
         .order('start_date', { ascending: false })
@@ -105,7 +105,7 @@ export default function JournalEntriesPage() {
       if (!period) { toast.error('No OPEN accounting period found.'); setSaving(false); return; }
 
       // Insert header
-      const { data: journal, error: jErr } = await supabase.from('finance.journal_entries').insert({
+      const { data: journal, error: jErr } = await supabase.schema('finance').from('journal_entries').insert({
         reference: formRef,
         description: formDesc,
         status: 'DRAFT',
@@ -125,9 +125,9 @@ export default function JournalEntriesPage() {
         credit_amount: parseFloat(String(l.credit_amount)) || 0,
         description: l.description,
       }));
-      const { error: lErr } = await supabase.from('finance.journal_lines').insert(lines);
+      const { error: lErr } = await supabase.schema('finance').from('journal_lines').insert(lines);
       if (lErr) {
-        await supabase.from('finance.journal_entries').delete().eq('id', journal.id);
+        await supabase.schema('finance').from('journal_entries').delete().eq('id', journal.id);
         throw lErr;
       }
 

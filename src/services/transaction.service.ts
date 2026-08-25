@@ -20,7 +20,7 @@ import type { TransactionSummary, TransactionRow, TransactionDetail } from '@/ty
 // FIX: All three functions exist in the reporting schema, not public.
 // Using supabase.schema('reporting').rpc() routes the call to the correct schema.
 
-const reportingDb = () => supabase.schema('reporting');
+const reportingDb = (client?: SClient) => resolveClient(client).schema('reporting');
 
 export const getTransactionSummary = async () => {
   const { data, error } = await reportingDb().schema('reporting').rpc('transaction_summary');

@@ -57,7 +57,7 @@ export async function GET(req: NextRequest) {
     const enrichedData = await Promise.all(
       (data || []).map(async (project) => {
         const { data: profitability } = await supabase
-          .from('reporting.v_project_profitability')
+          .schema('reporting').from('v_project_profitability')
           .select('*')
           .eq('project_id', project.id)
           .maybeSingle();
@@ -157,5 +157,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
- 
-

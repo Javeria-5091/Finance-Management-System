@@ -27,14 +27,14 @@ export default function PlatformFeesPage() {
   const [feeFormData, setFeeFormData] = useState({ name: '', fee_type: 'PERCENTAGE', fee_value: '', min_fee: '', max_fee: '', applies_to: 'ALL', priority: 0, effective_from: '', effective_to: '' });
 
   const fetchPlatforms = useCallback(async () => {
-    const { data } = await supabase.from('finance.platforms').select('*').order('name');
+    const { data } = await supabase.schema('finance').from('platforms').select('*').order('name');
     if (data) setPlatforms(data);
     setLoading(false);
   }, []);
 
   const fetchFeeRules = useCallback(async () => {
     if (!selectedPlatform) { setFeeRules([]); return; }
-    const { data } = await supabase.from('finance.fee_rules').select('*').eq('platform_id', selectedPlatform).order('priority', { ascending: false });
+    const { data } = await supabase.schema('finance').from('fee_rules').select('*').eq('platform_id', selectedPlatform).order('priority', { ascending: false });
     if (data) setFeeRules(data);
   }, [selectedPlatform]);
 
@@ -48,10 +48,10 @@ export default function PlatformFeesPage() {
     if (!platForm.name.trim() || !platForm.code.trim()) { toast.error('Name and Code required'); return; }
     try {
       if (editingPlatform) {
-        const { error } = await supabase.from('finance.platforms').update(platForm).eq('id', editingPlatform.id);
+        const { error } = await supabase.schema('finance').from('platforms').update(platForm).eq('id', editingPlatform.id);
         if (error) throw error;
       } else {
-        const { error } = await supabase.from('finance.platforms').insert(platForm);
+        const { error } = await supabase.schema('finance').from('platforms').insert(platForm);
         if (error) throw error;
       }
       toast.success(editingPlatform ? 'Platform updated' : 'Platform created');
@@ -61,7 +61,7 @@ export default function PlatformFeesPage() {
   }
 
   async function togglePlatform(plat: any) {
-    const { error } = await supabase.from('finance.platforms').update({ is_active: !plat.is_active }).eq('id', plat.id);
+    const { error } = await supabase.schema('finance').from('platforms').update({ is_active: !plat.is_active }).eq('id', plat.id);
     if (!error) fetchPlatforms(); else toast.error(error.message);
   }
 
@@ -71,10 +71,10 @@ export default function PlatformFeesPage() {
     try {
       const payload = { ...feeFormData, platform_id: selectedPlatform, fee_value: parseFloat(feeFormData.fee_value) || 0, min_fee: parseFloat(feeFormData.min_fee) || 0, max_fee: parseFloat(feeFormData.max_fee) || 0 };
       if (editingFee) {
-        const { error } = await supabase.from('finance.fee_rules').update(payload).eq('id', editingFee.id);
+        const { error } = await supabase.schema('finance').from('fee_rules').update(payload).eq('id', editingFee.id);
         if (error) throw error;
       } else {
-        const { error } = await supabase.from('finance.fee_rules').insert(payload);
+        const { error } = await supabase.schema('finance').from('fee_rules').insert(payload);
         if (error) throw error;
       }
       toast.success(editingFee ? 'Fee rule updated' : 'Fee rule created');
@@ -85,7 +85,7 @@ export default function PlatformFeesPage() {
 
   async function deleteFeeRule(id: string) {
     if (!confirm('Delete this fee rule?')) return;
-    const { error } = await supabase.from('finance.fee_rules').delete().eq('id', id);
+    const { error } = await supabase.schema('finance').from('fee_rules').delete().eq('id', id);
     if (!error) { toast.success('Deleted'); fetchFeeRules(); } else toast.error(error.message);
   }
 

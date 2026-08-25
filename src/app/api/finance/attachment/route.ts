@@ -66,7 +66,7 @@ async function computeFileHash(base64Data: string): Promise<string> {
 async function checkDuplicateHash(fileHash: string, orgId: string | null, client: any): Promise<boolean> {
   if (!orgId) return false;
   const { data } = await client
-    .from('finance.attachments')
+    .schema('finance').from('attachments')
     .select('id, file_name, entity_type, entity_id')
     .eq('file_hash', fileHash)
     .eq('organization_id', orgId)
@@ -179,7 +179,7 @@ export async function POST(req: NextRequest) {
  
         // Store hash in attachments table if it exists
         if (fileHash) {
-          await supabase.from('finance.attachments').insert({
+          await supabase.schema('finance').from('attachments').insert({
             entity_type: entityType,
             entity_id: entityId,
             file_name: safeName,
@@ -219,7 +219,7 @@ export async function POST(req: NextRequest) {
       // has the matching read permission for the underlying entity.
       const attachment = getData(
         await supabase
-          .from('finance.attachments')
+          .schema('finance').from('attachments')
           .select('id, entity_type, entity_id, organization_id, file_name')
           .eq('storage_path', entityId)
           .maybeSingle()

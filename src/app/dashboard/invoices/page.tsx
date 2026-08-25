@@ -28,7 +28,7 @@ const STATUS_CONFIG = {
 type InvoiceStatus = keyof typeof STATUS_CONFIG;
 
 export default function InvoicesPage() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const { hasPermission, isFinanceUser, role } = usePermissions();
   const [invoices, setInvoices] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -40,6 +40,8 @@ export default function InvoicesPage() {
     client_name: '',
     amount: '',
     tax_amount: '0',
+    currency: 'PKR',
+    exchange_rate: '1',
     due_date: '',
     notes: '',
   });
@@ -228,7 +230,7 @@ export default function InvoicesPage() {
         </div>
         {canCreate && (
           <button 
-            onClick={() => { setEditingInvoice(null); setFormData({ client_name: '', amount: '', tax_amount: '0', due_date: '', notes: '' }); setShowForm(true); }} 
+            onClick={() => { setEditingInvoice(null); setFormData({ client_name: '', amount: '', tax_amount: '0', currency: 'PKR', exchange_rate: '1', due_date: '', notes: '' }); setShowForm(true); }} 
             className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium shadow-sm transition-colors"
           >
             <Plus size={16} /> Create Invoice
@@ -287,7 +289,7 @@ export default function InvoicesPage() {
                           {/* DRAFT actions */}
                           {isDraft && isCreator && hasPermission('INVOICE_UPDATE') && (
                             <button 
-                              onClick={() => { setEditingInvoice(inv); setFormData({ client_name: inv.client_name || '', amount: String(inv.amount || ''), tax_amount: String(inv.tax_amount || '0'), due_date: inv.due_date || '', notes: inv.notes || '' }); setShowForm(true); }} 
+                              onClick={() => { setEditingInvoice(inv); setFormData({ client_name: inv.client_name || '', amount: String(inv.amount || ''), tax_amount: String(inv.tax_amount || '0'), currency: inv.currency || 'PKR', exchange_rate: String(inv.exchange_rate || '1'), due_date: inv.due_date || '', notes: inv.notes || '' }); setShowForm(true); }} 
                               title="Edit" 
                               className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded-lg transition-colors"
                             >
@@ -423,6 +425,28 @@ export default function InvoicesPage() {
                   />
                 </div>
                 <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Currency *</label>
+                  <input
+                    type="text"
+                    maxLength={3}
+                    value={formData.currency}
+                    onChange={(e) => setFormData({ ...formData, currency: e.target.value.toUpperCase() })}
+                    placeholder="PKR"
+                    className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Exchange Rate *</label>
+                  <input
+                    type="number"
+                    min="0.000001"
+                    step="0.000001"
+                    value={formData.exchange_rate}
+                    onChange={(e) => setFormData({ ...formData, exchange_rate: e.target.value })}
+                    className="w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+                  />
+                </div>
+                <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Due Date *</label>
                   <input 
                     type="date" 
@@ -460,18 +484,31 @@ export default function InvoicesPage() {
                     
                     const amount = parseFloat(formData.amount) || 0;
                     const taxAmount = parseFloat(formData.tax_amount) || 0;
+                    const exchangeRate = parseFloat(formData.exchange_rate) || 0;
+                    if (!/^[A-Z]{3}$/.test(formData.currency)) { toast.error('Currency must be a 3-letter ISO code'); return; }
+                    if (exchangeRate <= 0 || (formData.currency === 'PKR' && Math.abs(exchangeRate - 1) > 0.000001)) { toast.error('Invalid exchange rate'); return; }
                     const totalAmount = amount + taxAmount;
+                    const baseSubtotal = amount * exchangeRate;
+                    const baseTaxAmount = taxAmount * exchangeRate;
+                    const baseTotalAmount = totalAmount * exchangeRate;
                     
                     handleSubmit(editingInvoice ? 
-                      { ...editingInvoice, client_name: formData.client_name, amount, tax_amount: taxAmount, due_date: formData.due_date, notes: formData.notes, total_amount: totalAmount } : {
+                      { ...editingInvoice, client_name: formData.client_name, amount, subtotal: amount, tax_amount: taxAmount, currency: formData.currency, exchange_rate: exchangeRate, base_subtotal: baseSubtotal, base_tax_amount: baseTaxAmount, base_total_amount: baseTotalAmount, base_outstanding_amount: baseTotalAmount, due_date: formData.due_date, notes: formData.notes, total_amount: totalAmount } : {
                       client_name: formData.client_name,
                       amount,
+                      subtotal: amount,
                       tax_amount: taxAmount,
+                      currency: formData.currency,
+                      exchange_rate: exchangeRate,
+                      base_subtotal: baseSubtotal,
+                      base_tax_amount: baseTaxAmount,
+                      base_total_amount: baseTotalAmount,
                       total_amount: totalAmount,
                       due_date: formData.due_date,
                       notes: formData.notes,
                       outstanding_amount: totalAmount,
-                      base_outstanding_amount: totalAmount,
+                      base_outstanding_amount: baseTotalAmount,
+                      organization_id: profile?.organization_id,
                     }
                   );
                   }} 

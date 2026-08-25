@@ -31,7 +31,7 @@ export async function GET(
  
     // Get profitability data
     const { data: profitability } = await supabase
-      .from('reporting.v_project_profitability')
+      .schema('reporting').from('v_project_profitability')
       .select('*')
       .eq('project_id', id)
       .maybeSingle();
@@ -53,7 +53,7 @@ export async function GET(
  
     // Get budget data
     const { data: budget } = await supabase
-      .from('finance.budgets')
+      .schema('finance').from('budgets')
       .select('*')
       .eq('project_id', id)
       .eq('status', 'APPROVED')
@@ -220,4 +220,3 @@ await       supabase.schema('audit').rpc('log_action', {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-

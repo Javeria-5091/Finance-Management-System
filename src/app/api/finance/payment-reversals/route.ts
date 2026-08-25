@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
 
     // BUG-020 FIX: Get open period with org filter
     const period = getData(await supabase
-      .from('finance.accounting_periods')
+      .schema('finance').from('accounting_periods')
       .select('id')
       .eq('status', 'OPEN')
       .eq('organization_id', auth.orgId)
@@ -68,99 +68,31 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
     }
 
-    const totalAmount = Number(receipt.amount);
-
-    // Get original journal lines to reverse
-    const originalLines = getData(await supabase
-      .from('finance.journal_lines')
-      .select('account_id, debit_amount, credit_amount, description')
-      .eq('journal_entry_id', receipt.journal_entry_id));
-
-    if (!originalLines || originalLines.length === 0) {
-      return NextResponse.json({ error: 'Original journal lines not found for reversal' }, { status: 500 });
-    }
-
-    // BUG-001 FIX: Build reversal lines for RPC (swap debit/credit, no journal_entry_id needed)
-    const rpcLines = originalLines.map((line: any) => ({
-      account_id: line.account_id,
-      debit_amount: Number(line.credit_amount),  // Swap: original credit → reversal debit
-      credit_amount: Number(line.debit_amount),   // Swap: original debit → reversal credit
-      description: `REVERSAL: ${line.description}`,
-    }));
-
-    // BUG-001 FIX: Single atomic RPC call with CORRECT signature
-    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
-      p_description: `REVERSAL: Payment Receipt ${receipt.receipt_number} - ${reason}`,
-      p_transaction_date: new Date().toISOString().split('T')[0],
+    // Confirmed fix: GL reversal, receipt status, allocation reversal, and invoice
+    // balances are now performed by one SECURITY DEFINER database transaction.
+    const { data: journalId, error: atomicErr } = await supabase.schema('finance').rpc('reverse_payment_receipt_atomic', {
+      p_receipt_id: payment_receipt_id,
       p_period_id: period.id,
-      p_lines: JSON.stringify(rpcLines),
-      p_currency: receipt.currency || 'PKR',
-      p_exchange_rate: receipt.exchange_rate || 1,
-      p_source_type: 'PAYMENT_REVERSAL',
-      p_source_id: payment_receipt_id,
+      p_reversal_date: new Date().toISOString().split('T')[0],
+      p_reason: reason,
+      p_reversed_by: auth.userId,
     });
 
-    if (postErr || !journalId) {
-      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
+    if (atomicErr || !journalId) {
+      return NextResponse.json({ error: 'Atomic payment reversal failed: ' + (atomicErr?.message || 'Unknown error') }, { status: 500 });
     }
 
-    // Fetch the created journal to get reference
     const journal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance')
+      .from('journal_entries')
       .select('id, reference')
       .eq('id', journalId)
+      .eq('organization_id', auth.orgId)
       .single());
-    // C6 FIX: Null guard
     if (!journal) {
-      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
+      return NextResponse.json({ error: 'Payment reversal committed but journal metadata could not be read.' }, { status: 500 });
     }
     const reversalReference = journal.reference || `JE-PMTREV-${journalId}`;
-
-    // Update receipt status
-    await supabase.from('payment_receipts').update({
-      status: 'REVERSED',
-      reversed_at: new Date().toISOString(),
-      reversed_by: auth.userId,
-      reversal_reason: reason,
-      reversal_journal_id: journalId,
-    }).eq('id', payment_receipt_id).eq('organization_id', auth.orgId);
-
-    // Reverse invoice payment statuses
-    const allocations = getData(await supabase
-      .from('payment_allocations')
-      .select('id, invoice_id, allocated_amount')
-      .eq('payment_receipt_id', payment_receipt_id));
-
-    if (allocations) {
-      for (const alloc of allocations) {
-        // Reverse allocation
-        await supabase.from('payment_allocations').update({
-          status: 'REVERSED',
-          reversed_at: new Date().toISOString(),
-          reversed_by: auth.userId,
-        }).eq('id', alloc.id);
-
-        // Update invoice amount_paid (reduce)
-        const invoice = getData(await supabase
-          .from('invoices')
-          .select('id, total_amount, amount_paid')
-          .eq('id', alloc.invoice_id)
-          .eq('organization_id', auth.orgId)
-          .single());
-
-        if (invoice) {
-          const newPaid = Math.max(0, Number(invoice.amount_paid || 0) - Number(alloc.allocated_amount));
-          const total = Number(invoice.total_amount);
-          const newStatus = newPaid <= 0.01 ? 'ISSUED' : 'PARTIALLY_PAID';
-
-          // BUG-028 FIX: Add organization_id filter to invoice status update
-          await supabase.from('invoices').update({
-            amount_paid: newPaid,
-            status: newStatus,
-          }).eq('id', alloc.invoice_id).eq('organization_id', auth.orgId);
-        }
-      }
-    }
 
     // BUG-023 FIX: surface a failed audit write instead of only
     // console-logging it (Spec 8.1). Especially important for a reversal,
@@ -181,7 +113,7 @@ export async function POST(req: NextRequest) {
         p_reason: reason,
         p_new_values: {
           reversal_reference: reversalReference,
-          amount: totalAmount,
+          amount: Number(receipt.amount),
           original_journal_id: receipt.journal_entry_id,
           reversal_journal_id: journal.id,
         },

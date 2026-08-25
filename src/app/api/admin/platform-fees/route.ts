@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
     const isActive = searchParams.get('is_active');
  
     let query = supabase
-      .from('core.platform_fee_directory')
+      .schema('core').from('platform_fee_directory')
       .select('*')
       .eq('organization_id', auth.orgId);
  
@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
       }
  
       const { data, error } = await supabase
-        .from('core.platform_fee_directory')
+        .schema('core').from('platform_fee_directory')
         .insert({
           platform,
           fee_type: fee_type.toUpperCase(), // PERCENTAGE, FIXED, TIERED
@@ -105,7 +105,7 @@ export async function POST(req: NextRequest) {
       if (max_amount !== undefined) updates.max_amount = max_amount;
  
       const { data, error } = await supabase
-        .from('core.platform_fee_directory')
+        .schema('core').from('platform_fee_directory')
         .update(updates)
         .eq('id', id)
         .eq('organization_id', auth.orgId)
@@ -138,7 +138,7 @@ export async function POST(req: NextRequest) {
       }
  
       const existing = getData(await supabase
-        .from('core.platform_fee_directory')
+        .schema('core').from('platform_fee_directory')
         .select('id, is_active, platform')
         .eq('id', id)
         .eq('organization_id', auth.orgId)
@@ -149,7 +149,7 @@ export async function POST(req: NextRequest) {
       }
  
       const { data, error } = await supabase
-        .from('core.platform_fee_directory')
+        .schema('core').from('platform_fee_directory')
         .update({ is_active: !existing.is_active })
         .eq('id', id)
         .select()

@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
     // ── 1. Fetch the journal entry (WITH org_id filter — Spec 4.2 FIX) ──
     const journal = getData(
       await supabase
-        .from('finance.journal_entries')
+        .schema('finance').from('journal_entries')
         .select('*')
         .eq('id', journal_entry_id)
         .eq('organization_id', orgId)   // ← SECURITY FIX: was missing
@@ -87,7 +87,7 @@ export async function POST(req: NextRequest) {
     // ── 4. Fetch journal lines (WITH org_id filter) ──
     const journalLines = getData(
       await supabase
-        .from('finance.journal_lines')
+        .schema('finance').from('journal_lines')
         .select('*')
         .eq('journal_entry_id', journal_entry_id)
         .eq('organization_id', orgId)   // ← SECURITY FIX
@@ -113,7 +113,7 @@ export async function POST(req: NextRequest) {
     // ── 6. Verify open period ──
     const period = getData(
       await supabase
-        .from('finance.accounting_periods')
+        .schema('finance').from('accounting_periods')
         .select('id, status, start_date, end_date')
         .eq('id', journal.period_id)
         .eq('organization_id', orgId)   // ← SECURITY FIX
@@ -134,7 +134,7 @@ export async function POST(req: NextRequest) {
     const accountIds = [...new Set(journalLines.map((l: any) => l.account_id))];
     const accounts = getData(
       await supabase
-        .from('finance.chart_of_accounts')
+        .schema('finance').from('chart_of_accounts')
         .select('id, code, name, is_active, posting_allowed')
         .in('id', accountIds)
         .eq('organization_id', orgId)   // ← SECURITY FIX
@@ -208,7 +208,7 @@ export async function POST(req: NextRequest) {
     // update were already done atomically by finance.post_existing_journal_entry.
     const newJournal = getData(
       await supabase
-        .from('finance.journal_entries')
+        .schema('finance').from('journal_entries')
         .select('id, reference, total_debit, total_credit')
         .eq('id', newJournalId)
         .single()

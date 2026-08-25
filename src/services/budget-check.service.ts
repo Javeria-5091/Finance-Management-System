@@ -116,7 +116,7 @@ export async function getBudgetPolicy(
 ): Promise<BudgetPolicyConfig> {
   const supabase = resolveClient(supabaseClient);
   try {
-    // BUG-009 FIX: Changed supabase.from('core.budget_policies') to
+    // BUG-009 FIX: Changed supabase.schema('core').from('budget_policies') to
     // supabase.schema('core').from('budget_policies').
     // Supabase JS client does NOT support schema.table dot syntax in .from().
     const policy = getData<{ enforcement_mode: BudgetEnforcementMode; caution_threshold: number; warning_threshold: number; block_threshold: number }>(
@@ -263,7 +263,7 @@ export async function checkBudgetForTransaction(
 
   // ── 1. Check project budget if project_id provided ──
   if (project_id) {
-    // BUG-009 FIX: Changed supabase.from('finance.budgets') to
+    // BUG-009 FIX: Changed supabase.schema('finance').from('budgets') to
     // supabase.schema('finance').from('budgets').
     // Also added .eq('organization_id', organization_id) for org isolation.
     const budget = getData(
@@ -284,7 +284,7 @@ export async function checkBudgetForTransaction(
 
   // ── 2. Check category/department budgets ──
   if (category || department) {
-    // BUG-009 FIX: Changed supabase.from('finance.budgets') to
+    // BUG-009 FIX: Changed supabase.schema('finance').from('budgets') to
     // supabase.schema('finance').from('budgets').
     let query = supabase
       .schema('finance')
@@ -308,7 +308,7 @@ export async function checkBudgetForTransaction(
 
   // ── 3. Check budget by direct ID if provided ──
   if (budget_id) {
-    // BUG-009 FIX: Changed supabase.from('finance.budgets') to
+    // BUG-009 FIX: Changed supabase.schema('finance').from('budgets') to
     // supabase.schema('finance').from('budgets').
     const budget = getData(
       await supabase
