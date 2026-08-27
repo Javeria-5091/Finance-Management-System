@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
+import { projectUpdateSchema } from '@/lib/validations';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -82,7 +83,11 @@ export async function PATCH(
  
   try {
     const { id } = params;
-    const body = await req.json();
+    const parsed = projectUpdateSchema.safeParse(await req.json());
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.issues[0]?.message || 'Invalid project update' }, { status: 400 });
+    }
+    const body = parsed.data;
  
     const existing = getData(await supabase
       .from('projects')
@@ -118,7 +123,10 @@ export async function PATCH(
       }
     }
  
-    const { project_code, organization_id, created_by, created_at, id: _id, ...updates } = body;
+    // The schema already whitelists mutable project fields. Protected fields
+    // such as project_code, organization_id, created_by and id cannot enter
+    // the update payload at all.
+    const updates = body;
  
         const { data: updated, error } = await supabase
       .from('projects')

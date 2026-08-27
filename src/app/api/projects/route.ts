@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
-import { sanitizeSearch } from '@/lib/validations';
+import { sanitizeSearch, projectCreateSchema } from '@/lib/validations';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -87,16 +87,15 @@ export async function POST(req: NextRequest) {
   const { supabase } = await getAuthSupabase(req);
  
   try {
-    const body = await req.json();
+    const parsed = projectCreateSchema.safeParse(await req.json());
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.issues[0]?.message || 'Invalid project data' }, { status: 400 });
+    }
     const {
       name, client_id, manager_id, platform, contract_value,
       currency, start_date, end_date, description, budget_amount,
       department, cost_center, is_confidential,
-    } = body;
- 
-    if (!name) {
-      return NextResponse.json({ error: 'Project name is required' }, { status: 400 });
-    }
+    } = parsed.data;
  
     // Generate project code
     const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'PRJ' });

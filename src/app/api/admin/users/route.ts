@@ -3,6 +3,7 @@ import { sanitizeSearch } from '@/lib/validations';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { getAuthUser, requirePermission } from '@/lib/api-auth';
 import { createServerClient } from '@supabase/ssr';
+import { createClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
  
 function getData<T = any>(res: any): T | null {
@@ -204,7 +205,7 @@ export async function POST(req: NextRequest) {
       // Organization B by guessing/enumerating a userId.
       const targetProfile = getData(await supabase
         .from('profiles')
-        .select('id, organization_id')
+        .select('id, email, organization_id')
         .eq('id', userId)
         .maybeSingle());
       if (!targetProfile || targetProfile.organization_id !== organizationId) {
@@ -283,13 +284,33 @@ export async function POST(req: NextRequest) {
       // own organization.
       const targetProfile = getData(await supabase
         .from('profiles')
-        .select('id, organization_id')
+        .select('id, email, organization_id')
         .eq('id', userId)
         .maybeSingle());
       if (!targetProfile || targetProfile.organization_id !== organizationId) {
         return NextResponse.json({ error: 'User not found in your organization' }, { status: 404 });
       }
  
+      // ISS-014 FIX: actually trigger Supabase's password-recovery email.
+      // The admin endpoint only requests the email; it never receives or
+      // handles the user's password. Use the target profile's stored email
+      // instead of trusting an email supplied in the request body.
+      const targetEmail = targetProfile.email;
+      if (!targetEmail) {
+        return NextResponse.json({ error: 'Target user email is not available' }, { status: 400 });
+      }
+
+      const publicSupabase = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      );
+      const { error: resetEmailError } = await publicSupabase.auth.resetPasswordForEmail(targetEmail);
+
+      if (resetEmailError) {
+        console.error('Password reset email failed:', resetEmailError);
+        return NextResponse.json({ error: 'Failed to send password reset email' }, { status: 502 });
+      }
+
       // Log the password reset request
       try {
        await supabase.schema('audit').rpc('log_action', {
@@ -297,7 +318,7 @@ export async function POST(req: NextRequest) {
           p_action: 'PASSWORD_RESET_REQUESTED',
           p_entity_type: 'user',
           p_entity_id: userId,
-          p_description: `Admin requested password reset for user ${email}`,
+          p_description: `Admin requested password reset for user ${targetEmail}`,
           p_previous_status: null,
           p_new_status: 'RESET_PENDING',
           p_source_module: 'admin',

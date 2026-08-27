@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission } from '@/lib/api-auth';
+import { invoiceCreateSchema } from '@/lib/validations';
 
 /**
  * Server-side invoice creation. Invoice numbers are never trusted from the
@@ -11,16 +12,15 @@ export async function POST(req: NextRequest) {
   const { supabase } = await getAuthSupabase(req);
 
   try {
-    const body = await req.json();
+    const parsed = invoiceCreateSchema.safeParse(await req.json());
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.issues[0]?.message || 'Invalid invoice data' }, { status: 400 });
+    }
     const {
       client_name, client_id, project_id, amount, subtotal, tax_amount,
       discount_amount, total_amount, currency, exchange_rate, issue_date,
-      due_date, notes, status,
-    } = body || {};
-
-    if (!client_name || !due_date || amount === undefined) {
-      return NextResponse.json({ error: 'client_name, amount and due_date are required' }, { status: 400 });
-    }
+      due_date, notes,
+    } = parsed.data;
 
     // BUG-010 FIX: derive the organization from the authenticated session and
     // generate the invoice reference server-side. Never trust a client number.
@@ -40,7 +40,9 @@ export async function POST(req: NextRequest) {
       issue_date: issue_date || new Date().toISOString().slice(0, 10),
       due_date,
       notes: notes || null,
-      status: status || 'DRAFT',
+      // Workflow status is always server-controlled. A client cannot create
+      // an invoice directly as SUBMITTED/APPROVED/POSTED.
+      status: 'DRAFT',
       outstanding_amount: Number(total_amount ?? amount),
       base_outstanding_amount: Number(total_amount ?? amount) * Number(exchange_rate || 1),
     };

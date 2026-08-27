@@ -262,13 +262,48 @@ export async function POST(
     }
     const reference = journal.reference || `JE-CN-${journalId}`;
 
-    // Update credit note status
-    await supabase.from('credit_notes').update({
-      status: 'POSTED',
-      posted_at: new Date().toISOString(),
-      journal_entry_id: journalId,
-      posted_by: auth.userId,
-    }).eq('id', id);
+    // ISS-013 FIX: Protect the APPROVED -> POSTED transition with both
+    // organization and current-status predicates. This prevents a stale
+    // approval from being posted after another request has already changed
+    // the credit note. If the guarded update loses a race after GL posting,
+    // immediately reverse the just-created journal so the source row and GL
+    // cannot diverge.
+    const { data: postedCreditNote, error: statusUpdateError } = await supabase
+      .from('credit_notes')
+      .update({
+        status: 'POSTED',
+        posted_at: new Date().toISOString(),
+        journal_entry_id: journalId,
+        posted_by: auth.userId,
+      })
+      .eq('id', id)
+      .eq('organization_id', auth.orgId)
+      .eq('status', 'APPROVED')
+      .select('id, status')
+      .maybeSingle();
+
+    if (statusUpdateError || !postedCreditNote) {
+      // Compensating action: the GL journal was created before the guarded
+      // source-row update. Reverse that journal if the source row was already
+      // changed by another request.
+      const { data: reversalId, error: reversalError } = await supabase
+        .schema('finance')
+        .rpc('reverse_journal_entry', {
+          p_journal_id: journalId,
+          p_reversal_date: new Date().toISOString().split('T')[0],
+          p_reason: 'Credit note posting aborted: source status changed concurrently.',
+        });
+
+      if (reversalError || !reversalId) {
+        return NextResponse.json({
+          error: 'Credit note status changed before posting completed and the compensating GL reversal also failed. Manual reconciliation is required.',
+        }, { status: 500 });
+      }
+
+      return NextResponse.json({
+        error: 'Credit note was modified before posting completed. The newly created GL entry was automatically reversed. Please refresh and try again.',
+      }, { status: 409 });
+    }
 
     // BUG-023 FIX: surface a failed audit write instead of only
     // console-logging it (Spec 8.1).

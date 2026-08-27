@@ -152,6 +152,179 @@ export const notificationCreateSchema = z.object({
   expires_at: z.string().optional(),
 });
  
+
+
+// ─── Invoice Create ────────────────────────────────────────────────────────
+// Status, organization, ownership and accounting balances are intentionally
+// server-controlled. They must never be accepted from the client.
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be YYYY-MM-DD');
+const currencyCode = z.string().trim().length(3).transform(v => v.toUpperCase());
+const nonNegativeAmount = z.number().finite().min(0);
+
+export const invoiceCreateSchema = z.object({
+  client_name: z.string().trim().min(1).max(255),
+  client_id: uuidSchema.nullable().optional(),
+  project_id: uuidSchema.nullable().optional(),
+  amount: nonNegativeAmount,
+  subtotal: nonNegativeAmount.optional(),
+  tax_amount: nonNegativeAmount.optional(),
+  discount_amount: nonNegativeAmount.optional(),
+  total_amount: nonNegativeAmount.optional(),
+  currency: currencyCode.optional().default('PKR'),
+  exchange_rate: z.number().finite().positive().optional().default(1),
+  issue_date: isoDate.optional(),
+  due_date: isoDate,
+  notes: z.string().max(2000).nullable().optional(),
+}).strict();
+
+// ─── Project Create / Update ───────────────────────────────────────────────
+export const projectCreateSchema = z.object({
+  name: z.string().trim().min(1).max(255),
+  client_id: uuidSchema.nullable().optional(),
+  manager_id: uuidSchema.nullable().optional(),
+  platform: z.string().max(100).nullable().optional(),
+  contract_value: nonNegativeAmount.optional().default(0),
+  currency: currencyCode.optional().default('PKR'),
+  start_date: isoDate.nullable().optional(),
+  end_date: isoDate.nullable().optional(),
+  description: z.string().max(5000).nullable().optional(),
+  budget_amount: nonNegativeAmount.optional().default(0),
+  department: z.string().max(100).nullable().optional(),
+  cost_center: z.string().max(100).nullable().optional(),
+  is_confidential: z.boolean().optional().default(false),
+}).strict();
+
+export const projectUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(255).optional(),
+  client_id: uuidSchema.nullable().optional(),
+  manager_id: uuidSchema.nullable().optional(),
+  platform: z.string().max(100).nullable().optional(),
+  contract_value: nonNegativeAmount.optional(),
+  currency: currencyCode.optional(),
+  start_date: isoDate.nullable().optional(),
+  end_date: isoDate.nullable().optional(),
+  description: z.string().max(5000).nullable().optional(),
+  budget_amount: nonNegativeAmount.optional(),
+  department: z.string().max(100).nullable().optional(),
+  cost_center: z.string().max(100).nullable().optional(),
+  is_confidential: z.boolean().optional(),
+  status: z.enum(['ACTIVE', 'ON_HOLD', 'CLOSED', 'CANCELLED']).optional(),
+  closure_reason: z.string().max(1000).nullable().optional(),
+}).strict();
+
+// ─── Client Update ─────────────────────────────────────────────────────────
+export const clientUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(200).optional(),
+  contact_person: z.string().max(200).nullable().optional(),
+  email: z.string().email().nullable().optional(),
+  phone: z.string().max(50).nullable().optional(),
+  address: z.string().max(500).nullable().optional(),
+  city: z.string().max(100).nullable().optional(),
+  country: z.string().max(100).nullable().optional(),
+  tax_registration: z.string().max(100).nullable().optional(),
+  tax_type: z.string().max(100).nullable().optional(),
+  payment_terms: z.string().max(50).optional(),
+  default_currency: currencyCode.optional(),
+  notes: z.string().max(2000).nullable().optional(),
+  website: z.string().url().nullable().optional(),
+  is_active: z.boolean().optional(),
+}).strict();
+
+// ─── Admin User Management ─────────────────────────────────────────────────
+export const adminRoleSchema = z.enum([
+  'CEO', 'FINANCE_HEAD', 'ACCOUNTANT', 'PROJECT_MANAGER', 'EMPLOYEE',
+  'VIEWER', 'AUDITOR', 'TECH_ADMIN', 'TECHNICAL_ADMIN', 'Admin',
+]);
+
+const adminDate = isoDate;
+export const adminInviteSchema = z.object({
+  action: z.literal('invite'),
+  email: z.string().trim().email().max(320),
+  fullName: z.string().trim().max(200).optional().nullable(),
+  role: adminRoleSchema.optional(),
+  effectiveFrom: adminDate.optional(),
+  effectiveTo: adminDate.nullable().optional(),
+}).strict();
+
+export const adminAssignRoleSchema = z.object({
+  action: z.literal('assign_role'),
+  userId: uuidSchema,
+  role: adminRoleSchema,
+  effectiveFrom: adminDate.optional(),
+  effectiveTo: adminDate.nullable().optional(),
+}).strict();
+
+export const adminResetPasswordSchema = z.object({
+  action: z.literal('reset_password'),
+  userId: uuidSchema,
+  email: z.string().trim().email().max(320),
+}).strict();
+
+export const adminPostSchema = z.discriminatedUnion('action', [
+  adminInviteSchema,
+  adminAssignRoleSchema,
+  adminResetPasswordSchema,
+]);
+
+export const adminUserPatchSchema = z.object({
+  userId: uuidSchema,
+  fullName: z.string().trim().max(200).optional().nullable(),
+  isActive: z.boolean().optional(),
+}).strict();
+
+// ─── Numbering Sequence Management ────────────────────────────────────────
+const numberingSequenceBase = {
+  sequence_code: z.string().trim().min(1).max(50).regex(/^[A-Z0-9_-]+$/, 'Invalid sequence code'),
+  prefix: z.string().trim().min(1).max(30),
+  description: z.string().max(500).nullable().optional(),
+  current_number: z.number().int().min(0).max(2147483647).optional(),
+  padding: z.number().int().min(1).max(10).optional(),
+  reset_period: z.enum(['YEARLY', 'PERIOD']).optional(),
+  format: z.string().max(100).regex(/\{PREFIX\}/, 'Format must contain {PREFIX}').regex(/\{NUMBER\}/, 'Format must contain {NUMBER}').optional(),
+};
+export const numberingCreateSchema = z.object({
+  action: z.literal('create'), ...numberingSequenceBase,
+  prefix: z.string().trim().min(1).max(30),
+}).strict();
+export const numberingUpdateSchema = z.object({
+  action: z.literal('update'), ...numberingSequenceBase,
+}).strict();
+export const numberingResetSchema = z.object({
+  action: z.literal('reset'), sequence_code: numberingSequenceBase.sequence_code,
+}).strict();
+export const numberingPostSchema = z.discriminatedUnion('action', [
+  numberingCreateSchema, numberingUpdateSchema, numberingResetSchema,
+]);
+
+// ─── Platform Fee Management ──────────────────────────────────────────────
+const feeType = z.enum(['PERCENTAGE', 'FIXED', 'TIERED', 'SLAB']);
+const appliesTo = z.enum(['EXPENSE', 'INVOICE', 'VENDOR_BILL', 'PAYMENT_RECEIPT', 'ALL']);
+const feeNumber = z.number().finite().min(0).max(9999999999999999.99);
+const platformFeeFields = {
+  platform: z.string().trim().min(1).max(200),
+  fee_type: feeType,
+  fee_rate: feeNumber.nullable().optional(),
+  fee_fixed_amount: feeNumber.nullable().optional(),
+  description: z.string().max(2000).nullable().optional(),
+  currency: currencyCode.optional(),
+  min_amount: feeNumber.nullable().optional(),
+  max_amount: feeNumber.nullable().optional(),
+};
+export const platformFeeCreateSchema = z.object({ action: z.literal('create'), ...platformFeeFields }).strict();
+export const platformFeeUpdateSchema = z.object({
+  action: z.literal('update'),
+  id: uuidSchema,
+  fee_rate: feeNumber.nullable().optional(),
+  fee_fixed_amount: feeNumber.nullable().optional(),
+  description: z.string().max(2000).nullable().optional(),
+  min_amount: feeNumber.nullable().optional(),
+  max_amount: feeNumber.nullable().optional(),
+}).strict();
+export const platformFeeToggleSchema = z.object({ action: z.literal('toggle'), id: uuidSchema }).strict();
+export const platformFeePostSchema = z.discriminatedUnion('action', [
+  platformFeeCreateSchema, platformFeeUpdateSchema, platformFeeToggleSchema,
+]);
+
 // ─── H4: Sanitize PostgREST search strings ───
 // Escapes characters that have special meaning in PostgREST filter syntax.
 //

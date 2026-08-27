@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
+import { clientUpdateSchema } from '@/lib/validations';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -55,7 +56,11 @@ export async function PATCH(
  
   try {
     const { id } = params;
-    const body = await req.json();
+    const parsed = clientUpdateSchema.safeParse(await req.json());
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.issues[0]?.message || 'Invalid client update' }, { status: 400 });
+    }
+    const body = parsed.data;
  
     // Check client exists and belongs to org
     const existing = getData(await supabase
@@ -69,8 +74,9 @@ export async function PATCH(
       return NextResponse.json({ error: 'Client not found' }, { status: 404 });
     }
  
-    // Prevent updating core fields
-    const { client_code, organization_id, created_by, created_at, id: _id, ...updates } = body;
+    // Protected fields are excluded from clientUpdateSchema, so they cannot
+    // reach the database update even if a caller sends them.
+    const updates = body;
  
     const { data: updated, error } = await supabase
       .from('clients')

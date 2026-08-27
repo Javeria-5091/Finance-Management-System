@@ -1,13 +1,6 @@
 import { supabase as browserSupabase } from '@/lib/supabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-// BUG-007 FIX: This service previously imported the browser supabase client
-// directly. When called from an API route, the browser client has no
-// authenticated session, causing RLS to reject queries or return wrong data.
-//
-// Each function below now accepts an optional `supabaseClient` parameter.
-// API routes pass their server-side authenticated client (from getAuthSupabase());
-// frontend code omits it and the browser client is used (with its valid session).
 type SClient = SupabaseClient<any, any, any>;
 function resolveClient(override?: SClient | null): SClient {
   return override || (browserSupabase as unknown as SClient);
@@ -15,11 +8,6 @@ function resolveClient(override?: SClient | null): SClient {
 // Backward-compat alias: existing function bodies
 // continue to reference `supabase` directly.
 const supabase = browserSupabase;
-// --- Client Service ---
-// Provides CRUD operations for client master records
-// Spec: Maintain client master records, addresses, contacts, tax details, payment terms, currencies
-// Used by: /api/clients/route.ts, /api/clients/[id]/route.ts
-
 export const clientService = {
   async fetchClients(filters?: {
     is_active?: boolean;
@@ -140,10 +128,10 @@ export const clientService = {
   },
 
   async getClientARSummary(clientId: string) {
-    // BUG-057 FIX: Use supabase.schema('reporting').from('v_ar_aging') instead of dot syntax
+    // ISS-017 FIX: The reporting schema exposes receivable_aging, not v_ar_aging.
     const { data, error } = await supabase
       .schema('reporting')
-      .from('v_ar_aging')
+      .from('receivable_aging')
       .select('*')
       .eq('client_id', clientId);
     if (error) throw error;
