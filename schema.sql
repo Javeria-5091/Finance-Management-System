@@ -15186,7 +15186,7 @@ CREATE POLICY "sec_events_no_update" ON "audit"."security_events" FOR UPDATE TO 
 CREATE POLICY "sec_events_select" ON "audit"."security_events" FOR SELECT TO "authenticated" USING (((EXISTS ( SELECT 1
    FROM ("core"."user_roles" "ur"
      JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
-  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("ur"."is_active" = true) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'TECH_ADMIN'::"text"])) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= CURRENT_DATE))))) AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))));
+  WHERE (("ur"."user_id" = "auth"."uid"()) AND ("ur"."is_active" = true) AND ("r"."name" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'AUDITOR'::"text", 'TECHNICAL_ADMIN'::"text"])) AND (("ur"."effective_to" IS NULL) OR ("ur"."effective_to" >= CURRENT_DATE))))) AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))));
 
 
 
@@ -15393,7 +15393,7 @@ CREATE POLICY "perm_select" ON "core"."permissions" FOR SELECT USING (("auth"."u
 ALTER TABLE "core"."permissions" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "role_manage" ON "core"."roles" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND "core"."same_org"("organization_id"))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND "core"."same_org"("organization_id")));
+CREATE POLICY "role_manage" ON "core"."roles" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id")))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (("organization_id" IS NULL) OR "core"."same_org"("organization_id"))));
 
 
 
@@ -15409,15 +15409,15 @@ ALTER TABLE "core"."roles" ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "rp_manage_org_scoped" ON "core"."role_permissions" USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
    FROM "core"."roles" "r"
-  WHERE (("r"."id" = "role_permissions"."role_id") AND "core"."same_org"("r"."organization_id")))))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
+  WHERE (("r"."id" = "role_permissions"."role_id") AND (("r"."organization_id" IS NULL) OR "core"."same_org"("r"."organization_id"))))))) WITH CHECK (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
    FROM "core"."roles" "r"
-  WHERE (("r"."id" = "role_permissions"."role_id") AND "core"."same_org"("r"."organization_id"))))));
+  WHERE (("r"."id" = "role_permissions"."role_id") AND (("r"."organization_id" IS NULL) OR "core"."same_org"("r"."organization_id")))))));
 
 
 
 CREATE POLICY "rp_select_org_scoped" ON "core"."role_permissions" FOR SELECT USING (("core"."has_permission"("auth"."uid"(), 'ADMIN_USERS'::"text") AND (EXISTS ( SELECT 1
    FROM "core"."roles" "r"
-  WHERE (("r"."id" = "role_permissions"."role_id") AND ("core"."same_org"("r"."organization_id") OR (("r"."organization_id" IS NULL) AND ("r"."is_system" = true))))))));
+  WHERE (("r"."id" = "role_permissions"."role_id") AND (("r"."organization_id" IS NULL) OR "core"."same_org"("r"."organization_id")))))));
 
 
 
@@ -17081,6 +17081,8 @@ GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
 
 
+
+
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
 GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
 
@@ -17134,7 +17136,6 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
-
 
 
 
@@ -18266,7 +18267,6 @@ GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated"
 
 
 
-
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "service_role";
 
@@ -18313,4 +18313,3 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
-
