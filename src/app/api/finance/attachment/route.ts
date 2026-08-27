@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requirePermission } from '@/lib/api-auth';
 import { getAuthSupabase } from '@/lib/api-auth';
-import { supabase } from '@/lib/supabase';
 
 // P0: Private attachments with file hash duplicate detection + corrupted file rejection
 

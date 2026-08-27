@@ -1,38 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAuthUser, checkApprovalLimitAsync } from '@/lib/api-auth';
-import { createServerClient } from '@supabase/ssr';
-import { cookies } from 'next/headers';
+import { getAuthUser, getAuthSupabase, checkApprovalLimitAsync } from '@/lib/api-auth';
 import { workflowActionSchema, validateBody } from '@/lib/validations';
  
-function db() {
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll: async () => (await cookies()).getAll(),
-        setAll: async (cookiesToSet: any[]) => {  
-          try {
-            const cookieStore = await cookies();
-            cookiesToSet.forEach(({ name, value, options }: any) =>
-              cookieStore.set(name, value, options)
-            );
-          } catch {
-            // Server Component — read-only cookies
-          }
-        }
-      }
-    }
-  );
-}
- 
-// P0 ADDED: budget module with approval workflow
-// BUG-008 FIX: `periodDateField` (and optionally `periodIdField`) let this
-// route resolve the accounting period a record's transition affects, so
-// period-lock can be enforced generically across modules (see
-// assertPeriodOpenForTransition below). `budget` intentionally has no
-// period field — budgets are not GL postings and are not subject to
-// accounting period lock in the specification.
 const MODULES: Record<string, {
   table: string; permPrefix: string; amountField: string; creatorField: string;
   periodIdField?: string; periodDateField?: string;
@@ -73,14 +42,6 @@ const MODULES: Record<string, {
       reopen:  { from: ['REJECTED'], perm: 'INVOICE_UPDATE' },
     },
   },
-  // BUG-025 FIX (High): this module previously used the EXPENSE_* / APPROVE_EXPENSE
-  // permission codes for vendor bill transitions. PermissionContext.tsx defines
-  // (and seeds every role's fallback permissions with) dedicated
-  // VENDOR_BILL_UPDATE / APPROVE_VENDOR_BILL codes for exactly this module — using
-  // EXPENSE_* instead meant a user granted only expense permissions (but not
-  // vendor-bill permissions) could submit/verify/approve/reverse vendor bills, and
-  // a user granted only vendor-bill permissions could not, contradicting whatever
-  // scoped access an admin configured for either resource.
   vendor_bill: {
     table: 'vendor_bills', permPrefix: 'VENDOR_BILL', amountField: 'total_amount', creatorField: 'created_by',
     periodDateField: 'bill_date',
@@ -105,7 +66,6 @@ const MODULES: Record<string, {
       reopen:  { from: ['REJECTED'], perm: 'JOURNAL_UPDATE' },
     },
   },
-  // P0 NEW: Budget approval workflow
   budget: {
     table: 'finance.budgets', permPrefix: 'BUDGET', amountField: 'total_amount', creatorField: 'submitted_by',
     transitions: {
@@ -117,33 +77,13 @@ const MODULES: Record<string, {
   },
 };
 
-// BUG-008 FIX (period-lock enforcement, CRITICAL/HIGH): Spec 4.3 requires
-// "Closed periods reject new or changed postings" and Spec 15.4 blocks
-// production if approval limits/period locks "can be bypassed". Previously
-// this route enforced NOTHING about accounting period status — a record
-// could be approved (queuing it for GL posting) or reversed (which changes
-// its status directly, with no separate posting-route check at all) even
-// while its accounting period was SOFT_CLOSED or HARD_CLOSED.
-//
-// The dedicated post-* routes (post-expense, post-income, post-invoice,
-// post-vendor-bill) already require *some* OPEN period to exist for the org
-// before they will post — but they run strictly after this workflow route
-// has already moved the record to APPROVED, and the 'reverse' transition
-// changes financial status directly through this route with no posting
-// step at all. This adds the missing period check at the workflow layer,
-// resolving the specific period that governs the record (by its
-// period_id if the table has one, else by looking up the period that
-// contains its transaction date) and rejecting the transition if that
-// period is not OPEN.
 async function assertPeriodOpenForTransition(
-  supabase: ReturnType<typeof db>,
+  supabase: any,
   config: (typeof MODULES)[string],
   record: Record<string, any>,
   orgId: string | null,
   action: string
 ): Promise<{ error: string } | null> {
-  // Only postings/reversals are period-sensitive; submit/verify/reject/
-  // reopen/cancel do not touch the ledger.
   if (action !== 'approve' && action !== 'reverse') return null;
   if (!config.periodDateField && !config.periodIdField) return null;
   if (!orgId) return { error: 'Organization ID not found' };
@@ -181,7 +121,7 @@ async function assertPeriodOpenForTransition(
 }
  
 export async function POST(req: NextRequest) {
-  const supabase = db();
+  const { supabase } = await getAuthSupabase(req);
   const auth = await getAuthUser();
   if (auth instanceof NextResponse) return auth;
  
@@ -229,14 +169,6 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: `Maker-checker violation: You cannot ${action} your own ${module.replace('_', ' ')}.` }, { status: 403 });
     }
  
-    // Amount limit
-    // BUG-014 FIX: now resolved from the configurable core.approval_limits
-    // table (per-user override, then per-role limit for this
-    // transaction_type), falling back to the hardcoded defaults only if
-    // nothing is configured. `config.permPrefix` (EXPENSE / INCOME /
-    // INVOICE / VENDOR_BILL / JOURNAL / BUDGET) is used as the
-    // transaction_type key, matching the module groupings already used for
-    // permission codes in this same file.
     if (action === 'approve') {
       const amount = Number(record[config.amountField]) || 0;
       const limitCheck = await checkApprovalLimitAsync(

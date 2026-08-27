@@ -7,18 +7,6 @@ import {
   getBudgetPolicy,
   type BudgetPolicyConfig,
 } from '@/services/budget-check.service';
-import { supabase } from '@/lib/supabase';
- 
-// ─── POST: Check budget before posting a transaction ───
-// Spec 5.4: "Warn or block transactions that exceed budget based on configurable policy."
-// Spec 13.4: "Budget threshold reached → Project Manager, HOD, Finance, CEO according to severity"
-//
-// This endpoint can be called:
-//   (a) Proactively by the frontend before submitting an expense/bill
-//   (b) Automatically by posting routes (post-expense, post-vendor-bill) before GL posting
-//
-// Query params:
-//   ?force_allow=true  — bypass HARD_BLOCK (CEO/Finance Head override, requires APPROVE_EXPENSE)
  
 export async function POST(req: NextRequest) {
   // BUG-014 FIX: budget checks must always be live; never allow route-level caching across fiscal periods.

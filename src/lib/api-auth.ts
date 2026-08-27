@@ -78,16 +78,32 @@ export async function getAuthUser(): Promise<AuthResult | NextResponse> {
   let role = 'VIEWER';
   let orgId: string | null = null;
 
-  // Method 1: RPC
-  try {
-    const { data: rpcData } = await supabase.rpc('get_my_user_roles');
+  // Method 1: RPC (retry once on transient failure; always log so a
+  // systemic RPC failure — e.g. the function being unavailable — is
+  // visible instead of silently degrading every request to the
+  // profiles.role fallback below).
+  let rpcData: any = null;
+  let rpcError: any = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await supabase.rpc('get_my_user_roles');
+      rpcData = result.data;
+      rpcError = result.error;
+    } catch (thrown) {
+      rpcError = thrown;
+    }
+    if (!rpcError) break;
+  }
+  if (rpcError) {
+    console.error('[api-auth] get_my_user_roles RPC failed for user', session.user.id, '- falling back to profiles.role:', rpcError);
+  } else {
     const arr = Array.isArray(rpcData) ? rpcData : rpcData ? [rpcData] : [];
     const today = new Date().toISOString().split('T')[0];
     const active = arr
       .filter((r: any) => r.is_active !== false && r.effective_from <= today && (!r.effective_to || r.effective_to >= today))
       .sort((a: any, b: any) => (b.effective_from || '').localeCompare(a.effective_from || ''))[0];
     if (active) role = active.role || active.role_name || role;
-  } catch {}
+  }
 
   // Always fetch the profile for organization context. Role resolution may have
   // succeeded through the role RPC, but organization_id still comes from the
@@ -144,15 +160,7 @@ export async function requirePermission(requiredPerm: string): Promise<AuthResul
   const auth = await getAuthUser();
   if (auth instanceof NextResponse) return auth; // 401
 
-  // ─── SECURITY FIX (BUG-002 / Spec Appendix A) ───
-  // Only CEO has an unconditional permission bypass. Technical Admin ("Admin")
-  // is NOT a finance role — per Appendix A it has "None" for finance-data
-  // resources and only "Read security" for audit logs. Admin must go through
-  // the same permission-table lookup as every other non-CEO role below, so
-  // that its actual rights are whatever is granted (config-driven) rather
-  // than hardcoded full access. Previously `auth.role === 'Admin'` was
-  // treated identically to CEO here, letting a technical administrator
-  // create/approve/post financial transactions with no configured permission.
+
   if (auth.role === 'CEO') return auth;
 
   // Check against permission table via RPC
@@ -194,36 +202,6 @@ export function enforceMakerChecker(creatorId: string, approverId: string): bool
   return creatorId !== approverId;
 }
 
-// ---------- Approval amount limit check ----------
-// SECURITY FIX (BUG-009 / Spec Appendix A): AUDITOR must have "No create,
-// edit, approve, or post" authority — it is a read-only role. The previous
-// AUDITOR: 500000 entry granted auditors a real approval limit, letting them
-// approve transactions up to that amount. AUDITOR is intentionally absent
-// from this table now, so it falls through to the `?? 0` default below and
-// no amount can be approved by an auditor. (This is defense-in-depth on top
-// of the permission-table check in requirePermission()/workflow route,
-// which should already deny AUDITOR the APPROVE_* permission in the first
-// place — but an approval-limit table that still granted 500k was a real
-// bypass if that permission check were ever misconfigured.)
-// BUG-014 FIX (High): approval limits were hardcoded in this file rather
-// than read from the configurable core.approval_limits table that Spec 7.3
-// / 10.1 requires ("Approval limits are hardcoded in both the API layer and
-// the frontend rather than fetched from the configurable approval_limits
-// table, making limit changes require code deployment"). core.approval_limits
-// already exists (role_id/user_id, transaction_type, currency, max_amount,
-// scope, effective_from/effective_to — see P1_013_core_permission_backbone.sql)
-// but nothing queried it. This adds a DB-backed async version.
-//
-// checkApprovalLimitAsync() is the new source of truth: it looks up
-// core.approval_limits for (1) a user-specific override for this
-// transaction_type/currency, else (2) the calling role's limit for this
-// transaction_type/currency, both filtered to rows whose effective date
-// range covers today. The hardcoded synchronous checkApprovalLimit() below
-// is kept ONLY as the final fallback when no row is configured for a role
-// at all (e.g. a fresh install before an admin has configured limits),
-// so behavior does not regress to "deny everything" the moment this ships
-// — but as soon as an admin configures core.approval_limits for a role,
-// that configured value takes over with no code deployment, per spec.
 export async function checkApprovalLimitAsync(
   supabase: any,
   orgId: string | null,
@@ -449,17 +427,7 @@ export async function isSqlSafe(sql: string): Promise<{ safe: boolean; reason: s
   return { safe: true, reason: '' };
 }
 
-// ---------- Spec 9.5: Inject Scope Programmatically ----------
-// MERGE NOTE: one source version removed this block entirely, claiming it
-// was dead code and that scope-wrapping had fully moved into a DB function
-// (execute_ai_readonly_query, per P1_006_ai_function.sql v2). That may be
-// true going forward — but it was kept here because we don't know whether
-// any OTHER route file in this codebase still imports injectScope/
-// validateUuid from this module. Deleting it blind is exactly what broke
-// your build. Recommended next step: grep the codebase for
-// `injectScope(` and `validateUuid(` — if nothing outside this file calls
-// them anymore, it's then safe to delete this whole block and rely purely
-// on the DB function.
+
 function isValidUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -579,18 +547,7 @@ export async function checkOrgAiDailyLimit(
   }
 }
 
-// ---------- recordAiUsage — Spec 9.11 cost control ----------
-// checkAiDailyLimit()/checkOrgAiDailyLimit() only ever READ
-// ai.ai_user_cost_tracking. Something must WRITE to it too, or
-// request_count/estimated_cost stay at 0 forever and the limits never
-// trigger. Calls the atomic ai.increment_usage() Postgres function
-// (P1_008_ai_hardening_fixes.sql) once per AI request, after the model
-// call(s) complete, so concurrent requests can't race/undercount.
-//
-// Call this from the AI gateway route exactly once per request, on every
-// exit path (success, refused, clarify, denied, blocked, error) — every
-// path still consumes at least one model call and should count against
-// the daily limit.
+
 const DEFAULT_COST_PER_1K_TOKENS = 0.0006; // rough Groq Llama 3.3 70B blended rate; override with actual cost_per_1k_tokens from ai_model_registry where known
 
 export async function recordAiUsage(

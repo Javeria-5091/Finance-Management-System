@@ -137,6 +137,46 @@
 --   blocks will fail with a "fy_no_overlapping_ranges" exclusion
 --   constraint violation (the rest of the file re-runs safely).
 --   **Run seed_data.sql exactly once, right after a fresh schema.sql.**
+--
+-- =============================================================================
+-- CHANGELOG (2026-08-25 update -- 2 new migration files added upstream)
+-- =============================================================================
+--   Two new migration files were added since the previous version of this
+--   seed file: P1_066b_pre_submission_fixes.sql and
+--   P1_069_fix_role_management_rls_and_tech_admin_duplicate.sql (a third
+--   new file, P1_068_payment_receipt_client_relationship_fixed.sql, was
+--   checked and contains no seed data at all -- schema/RLS/grants only --
+--   so nothing from it was added here). No existing migration file was
+--   changed or removed. What was added to this seed file as a result:
+--
+--   - From P1_066b: 3 UPDATE statements -- a legacy public.payments
+--     organization_id backfill, an invoice status case-normalization
+--     ('Paid' -> 'PAID'), and a targeted-by-id invoice status correction
+--     ('Pending' -> 'VOID' for 2 specific abandoned production invoices).
+--     All three are historical, production-specific data corrections; on
+--     a fresh/empty test database they affect 0 rows (no-op), since none
+--     of those source rows exist here. Included anyway for completeness/
+--     fidelity, matching the same policy already used for the P1_048/
+--     P1_059/P1_065c backfills described above.
+--
+--   - From P1_069: 4 statements, and this one genuinely matters for THIS
+--     seed file, not just production:
+--       1) A DO block (STEP 3) that merges a duplicate "TECH_ADMIN" role
+--          into "TECHNICAL_ADMIN" and deletes the duplicate. This isn't
+--          just a production cleanup -- P1_064_database_audit_fixes.sql
+--          (already part of this seed, seeded earlier in the file) itself
+--          inserts a "TECH_ADMIN" row, so replaying this seed_data.sql
+--          from scratch recreates the exact duplicate this block is
+--          designed to clean up. Keeping this block, positioned after
+--          P1_064's insert (same order as the real migrations), is what
+--          makes the two consistent.
+--       2-4) Three INSERT INTO core.role_permissions statements that seed
+--          permissions for the AUDITOR, Admin/Administrator, and
+--          TECHNICAL_ADMIN roles (previously had zero permissions).
+--   Verified: re-ran the full schema.sql + seed_data.sql cycle against a
+--   real local Postgres 16 instance after adding these -- 0 errors, and
+--   confirmed core.roles ends up with no TECH_ADMIN row and no duplicate
+--   TECHNICAL_ADMIN row.
 -- =============================================================================
 
 
@@ -192,7 +232,7 @@ ALTER TABLE finance.taxpayer_profile ALTER COLUMN organization_id SET DEFAULT co
 -- SOURCE: supabase/migrations/P0/phase_0/.sql
 -- =============================================================================
 
--- Existing users ke liye email backfill (one-time, doc1 mein tha)
+-- Email backfill for existing users (one-time, was in doc1)
 UPDATE public.profiles p
 SET email = u.email
 FROM auth.users u
@@ -763,7 +803,7 @@ VALUES
   ((SELECT id FROM core.roles WHERE name = 'EMPLOYEE'), (SELECT id FROM core.permissions WHERE code = 'INCOME_READ'), 'ALL')
 ON CONFLICT (role_id, permission_id, effective_from) DO NOTHING;
 
--- 6. PROFILES TABLE SYNC (Fallback ke liye)
+-- 6. PROFILES TABLE SYNC (as a fallback)
 UPDATE public.profiles p
 SET role = r.name
 FROM core.user_roles ur
@@ -2603,6 +2643,155 @@ BEGIN
         RAISE NOTICE 'invoices_journal_entry_id_fkey: no orphaned references found.';
     END IF;
 END $$;
+
+
+-- =============================================================================
+-- SOURCE: supabase/migrations/P1/P1_066b_pre_submission_fixes.sql
+-- =============================================================================
+
+-- --------------------------------------------------------------------------
+-- 2) Legacy public.payments: backfill and enforce organization_id.
+-- --------------------------------------------------------------------------
+UPDATE public.payments p
+SET organization_id = pr.organization_id
+FROM public.profiles pr
+WHERE p.organization_id IS NULL
+  AND pr.user_id = p.user_id
+  AND pr.organization_id IS NOT NULL;
+
+-- --------------------------------------------------------------------------
+-- 9) Invoice status workflow constraint must allow the application's actual
+-- maker-checker lifecycle.
+-- --------------------------------------------------------------------------
+-- Pre-fix (2026-08-25): legacy mixed-case status values found via manual
+-- data audit on this database. The original constraint was itself installed
+-- NOT VALID and never validated, so these rows predate any enforcement.
+--   'Paid'    (2 rows) -> unambiguous case-normalization -> 'PAID'
+--   'Pending' (2 rows, INV-2026-6047 / INV-2026-6727) -> both have
+--     total_amount = 0.00 and issued_at IS NULL (never issued, no line
+--     items) -> confirmed abandoned/test invoices -> 'VOID'
+-- Targeted by id for the VOID case so this statement can never touch any
+-- other row, including a future legitimate 'Pending' invoice.
+UPDATE public.invoices
+SET status = 'PAID'
+WHERE status = 'Paid';
+
+UPDATE public.invoices
+SET status = 'VOID',
+    void_reason = COALESCE(void_reason, 'Migration 2026-08-25: abandoned draft, total_amount 0.00, never issued, legacy status "Pending" predates invoices_status_check enforcement'),
+    voided_at = COALESCE(voided_at, now())
+WHERE id IN ('ffc57dd2-74d1-43bb-87fd-d13abcce7885', '4a2a7e69-7287-4bfc-8288-8eb5d7766935')
+  AND status = 'Pending';
+
+
+-- =============================================================================
+-- SOURCE: supabase/migrations/P1/P1_069_fix_role_management_rls_and_tech_admin_duplicate.sql
+-- =============================================================================
+
+-- ---------------------------------------------------------------------
+-- STEP 3: Merge TECH_ADMIN into TECHNICAL_ADMIN
+-- ---------------------------------------------------------------------
+DO $$
+DECLARE
+  v_keep_id UUID;
+  v_dup_id UUID;
+BEGIN
+  SELECT id INTO v_keep_id FROM core.roles WHERE name = 'TECHNICAL_ADMIN';
+  SELECT id INTO v_dup_id  FROM core.roles WHERE name = 'TECH_ADMIN';
+
+  IF v_dup_id IS NOT NULL AND v_keep_id IS NOT NULL THEN
+
+    -- Move any user assignments off the duplicate (defensive; expected none)
+    UPDATE core.user_roles ur
+    SET role_id = v_keep_id
+    WHERE ur.role_id = v_dup_id
+      AND NOT EXISTS (
+        SELECT 1 FROM core.user_roles ur2
+        WHERE ur2.user_id = ur.user_id
+          AND ur2.role_id = v_keep_id
+          AND ur2.effective_from = ur.effective_from
+      );
+    DELETE FROM core.user_roles WHERE role_id = v_dup_id;
+
+    -- Move any permission grants off the duplicate (defensive; expected none)
+    UPDATE core.role_permissions rp
+    SET role_id = v_keep_id
+    WHERE rp.role_id = v_dup_id
+      AND NOT EXISTS (
+        SELECT 1 FROM core.role_permissions rp2
+        WHERE rp2.role_id = v_keep_id
+          AND rp2.permission_id = rp.permission_id
+          AND rp2.effective_from = rp.effective_from
+      );
+    DELETE FROM core.role_permissions WHERE role_id = v_dup_id;
+
+    -- Finally remove the duplicate role itself
+    DELETE FROM core.roles WHERE id = v_dup_id;
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------
+-- STEP 4: Seed sensible permissions for the roles that currently have
+-- zero permissions (Auditor, Administrator, Technical Admin), per
+-- Section 7.1 / Appendix A of the implementation spec. Idempotent.
+-- ---------------------------------------------------------------------
+
+-- NOTE ON SAFETY: each block below CROSS JOINs core.roles r (filtered to
+-- one exact role name) with core.permissions p, instead of using a bare
+-- scalar subquery for role_id. If the named role were ever missing, a
+-- scalar-subquery version would insert NULL role_ids and abort this
+-- entire migration with a NOT NULL violation (rolling back the RLS fix
+-- above too). The CROSS JOIN form simply inserts zero rows in that case,
+-- so this migration can never be broken by a missing role.
+
+-- AUDITOR: read-only across every finance module + audit log + export,
+-- never create/update/delete/approve/post.
+INSERT INTO core.role_permissions (role_id, permission_id, data_scope)
+SELECT r.id, p.id, 'ALL'
+FROM core.roles r
+CROSS JOIN core.permissions p
+WHERE r.name = 'AUDITOR'
+  AND (p.action = 'read' OR p.code IN ('ADMIN_AUDIT', 'REPORT_EXPORT'))
+ON CONFLICT (role_id, permission_id, effective_from) DO NOTHING;
+
+-- ADMINISTRATOR (Admin, legacy code-referenced role, level 95):
+-- user/role/config administration + read-only oversight of finance data.
+-- NOTE: this role is not one of the spec's named roles (Appendix A has
+-- no "Administrator" row) -- it exists only because application code
+-- checks for it directly (e.g. MFA admin read, create_user_by_admin).
+-- Recommend the CEO confirm whether this legacy role should keep being
+-- used at all, or whether those code paths should be moved onto
+-- CEO/Finance Head instead. Until then, giving it admin+read keeps the
+-- code paths that already check for it functional without handing it
+-- transaction approve/post rights that belong to CEO/Finance Head.
+INSERT INTO core.role_permissions (role_id, permission_id, data_scope)
+SELECT r.id, p.id, 'ALL'
+FROM core.roles r
+CROSS JOIN core.permissions p
+WHERE r.name = 'Admin'
+  AND (
+    p.code IN ('ADMIN_USERS', 'ADMIN_AUDIT', 'ADMIN_CONFIG', 'SETTINGS_MANAGE', 'SETTINGS_READ')
+    OR p.action = 'read'
+  )
+ON CONFLICT (role_id, permission_id, effective_from) DO NOTHING;
+
+-- TECHNICAL ADMIN (TECHNICAL_ADMIN, level 15): per spec 7.1 this role
+-- must NOT get automatic finance-data access. Its real rights
+-- (deployments, monitoring, user support) live outside this
+-- permission catalog. Only SETTINGS_READ is granted here so a
+-- technical/support user can see organization configuration while
+-- troubleshooting; deliberately no ADMIN_USERS, no ADMIN_AUDIT, no
+-- finance module permission. A near-empty count for this role is
+-- CORRECT by design, not a bug -- do not bulk-grant more without a
+-- deliberate CEO/Finance Head decision, or it will violate the spec's
+-- "no automatic right to read finance data" rule for this role.
+INSERT INTO core.role_permissions (role_id, permission_id, data_scope)
+SELECT r.id, p.id, 'ALL'
+FROM core.roles r
+CROSS JOIN core.permissions p
+WHERE r.name = 'TECHNICAL_ADMIN'
+  AND p.code = 'SETTINGS_READ'
+ON CONFLICT (role_id, permission_id, effective_from) DO NOTHING;
 
 
 -- =============================================================================
