@@ -10,7 +10,7 @@ import { logAction } from "@/lib/logAction";
 import toast from "react-hot-toast";
 
 export default function ProjectsPage() {
-  const { user, hasPermission: legacyPermission } = useAuth();
+  const { user } = useAuth();
   const { hasPermission } = usePermissions();
   const [projects, setProjects] = useState<Project[]>([]);
   const [budgets, setBudgets] = useState<Budget[]>([]);
@@ -22,7 +22,11 @@ export default function ProjectsPage() {
   const [editingData, setEditingData] = useState<Project | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  const canModify = hasPermission("PROJECT_CREATE") || legacyPermission("can_create_project");
+  const canRead = hasPermission("PROJECT_READ");
+  const canCreate = hasPermission("PROJECT_CREATE");
+  const canUpdate = hasPermission("PROJECT_UPDATE");
+  const canDelete = hasPermission("PROJECT_DELETE");
+  const canModify = canCreate || canUpdate || canDelete;
 
   const fetchProjects = useCallback(async () => {
     if (!user) return;
@@ -62,6 +66,14 @@ export default function ProjectsPage() {
   }
 
     async function handleSubmit(data: ProjectFormData) {
+    if (editingData && !canUpdate) {
+      toast.error("You do not have permission to update projects.");
+      return;
+    }
+    if (!editingData && !canCreate) {
+      toast.error("You do not have permission to create projects.");
+      return;
+    }
     setFormLoading(true);
     const safeData = { ...data, end_date: data.end_date === "" ? null : data.end_date };
     let error = null;
@@ -83,6 +95,10 @@ export default function ProjectsPage() {
 
   async function handleDelete() {
     if (!deleteId) return;
+    if (!canDelete) {
+      toast.error("You do not have permission to delete projects.");
+      return;
+    }
     const project = projects.find(p => p.id === deleteId);
     const { error } = await supabase.from("projects").delete().eq("id", deleteId);
     if (error) {
@@ -104,6 +120,15 @@ export default function ProjectsPage() {
     return new Intl.NumberFormat("en-PK", { style: "currency", currency: "PKR", minimumFractionDigits: 0 }).format(amount);
   }
 
+  if (!canRead) {
+    return (
+      <div className="p-8 text-center">
+        <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Access denied</h2>
+        <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">You do not have permission to view projects.</p>
+      </div>
+    );
+  }
+
   return (
     <div>
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
@@ -111,7 +136,7 @@ export default function ProjectsPage() {
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Projects</h2>
           <p className="text-gray-500 dark:text-gray-400 text-sm">Manage projects and track budget utilization</p>
         </div>
-        {canModify && (
+        {canCreate && (
           <button onClick={() => { setEditingData(null); setShowForm(true); }} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg font-medium transition-colors w-fit shadow-sm hover:shadow-md">
             <Plus size={18} /> Add Project
           </button>
@@ -135,12 +160,12 @@ export default function ProjectsPage() {
                   </div>
                   <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Client: {p.client_name}</p>
                 </div>
-                {canModify && (
+                {(canUpdate || canDelete) ? (
                   <div className="flex gap-2 ml-4">
-                    <button onClick={() => { setEditingData(p); setShowForm(true); }} className="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded"><Pencil size={16} /></button>
-                    <button onClick={() => setDeleteId(p.id)} className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 rounded"><Trash2 size={16} /></button>
+                    {canUpdate && <button onClick={() => { setEditingData(p); setShowForm(true); }} className="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded"><Pencil size={16} /></button>}
+                    {canDelete && <button onClick={() => setDeleteId(p.id)} className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 rounded"><Trash2 size={16} /></button>}
                   </div>
-                )}
+                ) : null}
               </div>
 
               {/* BUDGET STATS SECTION */}

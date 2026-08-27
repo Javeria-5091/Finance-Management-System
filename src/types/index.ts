@@ -153,30 +153,9 @@ export const INVOICE_STATUSES = [
 ] as const;
 
 // ==========================================
-// 5. AUDIT LOG TYPES (UPDATED FOR SPEC 8.1)
-// ==========================================
-export interface AuditLog {
-  id: string;
-  user_id: string | null;
-  user_email?: string | null;
-  role_snapshot?: string | null;      // Spec 8.1: Role at the time of action
-  action: string;                     // e.g., 'CREATE', 'APPROVE', 'AI_QUERY'
-  entity_type: string;                // e.g., 'expense', 'invoice', 'ai_tool'
-  entity_id: string | null;
-  severity: 'INFO' | 'WARNING' | 'CRITICAL';
-  before_values?: Record<string, any> | null;
-  after_values?: Record<string, any> | null;
-  reason?: string | null;
-  ip_address?: string | null;
-  ai_metadata?: {                     // Spec 8.1: AI specific fields
-    question?: string;
-    tool_name?: string;
-    model?: string;
-    latency_ms?: number;
-    refusal_reason?: string;
-  } | null;
-  created_at: string;
-}
+// 5. AUDIT LOG TYPES
+// Canonical definition lives in accounting.types.ts.
+export type { AuditLog } from "./accounting.types";
 
 // ==========================================
 // 6. NOTIFICATION TYPES

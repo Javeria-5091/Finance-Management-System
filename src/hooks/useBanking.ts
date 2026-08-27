@@ -33,6 +33,23 @@ export const useAssetAccounts = () => {
   });
 };
 
+
+export const useDeactivateAccount = () => {
+  const qc = useQueryClient();
+  const orgId = useOrgId();
+
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => {
+      if (!orgId) throw new Error('Organization context is required');
+      return bankService.deactivateFinancialAccount(id, orgId);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['financial_accounts'] });
+      qc.invalidateQueries({ queryKey: ['reconciliation_summary'] });
+    },
+  });
+};
+
 export const useCreateAccount = () => {
   const qc = useQueryClient();
   return useMutation({

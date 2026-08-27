@@ -9,7 +9,6 @@ import StatusActions from "@/components/finance/StatusActions";
 import ReasonModal from "@/components/finance/ReasonModal";
 import { Plus, AlertTriangle } from "lucide-react";
 import { callWorkflow, postJournal } from "@/lib/workflow";
-import { logAction } from "@/lib/logAction";
 import toast from "react-hot-toast";
 
 const STATUS_STYLES: Record<string, string> = {

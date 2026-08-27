@@ -16,7 +16,7 @@ import { NextRequest, NextResponse } from 'next/server';
 const PUBLIC_ROUTES = ['/', '/login', '/signup'];
 
 // API routes that handle their own auth
-const API_AUTH_ROUTES = ['/api/auth/', '/api/chat/'];
+const API_AUTH_ROUTES = ['/api/auth/'];
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;

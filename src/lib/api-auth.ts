@@ -75,46 +75,88 @@ export async function getAuthUser(): Promise<AuthResult | NextResponse> {
   }
 
   // Fetch role from profiles (fallback chain)
-  let role = 'VIEWER';
+  let role: string | null = null;
   let orgId: string | null = null;
+  let roleRpcError: unknown = null;
 
-  // Method 1: RPC (retry once on transient failure; always log so a
-  // systemic RPC failure — e.g. the function being unavailable — is
-  // visible instead of silently degrading every request to the
-  // profiles.role fallback below).
+  // Method 1: resolve the active role from the RPC. Retry once for transient
+  // failures, but NEVER silently convert an unresolved role into VIEWER.
   let rpcData: any = null;
-  let rpcError: any = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const result = await supabase.rpc('get_my_user_roles');
       rpcData = result.data;
-      rpcError = result.error;
+      roleRpcError = result.error ?? null;
     } catch (thrown) {
-      rpcError = thrown;
+      roleRpcError = thrown;
     }
-    if (!rpcError) break;
+
+    if (!roleRpcError) break;
+    if (attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
   }
-  if (rpcError) {
-    console.error('[api-auth] get_my_user_roles RPC failed for user', session.user.id, '- falling back to profiles.role:', rpcError);
+
+  if (roleRpcError) {
+    console.error('[api-auth] get_my_user_roles failed after retry', {
+      userId: session.user.id,
+      error: roleRpcError,
+    });
   } else {
     const arr = Array.isArray(rpcData) ? rpcData : rpcData ? [rpcData] : [];
     const today = new Date().toISOString().split('T')[0];
     const active = arr
-      .filter((r: any) => r.is_active !== false && r.effective_from <= today && (!r.effective_to || r.effective_to >= today))
-      .sort((a: any, b: any) => (b.effective_from || '').localeCompare(a.effective_from || ''))[0];
-    if (active) role = active.role || active.role_name || role;
+      .filter((r: any) =>
+        r?.is_active !== false &&
+        r?.effective_from <= today &&
+        (!r?.effective_to || r.effective_to >= today)
+      )
+      .sort((a: any, b: any) =>
+        (b?.effective_from || '').localeCompare(a?.effective_from || '')
+      )[0];
+
+    if (active) {
+      role = active.role || active.role_name || null;
+    }
   }
 
-  // Always fetch the profile for organization context. Role resolution may have
-  // succeeded through the role RPC, but organization_id still comes from the
-  // user's tenant profile and must never be left null for privileged roles.
-  const { data: profile } = await supabase
+  // Always fetch the profile for tenant context and as an explicit role
+  // recovery source. This is NOT a silent VIEWER fallback: if both the role
+  // RPC and profile role are unavailable, the request fails closed with 503.
+  const { data: profile, error: profileError } = await supabase
     .from('profiles')
     .select('role, organization_id')
     .eq('user_id', session.user.id)
     .maybeSingle();
-  if (profile?.role && role === 'VIEWER') role = profile.role;
+
+  if (profileError) {
+    console.error('[api-auth] profile lookup failed', {
+      userId: session.user.id,
+      error: profileError,
+    });
+  }
+
+  if (!role && profile?.role) {
+    role = profile.role === 'Admin' ? 'CEO' : profile.role;
+    console.warn('[api-auth] using explicit profiles.role fallback because role RPC was unavailable', {
+      userId: session.user.id,
+      role,
+    });
+  }
+
   orgId = profile?.organization_id || null;
+
+  if (!role) {
+    console.error('[api-auth] role resolution failed closed', {
+      userId: session.user.id,
+      rpcError: roleRpcError,
+      profileError,
+    });
+    return NextResponse.json(
+      { error: 'Unable to resolve user role. Please try again.' },
+      { status: 503 }
+    );
+  }
 
   return { userId: session.user.id, email: session.user.email ?? null, role, orgId };
 }
@@ -164,36 +206,43 @@ export async function requirePermission(requiredPerm: string): Promise<AuthResul
 
   if (auth.role === 'CEO') return auth;
 
-  // Check against permission table via RPC
+  // Use the same authenticated request client and fail closed on permission
+  // lookup errors. Do not swallow RPC failures because that makes RBAC
+  // incidents invisible during outages or migrations.
+  const { supabase } = await getAuthSupabase();
   try {
-    const cookieStore = await cookies();
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          getAll: () => cookieStore.getAll(),
-          setAll(cookiesToSet: any[]) {
-            try {
-              cookiesToSet.forEach(({ name, value, options }: any) =>
-                cookieStore.set(name, value, options)
-              );
-            } catch {
-              // Server Component — read-only cookies
-            }
-          },
-        },
-      }
-    );
+    const { data: perms, error: permissionError } = await supabase.rpc('get_my_permissions');
 
-    // Try RPC first
-    const { data: perms } = await supabase.rpc('get_my_permissions');
+    if (permissionError) {
+      console.error('[api-auth] get_my_permissions failed', {
+        userId: auth.userId,
+        requiredPerm,
+        error: permissionError,
+      });
+      return NextResponse.json(
+        { error: 'Permission service temporarily unavailable' },
+        { status: 503 }
+      );
+    }
+
     if (perms) {
       const permObj = !Array.isArray(perms) && typeof perms === 'object' ? perms : null;
       if (permObj && permObj[requiredPerm] === true) return auth;
-      if (Array.isArray(perms) && perms.some((p: any) => (p.permission_code || p.perm_code || p.code) === requiredPerm)) return auth;
+      if (Array.isArray(perms) && perms.some((p: any) =>
+        (p?.permission_code || p?.perm_code || p?.code) === requiredPerm
+      )) return auth;
     }
-  } catch {}
+  } catch (error) {
+    console.error('[api-auth] get_my_permissions exception', {
+      userId: auth.userId,
+      requiredPerm,
+      error,
+    });
+    return NextResponse.json(
+      { error: 'Permission service temporarily unavailable' },
+      { status: 503 }
+    );
+  }
 
   return NextResponse.json({ error: 'Insufficient permissions' }, { status: 403 });
 }

@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
+import { usePermissions } from "@/context/PermissionContext";
 import { useTheme } from "@/context/ThemeContext"; 
 import { Project, Income, Expense, Budget } from "@/types"; 
 import { StatCard } from "../shared/StatCard";
@@ -17,7 +18,8 @@ import { TrendingUp, TrendingDown, DollarSign, FolderKanban, CheckCircle, Clock,
 import { LucideIcon } from "lucide-react";
 
 export function PMDashboard() {
-  const { user } = useAuth(); 
+  const { user, profile } = useAuth();
+  const { hasPermission, isLoading: permissionsLoading } = usePermissions();
   const { isDark } = useTheme(); 
   const [projects, setProjects] = useState<Project[]>([]);
   const [incomes, setIncomes] = useState<Income[]>([]);
@@ -26,20 +28,59 @@ export function PMDashboard() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || permissionsLoading) return;
+
+    let cancelled = false;
+
     async function fetchData() {
-      const [projRes, incRes, expRes, budRes] = await Promise.all([
-        supabase.from("projects").select("*"), supabase.from("incomes").select("*"),
-        supabase.from("expenses").select("*"), supabase.from("budgets").select("*"),
-      ]);
-      if (projRes.data) setProjects(projRes.data);
-      if (incRes.data) setIncomes(incRes.data);
-      if (expRes.data) setExpenses(expRes.data);
-      if (budRes.data) setBudgets(budRes.data);
+      setLoading(true);
+      const organizationId = profile?.organization_id;
+
+      // Never query this multi-module dashboard without an explicit tenant
+      // filter. RLS remains the final security boundary, while this filter
+      // prevents accidental unscoped reads and makes tenant isolation explicit.
+      if (!organizationId) {
+        if (!cancelled) setLoading(false);
+        return;
+      }
+
+      const canReadProjects = hasPermission('PROJECT_READ');
+      const canReadIncome = hasPermission('INCOME_READ');
+      const canReadExpenses = hasPermission('EXPENSE_READ');
+      const canReadBudgets = hasPermission('BUDGET_READ');
+
+      const requests = [
+        canReadProjects
+          ? supabase.from("projects").select("*").eq("organization_id", organizationId)
+          : Promise.resolve({ data: [], error: null }),
+        canReadIncome
+          ? supabase.from("incomes").select("*").eq("organization_id", organizationId)
+          : Promise.resolve({ data: [], error: null }),
+        canReadExpenses
+          ? supabase.from("expenses").select("*").eq("organization_id", organizationId)
+          : Promise.resolve({ data: [], error: null }),
+        canReadBudgets
+          ? supabase.from("budgets").select("*").eq("organization_id", organizationId)
+          : Promise.resolve({ data: [], error: null }),
+      ];
+
+      const [projRes, incRes, expRes, budRes] = await Promise.all(requests);
+
+      if (cancelled) return;
+      if (projRes.data) setProjects(projRes.data as Project[]);
+      if (incRes.data) setIncomes(incRes.data as Income[]);
+      if (expRes.data) setExpenses(expRes.data as Expense[]);
+      if (budRes.data) setBudgets(budRes.data as Budget[]);
       setLoading(false);
     }
-    fetchData();
-  }, [user]);
+
+    fetchData().catch((error) => {
+      console.error('[PMDashboard] data load failed', error);
+      if (!cancelled) setLoading(false);
+    });
+
+    return () => { cancelled = true; };
+  }, [user, profile?.organization_id, permissionsLoading, hasPermission]);
 
   // MATH & DATA PREP
   const totalIncome = incomes.reduce((sum, inc) => sum + inc.amount, 0);
@@ -79,6 +120,18 @@ export function PMDashboard() {
   const projectBudgetData = projects.filter(p => p.budget_id).map(proj => { const b = budgets.find(b => b.id === proj.budget_id); const s = expenses.filter(e => e.project_id === proj.id).reduce((sum, e) => sum + e.amount, 0); return { name: proj.name.length > 10 ? proj.name.substring(0, 10)+'...' : proj.name, Budget: b?.total_amount || 0, Spent: s }; });
 
   function formatCurrency(amount: number) { return new Intl.NumberFormat("en-PK", { style: "currency", currency: "PKR", minimumFractionDigits: 0 }).format(amount); }
+
+  if (permissionsLoading) return <div className="flex items-center justify-center h-64 text-gray-500">Checking permissions...</div>;
+
+  const canViewDashboard =
+    hasPermission('PROJECT_READ') ||
+    hasPermission('INCOME_READ') ||
+    hasPermission('EXPENSE_READ') ||
+    hasPermission('BUDGET_READ');
+
+  if (!canViewDashboard) {
+    return <div className="flex items-center justify-center h-64 text-gray-500">Access Denied</div>;
+  }
 
   if (loading) return <div className="flex items-center justify-center h-64 text-gray-500">Loading Analytics...</div>;
 

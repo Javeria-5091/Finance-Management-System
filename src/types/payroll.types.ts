@@ -133,16 +133,16 @@ export interface PayrollCommission {
 
 export interface PayrollDeduction {
   id: string;
-  employeeId: string;
-  deductionType: string;
+  employee_id: string;
+  deduction_type: string;
   amount: number;
   percentage?: number;
-  effectiveFrom: string;
-  effectiveTo?: string;
-  isActive: boolean;
-  notes?: string;
-  createdAt: string;
-  updatedAt: string;
+  effective_from: string;
+  effective_to?: string | null;
+  is_active: boolean;
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 // ─── Form Data Types (FIXED: added export) ───

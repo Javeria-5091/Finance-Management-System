@@ -234,7 +234,7 @@ export interface JournalEntry {
   posted_at: string | null;
 }
 
-export interface JournalLine {
+export interface AccountingJournalLine {
   id: string;
   journal_entry_id: string;
   line_number: number;
@@ -453,7 +453,7 @@ export interface CreateJournalInput {
   source_id?: string | null;
   project_id?: string | null;
   notes?: string | null;
-  lines: Omit<JournalLine, 'id' | 'journal_entry_id' | 'base_debit' | 'base_credit' | 'account_code' | 'account_name'>[];
+  lines: Omit<AccountingJournalLine, 'id' | 'journal_entry_id' | 'base_debit' | 'base_credit' | 'account_code' | 'account_name'>[];
 }
 
 // ══════════════════════════════════════════

@@ -192,15 +192,24 @@ export const updateFinancialAccount = async (id: string, payload: Partial<Financ
   return { data: data as FinancialAccount, error };
 };
 
-export const deactivateFinancialAccount = async (id: string, reason: string) => {
+export const deactivateFinancialAccount = async (id: string, orgId: string, reason: string) => {
+  const reasonText = reason.trim();
+  if (!reasonText) {
+    throw new Error('A deactivation reason is required.');
+  }
+
   const { data: existing, error: fetchError } = await db
     .from('financial_accounts')
     .select('notes')
     .eq('id', id)
+    .eq('organization_id', orgId)
+    .eq('is_active', true)
     .single();
-  if (fetchError) return { data: null, error: fetchError };
 
-  const reasonText = reason.trim();
+  if (fetchError) {
+    throw new Error(fetchError.message || 'Financial account was not found or is already inactive.');
+  }
+
   const previousNotes = typeof existing?.notes === 'string' ? existing.notes.trim() : '';
   const notes = previousNotes
     ? `${previousNotes}\nDeactivated: ${reasonText}`
@@ -208,11 +217,22 @@ export const deactivateFinancialAccount = async (id: string, reason: string) => 
 
   const { data, error } = await db
     .from('financial_accounts')
-    .update({ is_active: false, notes, updated_at: new Date().toISOString() })
+    .update({
+      is_active: false,
+      notes,
+      updated_at: new Date().toISOString(),
+    })
     .eq('id', id)
+    .eq('organization_id', orgId)
+    .eq('is_active', true)
     .select()
     .single();
-  return { data: data as FinancialAccount, error };
+
+  if (error || !data) {
+    throw new Error(error?.message || 'Unable to deactivate financial account.');
+  }
+
+  return { data: data as FinancialAccount, error: null };
 };
 
 // ==================== BANK STATEMENTS ====================

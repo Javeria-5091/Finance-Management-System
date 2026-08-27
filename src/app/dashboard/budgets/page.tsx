@@ -231,7 +231,7 @@ export default function BudgetsPage() {
                       {stats.percent.toFixed(1)}% Utilized (GL)
                     </span>
                     <div className="flex items-center gap-3">
-                      <Link href="/dashboard/accounting/general-ledger" className="text-xs text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"><Link2 size={10} /> View GL</Link>
+                      <Link href="/dashboard/reports/general-ledger" className="text-xs text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"><Link2 size={10} /> View GL</Link>
                       <span className="text-gray-400 dark:text-gray-500">{linkedCount} Projects</span>
                     </div>
                   </div>

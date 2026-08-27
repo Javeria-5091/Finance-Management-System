@@ -1,3 +1,5 @@
+import type { Project } from './index';
+
 // ─── Client Types ───
 // Type definitions for client management module
 
@@ -44,33 +46,6 @@ export interface InvoiceSummary {
 }
 
 // ─── Project Types ───
-
-export interface Project {
-  id: string;
-  project_code: string;
-  name: string;
-  description?: string | null;
-  client_id?: string | null;
-  manager_id?: string | null;
-  platform?: string | null;
-  contract_value?: number;
-  currency?: string;
-  start_date?: string | null;
-  end_date?: string | null;
-  budget_amount?: number;
-  department?: string | null;
-  cost_center?: string | null;
-  is_confidential?: boolean;
-  status: 'ACTIVE' | 'ON_HOLD' | 'CLOSED' | 'CANCELLED';
-  is_active: boolean;
-  organization_id: string;
-  created_by: string;
-  created_at: string;
-  updated_at?: string;
-  closure_reason?: string | null;
-  closed_by?: string | null;
-  closed_at?: string | null;
-}
 
 export interface ProjectWithRelations extends Project {
   client?: { id: string; name: string; client_code: string } | null;
@@ -159,19 +134,6 @@ export interface PaymentAllocation {
 
 // ─── Admin Types ───
 
-export interface NumberingSequence {
-  id: string;
-  sequence_code: string;
-  prefix: string;
-  description?: string | null;
-  current_number: number;
-  padding: number;
-  reset_period: 'YEARLY' | 'MONTHLY' | 'NEVER';
-  is_active: boolean;
-  organization_id: string;
-  created_by: string;
-  created_at: string;
-}
 
 export interface ExchangeRate {
   id: string;
@@ -206,23 +168,6 @@ export interface PlatformFee {
 
 // ─── Notification Types ───
 
-export interface Notification {
-  id: string;
-  user_id: string;
-  title: string;
-  message: string;
-  notification_type: 'APPROVAL_PENDING' | 'PAYMENT_DUE' | 'BUDGET_ALERT' | 'SYSTEM' | 'WORKFLOW' | 'REMINDER' | 'OVERDUE' | 'INFO';
-  priority: 'low' | 'medium' | 'high' | 'urgent';
-  action_url?: string | null;
-  entity_type?: string | null;
-  entity_id?: string | null;
-  is_read: boolean;
-  read_at?: string | null;
-  created_by?: string | null;
-  expires_at?: string | null;
-  organization_id?: string | null;
-  created_at: string;
-}
 
 // ─── Budget Check Types ───
 

@@ -3,7 +3,7 @@
 // ============================================================
 
 // --- Asset Types ---
-export interface AssetCategory {
+export interface LegacyAssetCategory {
   id: string;
   name: string;
   code: string;
@@ -13,10 +13,10 @@ export interface AssetCategory {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
-  assets?: FixedAsset[];
+  assets?: LegacyFixedAsset[];
 }
 
-export interface FixedAsset {
+export interface LegacyFixedAsset {
   id: string;
   assetTag: string;
   name: string;
@@ -36,7 +36,7 @@ export interface FixedAsset {
   notes?: string;
   createdAt: string;
   updatedAt: string;
-  category?: AssetCategory;
+  category?: LegacyAssetCategory;
   assignedUser?: { id: string; name: string; email?: string };
   depreciationRuns?: AssetDepreciationRun[];
   events?: AssetEvent[];

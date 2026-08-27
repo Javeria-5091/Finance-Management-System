@@ -33,10 +33,10 @@ export function EmployeeDashboard() {
 
   const pending = myExpenses.filter(e => e.status === 'DRAFT' || e.status === 'SUBMITTED').length;
   const approved = myExpenses.filter(e => e.status === 'APPROVED' || e.status === 'POSTED').length;
-  const totalAmount = myExpenses.reduce((sum, e) => sum + (e.total_amount || 0), 0);
+  const totalAmount = myExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
   const pendingAmount = myExpenses
     .filter(e => e.status === 'DRAFT' || e.status === 'SUBMITTED')
-    .reduce((sum, e) => sum + (e.total_amount || 0), 0);
+    .reduce((sum, e) => sum + (e.amount || 0), 0);
   const fmtPKR = (n: number) => new Intl.NumberFormat("en-PK", { style: "currency", currency: "PKR", minimumFractionDigits: 0 }).format(n);
 
   if (loading) return <div className={`flex h-screen items-center justify-center ${isDark ? 'bg-gray-950' : 'bg-gray-50'} text-gray-500`}>Loading Dashboard...</div>;
@@ -71,9 +71,9 @@ export function EmployeeDashboard() {
               <tr><td colSpan={4} className="p-4 text-center text-gray-400">No expenses submitted yet</td></tr>
             ) : myExpenses.slice(0, 10).map((e: any) => (
               <tr key={e.id} className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                <td className="p-2 text-gray-800 dark:text-white">{e.purpose || e.description || '-'}</td>
+                <td className="p-2 text-gray-800 dark:text-white">{e.notes || e.description || '-'}</td>
                 <td className="p-2 text-gray-500">{e.expense_date || e.created_at?.split('T')[0]}</td>
-                <td className="p-2 text-right font-mono">{fmtPKR(e.total_amount)}</td>
+                <td className="p-2 text-right font-mono">{fmtPKR(e.amount)}</td>
                 <td className="p-2"><span className={`text-xs px-2 py-1 rounded-full ${
                   e.status === 'POSTED' ? 'bg-emerald-100 text-emerald-700' :
                   e.status === 'APPROVED' ? 'bg-blue-100 text-blue-700' :

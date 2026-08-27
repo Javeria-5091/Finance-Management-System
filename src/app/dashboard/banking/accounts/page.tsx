@@ -5,7 +5,7 @@ import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
 import * as bankService from '@/services/bank.service';
 import { usePermissions } from "@/context/PermissionContext";
-import { useFinancialAccounts, useReconciliationSummary, useAssetAccounts } from '@/hooks/useBanking';
+import { useFinancialAccounts, useReconciliationSummary, useAssetAccounts, useDeactivateAccount } from '@/hooks/useBanking';
 import AccountCard from '@/components/banking/AccountCard';
 import ReasonModal from '@/components/finance/ReasonModal';
 import { Plus, Building2, Loader2, X, Pencil, Trash2 } from 'lucide-react';
@@ -82,6 +82,7 @@ export default function AccountsPage() {
   const { data: summaries, isLoading: loadingSummary } = useReconciliationSummary();
   const { data: accounts, isLoading: loadingAccounts } = useFinancialAccounts();
   const { data: assetAccounts } = useAssetAccounts();
+  const deactivateAccount = useDeactivateAccount();
   const createAccount = useMutation({
     mutationFn: async (payload: Parameters<typeof bankService.createFinancialAccount>[0]) => {
       const organizationId = await getOrganizationId();
@@ -233,9 +234,15 @@ export default function AccountsPage() {
               key={acct.financial_account_id}
               account={acct}
               onClick={() => {
-                // TODO: Navigate to statements for this account
                 window.location.href = `/dashboard/banking/statements?account=${acct.financial_account_id}`;
               }}
+              canDeactivate={hasPermission('BANK_DELETE')}
+              onDeactivate={() => setReasonState({
+                open: true,
+                title: `Deactivate ${acct.account_name}`,
+                action: 'deactivate',
+                id: acct.financial_account_id,
+              })}
             />
           ))}
         </div>
@@ -407,9 +414,21 @@ export default function AccountsPage() {
         open={reasonState.open}
         title={reasonState.title}
         description="Provide a reason for this action."
-        onConfirm={(reason:any) => {
-          // TODO: Handle deactivate
-          setReasonState({ open: false, title: '', action: '', id: '' });
+        onConfirm={(reason: string) => {
+          if (reasonState.action !== 'deactivate' || !reasonState.id) return;
+
+          deactivateAccount.mutate(
+            { id: reasonState.id, reason },
+            {
+              onSuccess: () => {
+                setReasonState({ open: false, title: '', action: '', id: '' });
+              },
+              onError: (error: Error) => {
+                console.error('[AccountsPage] deactivate account failed', error);
+                alert(error.message || 'Unable to deactivate account.');
+              },
+            }
+          );
         }}
         onCancel={() => setReasonState({ open: false, title: '', action: '', id: '' })}
       />
