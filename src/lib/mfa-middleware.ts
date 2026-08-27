@@ -16,7 +16,7 @@ import { NextResponse } from 'next/server';
 import type { AuthResult } from './api-auth';
  
 // Roles that require MFA
-const MFA_REQUIRED_ROLES = ['CEO', 'Admin', 'FINANCE_HEAD', 'ACCOUNTANT', 'HOD', 'PROJECT_MANAGER', 'TECHNICAL_ADMIN'];
+const MFA_REQUIRED_ROLES = ['CEO', 'FINANCE_HEAD', 'ACCOUNTANT', 'HOD', 'PROJECT_MANAGER', 'TECHNICAL_ADMIN'];
  
 /**
  * Check if a user has MFA enabled and verified.

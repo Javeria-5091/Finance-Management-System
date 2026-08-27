@@ -21,8 +21,9 @@ export default function SignupPage() {
       setError("Organization name is required");
       return;
     }
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters");
+    const passwordPolicy = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{8,}$/;
+    if (!passwordPolicy.test(password)) {
+      setError("Password must be at least 8 characters and include uppercase, lowercase, number, and special character");
       return;
     }
     setError("");
@@ -79,7 +80,7 @@ export default function SignupPage() {
             id="password" 
             label="Password" 
             type="password" 
-            placeholder="Min 6 characters" 
+            placeholder="Min 8 chars: upper, lower, number, symbol" 
             value={password} 
             onChange={e => setPassword(e.target.value)} 
             required 

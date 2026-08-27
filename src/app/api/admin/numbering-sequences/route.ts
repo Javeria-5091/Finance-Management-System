@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { sanitizeSearch } from '@/lib/validations';
+import { sanitizeSearch, numberingPostSchema } from '@/lib/validations';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
  
@@ -47,9 +47,18 @@ export async function POST(req: NextRequest) {
  
   try {
     const body = await req.json();
-    const { action, sequence_code, prefix, description, current_number, padding, reset_period, format } = body;
+    const parsed = numberingPostSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({
+        error: 'Invalid request body',
+        details: parsed.error.flatten(),
+      }, { status: 400 });
+    }
+
+    const action = parsed.data.action;
  
     if (action === 'create') {
+      const { sequence_code, prefix, description, current_number, padding, reset_period, format } = parsed.data;
       if (!sequence_code || !prefix) {
         return NextResponse.json({ error: 'sequence_code and prefix are required' }, { status: 400 });
       }
@@ -102,6 +111,7 @@ export async function POST(req: NextRequest) {
     }
  
     if (action === 'update') {
+      const { sequence_code, prefix, current_number, padding, reset_period, format } = parsed.data;
       if (!sequence_code) {
         return NextResponse.json({ error: 'sequence_code is required' }, { status: 400 });
       }
@@ -142,6 +152,7 @@ export async function POST(req: NextRequest) {
     }
  
     if (action === 'reset') {
+      const { sequence_code } = parsed.data;
       if (!sequence_code) {
         return NextResponse.json({ error: 'sequence_code is required' }, { status: 400 });
       }

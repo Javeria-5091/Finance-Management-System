@@ -175,17 +175,16 @@ export async function openPeriod(input: OpenPeriodInput): Promise<void> {
 }
 
 export async function closePeriod(input: ClosePeriodInput): Promise<void> {
-  const userId = await currentUserId();  // ✅ FIX
+  const userId = await currentUserId();
+  const reason = input.reason.trim();
+  if (!reason) throw new Error('A reason is required to close a period');
 
-  const { error } = await db()
-    .from('accounting_periods')
-    .update({
-      status: input.status,
-      reopening_reason: input.reason,
-      closed_at: new Date().toISOString(),
-      closed_by: userId,  // ✅ FIX
-    })
-    .eq('id', input.period_id);
+  const { error } = await db().rpc('close_period', {
+    p_period_id: input.period_id,
+    p_closed_by: userId,
+    p_status: input.status,
+    p_reason: reason,
+  });
 
   if (error) throw error;
 }

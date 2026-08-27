@@ -11,9 +11,9 @@ import {
 export async function POST(req: NextRequest) {
   // BUG-014 FIX: budget checks must always be live; never allow route-level caching across fiscal periods.
   noStore();
-  const auth = await requirePermission('EXPENSE_READ');
+  const auth = await requirePermission('BUDGET_READ');
   if (auth instanceof NextResponse) return auth;
-  // BUG-007 FIX: pass the server-side authenticated supabase client.
+  // Use the authenticated server-side client for organization-scoped budget checks.
   const { supabase } = await getAuthSupabase(req);
  
   const orgId = auth.orgId;
@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
       amount: transactionAmount,
       currency,
       organization_id: orgId,
-      // BUG-007 FIX: pass server-side authenticated supabase client.
+      // Pass the authenticated server-side Supabase client.
       supabaseClient: supabase,
     });
  
@@ -111,7 +111,7 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   // BUG-014 FIX: policy reads are request-scoped and must not be cached.
   noStore();
-  const auth = await requirePermission('EXPENSE_READ');
+  const auth = await requirePermission('BUDGET_READ');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
   const orgId = auth.orgId;

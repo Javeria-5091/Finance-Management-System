@@ -6,6 +6,7 @@
 
 import { supabase as browserSupabase } from '@/lib/supabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { sanitizeSearch } from '@/lib/validations';
 
 // BUG-007 FIX: This service previously imported the browser supabase client
 // directly. When called from an API route, the browser client has no
@@ -83,7 +84,7 @@ export async function fetchCommissions(orgId: string, filters?: {
     .order('created_at', { ascending: false });
 
   if (filters?.search) {
-    const term = `%${filters.search}%`;
+    const term = `%${sanitizeSearch(filters.search)}%`;
     query = query.or(`person_name.ilike.${term},invoice_ref.ilike.${term},milestone_ref.ilike.${term},payment_ref.ilike.${term}`);
   }
   if (filters?.status) {

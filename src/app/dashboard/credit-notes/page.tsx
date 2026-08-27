@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase, financeDB } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
+import { usePermissions } from "@/context/PermissionContext";
 import {
   Plus,
   FileText,
@@ -85,6 +86,7 @@ function getStatusBadge(status: string): string {
 // ==========================================
 export default function CreditNotesPage() {
   const { user } = useAuth();
+  const { hasPermission, isLoading: permissionsLoading } = usePermissions();
 
   // Data States
   const [creditNotes, setCreditNotes] = useState<CreditNoteRow[]>([]);
@@ -134,6 +136,11 @@ export default function CreditNotesPage() {
   // DATA FETCHING
   // ==========================================
   const fetchCreditNotes = useCallback(async () => {
+    if (!hasPermission("CREDIT_NOTE_READ")) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setFetchError(null);
 
@@ -172,16 +179,40 @@ export default function CreditNotesPage() {
     }
 
     setLoading(false);
-  }, []);
+  }, [hasPermission]);
 
   useEffect(() => {
+    if (permissionsLoading) return;
     fetchCreditNotes();
     return () => {
       // Cleanup: prevent state updates on unmounted component
       setCreditNotes([]);
       setFetchError(null);
     };
-  }, [fetchCreditNotes]);
+  }, [fetchCreditNotes, permissionsLoading]);
+
+  if (permissionsLoading) {
+    return (
+      <div className="p-6 flex items-center justify-center min-h-[60vh]">
+        <Loader2 className="w-6 h-6 mr-2 animate-spin" />
+        <p className="text-gray-500 dark:text-gray-400">Checking permissions...</p>
+      </div>
+    );
+  }
+
+  if (!hasPermission("CREDIT_NOTE_READ")) {
+    return (
+      <div className="p-6 flex items-center justify-center min-h-[60vh]">
+        <div className="text-center">
+          <AlertCircle className="w-10 h-10 mx-auto mb-3 text-red-400" />
+          <p className="text-gray-700 dark:text-gray-300 font-medium">Access Denied</p>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+            You do not have permission to view credit notes.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // ==========================================
   // MODAL HANDLERS

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
+import { platformFeePostSchema } from '@/lib/validations';
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -47,9 +48,18 @@ export async function POST(req: NextRequest) {
  
   try {
     const body = await req.json();
-    const { action, id, platform, fee_type, fee_rate, fee_fixed_amount, description, currency, min_amount, max_amount } = body;
+    const parsed = platformFeePostSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({
+        error: 'Invalid request body',
+        details: parsed.error.flatten(),
+      }, { status: 400 });
+    }
+
+    const action = parsed.data.action;
  
     if (action === 'create') {
+      const { platform, fee_type, fee_rate, fee_fixed_amount, description, currency, min_amount, max_amount } = parsed.data;
       if (!platform || !fee_type) {
         return NextResponse.json({ error: 'platform and fee_type are required' }, { status: 400 });
       }
@@ -93,6 +103,7 @@ export async function POST(req: NextRequest) {
     }
  
     if (action === 'update') {
+      const { id, fee_rate, fee_fixed_amount, description, min_amount, max_amount } = parsed.data;
       if (!id) {
         return NextResponse.json({ error: 'id is required for update' }, { status: 400 });
       }
@@ -133,6 +144,7 @@ export async function POST(req: NextRequest) {
     }
  
     if (action === 'toggle') {
+      const { id } = parsed.data;
       if (!id) {
         return NextResponse.json({ error: 'id is required' }, { status: 400 });
       }

@@ -85,7 +85,10 @@ export default function InvoicesPage() {
       .order("created_at", { ascending: false });
     
     if (data) setInvoices(data);
-    if (error) console.error(error);
+    if (error) {
+      console.error('Invoices fetch error:', error);
+      toast.error(`Failed to load invoices: ${error.message}`);
+    }
     setLoading(false);
   }, []);
 

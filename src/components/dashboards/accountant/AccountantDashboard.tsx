@@ -16,8 +16,8 @@ export function AccountantDashboard() {
       try {
         // ✅ FIXED: Use finance.journal_entries (schema.table), not journal_entries
         const [countRes, listRes] = await Promise.all([
-          supabase.from('journal_entries').select('status'),
-          supabase.from('journal_entries').select('reference, description, status, transaction_date, total_debit').order('created_at', { ascending: false }).limit(5)
+          supabase.schema('finance').from('journal_entries').select('status'),
+          supabase.schema('finance').from('journal_entries').select('reference, description, status, transaction_date, total_debit').order('created_at', { ascending: false }).limit(5)
         ]);
 
         if (countRes.data) {

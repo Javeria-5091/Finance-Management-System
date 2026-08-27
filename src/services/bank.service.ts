@@ -192,6 +192,29 @@ export const updateFinancialAccount = async (id: string, payload: Partial<Financ
   return { data: data as FinancialAccount, error };
 };
 
+export const deactivateFinancialAccount = async (id: string, reason: string) => {
+  const { data: existing, error: fetchError } = await db
+    .from('financial_accounts')
+    .select('notes')
+    .eq('id', id)
+    .single();
+  if (fetchError) return { data: null, error: fetchError };
+
+  const reasonText = reason.trim();
+  const previousNotes = typeof existing?.notes === 'string' ? existing.notes.trim() : '';
+  const notes = previousNotes
+    ? `${previousNotes}\nDeactivated: ${reasonText}`
+    : `Deactivated: ${reasonText}`;
+
+  const { data, error } = await db
+    .from('financial_accounts')
+    .update({ is_active: false, notes, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .select()
+    .single();
+  return { data: data as FinancialAccount, error };
+};
+
 // ==================== BANK STATEMENTS ====================
 
 export const getBankStatements = async (orgId: string, accountId: string) => {

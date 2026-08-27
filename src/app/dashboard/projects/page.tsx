@@ -7,6 +7,7 @@ import { Project, ProjectFormData, Budget, Expense } from "@/types";
 import ProjectForm from "@/components/sections/ProjectForm";
 import { Plus, Pencil, Trash2, AlertTriangle } from "lucide-react";
 import { logAction } from "@/lib/logAction";
+import toast from "react-hot-toast";
 
 export default function ProjectsPage() {
   const { user, hasPermission: legacyPermission } = useAuth();
@@ -83,7 +84,12 @@ export default function ProjectsPage() {
   async function handleDelete() {
     if (!deleteId) return;
     const project = projects.find(p => p.id === deleteId);
-    await supabase.from("projects").delete().eq("id", deleteId);
+    const { error } = await supabase.from("projects").delete().eq("id", deleteId);
+    if (error) {
+      console.error("Project delete error:", error);
+      toast.error(`Failed to delete project: ${error.message}`);
+      return;
+    }
     if (project) await logAction({ action: "DELETE", entityType: "Project", entityId: deleteId, description: `Deleted project: ${project.name}`, severity: "high", sourceModule: "projects" });
     setDeleteId(null); fetchProjects();
   }

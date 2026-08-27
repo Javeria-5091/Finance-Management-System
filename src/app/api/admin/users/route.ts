@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { sanitizeSearch } from '@/lib/validations';
+import {
+  sanitizeSearch,
+  adminPostSchema,
+  adminUserPatchSchema,
+} from '@/lib/validations';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { getAuthUser, requirePermission } from '@/lib/api-auth';
 import { createServerClient } from '@supabase/ssr';
@@ -100,7 +104,15 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { action, userId, email, fullName, role, effectiveFrom, effectiveTo } = body;
+    const parsed = adminPostSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({
+        error: 'Invalid request body',
+        details: parsed.error.flatten(),
+      }, { status: 400 });
+    }
+
+    const action = parsed.data.action;
     // SECURITY FIX: organizationId is intentionally NOT read from the request
     // body for user creation/role assignment. An admin (even CEO) must only
     // ever create users and roles within their own organization — accepting
@@ -110,6 +122,7 @@ export async function POST(req: NextRequest) {
  
     // ─── Action: Invite/Create User ───
     if (action === 'invite') {
+      const { email, fullName, role, effectiveFrom, effectiveTo } = parsed.data;
       if (!email) {
         return NextResponse.json({ error: 'email is required' }, { status: 400 });
       }
@@ -195,6 +208,7 @@ export async function POST(req: NextRequest) {
  
     // ─── Action: Assign/Update Role ───
     if (action === 'assign_role') {
+      const { userId, role, effectiveFrom, effectiveTo } = parsed.data;
       if (!userId || !role) {
         return NextResponse.json({ error: 'userId and role are required' }, { status: 400 });
       }
@@ -275,6 +289,7 @@ export async function POST(req: NextRequest) {
  
     // ─── Action: Reset Password (admin-initiated) ───
     if (action === 'reset_password') {
+      const { userId, email } = parsed.data;
       if (!userId || !email) {
         return NextResponse.json({ error: 'userId and email are required' }, { status: 400 });
       }
@@ -353,7 +368,15 @@ export async function PATCH(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { userId, fullName, isActive } = body;
+    const parsed = adminUserPatchSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json({
+        error: 'Invalid request body',
+        details: parsed.error.flatten(),
+      }, { status: 400 });
+    }
+
+    const { userId, fullName, isActive } = parsed.data;
     // SECURITY FIX (BUG-011, HIGH): organizationId is no longer accepted from
     // the request body. Allowing a client-supplied organizationId let a
     // caller move a user into a different organization entirely, and

@@ -23,11 +23,23 @@ import { getAuthUser } from '@/lib/api-auth';
 import { cookies } from 'next/headers';
 import { createServerClient } from '@supabase/ssr';
 
-function createDB() {
+async function createDB() {
+  const cookieStore = await cookies();
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    { cookies: { getAll: async () => (await cookies()).getAll(), setAll(cookiesToSet: any[]) { try { cookiesToSet.forEach(({ name, value, options }: any) => cookieStore.set(name, value)); } catch {} } } }
+    {
+      cookies: {
+        getAll: () => cookieStore.getAll(),
+        setAll(cookiesToSet: any[]) {
+          try {
+            cookiesToSet.forEach(({ name, value, options }: any) => cookieStore.set(name, value, options));
+          } catch {
+            // Server Components may expose read-only cookies.
+          }
+        },
+      },
+    }
   );
 }
 
@@ -52,7 +64,7 @@ export const notificationService = {
     triggeredBy?: string;
     metadata?: any;
   }) {
-    const db = createDB();
+    const db = await createDB();
     // FIX 8.4: Use .schema('core') explicitly — table is in core schema
     const { data, error } = await db
       .schema('core')
@@ -148,7 +160,7 @@ export const notificationService = {
 
   // Get unread count for a user
   async getUnreadCount(userId: string): Promise<number> {
-    const db = createDB();
+    const db = await createDB();
     // FIX 8.4: Use .schema('core') explicitly
     const { count } = await db
       .schema('core')
@@ -161,7 +173,7 @@ export const notificationService = {
 
   // Mark as read
   async markAsRead(notificationIds: string[], userId: string) {
-    const db = createDB();
+    const db = await createDB();
     const { error } = await db
       .schema('core')
       .from('notifications')
@@ -173,7 +185,7 @@ export const notificationService = {
 
   // Mark all as read for a user
   async markAllAsRead(userId: string) {
-    const db = createDB();
+    const db = await createDB();
     const { error } = await db
       .schema('core')
       .from('notifications')

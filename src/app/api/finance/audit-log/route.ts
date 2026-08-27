@@ -11,7 +11,7 @@ export async function GET(req: NextRequest) {
 
   const page = Math.max(1, Number(searchParams.get('page') || 1));
   const pageSize = Math.min(100, Math.max(1, Number(searchParams.get('pageSize') || 50)));
-  let query = supabase.from('v_audit_log').select('*', { count: 'exact' }).eq('organization_id', auth.orgId);
+  let query = supabase.schema('public').from('v_audit_log').select('*', { count: 'exact' }).eq('organization_id', auth.orgId);
 
   const action = searchParams.get('action');
   const resource = searchParams.get('resource');

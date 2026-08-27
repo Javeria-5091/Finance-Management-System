@@ -37,6 +37,7 @@ export async function POST(req: NextRequest) {
   if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
  
+  let auditLogWarning: string | undefined;
   const orgId = auth.orgId;
   if (!orgId) {
     return NextResponse.json({ error: 'Organization ID not found' }, { status: 400 });
@@ -140,6 +141,9 @@ export async function POST(req: NextRequest) {
         .eq('organization_id', orgId)
         .or('code.eq.3000,name.ilike.%retained%earnings%')
         .eq('is_active', true)
+        .order('code', { ascending: true })
+        .order('name', { ascending: true })
+        .limit(1)
         .maybeSingle()
     );
  
@@ -360,6 +364,7 @@ export async function POST(req: NextRequest) {
       });
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
+      auditLogWarning = 'Year-end close completed, but the audit log entry failed to write. Please notify an administrator.';
     }
  
     return NextResponse.json({
@@ -373,6 +378,7 @@ export async function POST(req: NextRequest) {
       total_debit: totalDebit,
       total_credit: totalCredit,
       balanced: Math.abs(totalDebit - totalCredit) < 0.01,
+      audit_log_warning: auditLogWarning,
       message: `Year-end close completed: ${netIncome >= 0 ? 'Profit' : 'Loss'} of PKR ${Math.abs(netIncome).toLocaleString()} transferred to Retained Earnings`,
     });
   } catch (err: any) {

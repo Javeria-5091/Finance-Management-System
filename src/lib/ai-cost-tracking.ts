@@ -82,43 +82,15 @@ export async function updateAiCostTracking(
   tokenUsage: TokenUsage
 ): Promise<void> {
   try {
-    const today = new Date().toISOString().split('T')[0];
-
-    // Try to increment existing record
-    const { data: existing } = await supabase
-      .schema('ai')
-      .from('ai_user_cost_tracking')
-      .select('id, request_count, estimated_cost')
-      .eq('user_id', userId)
-      .eq('organization_id', orgId)
-      .eq('period_date', today)
-      .maybeSingle();
-
-    if (existing) {
-      await supabase
-        .schema('ai')
-        .from('ai_user_cost_tracking')
-        .update({
-          request_count: (existing.request_count || 0) + 1,
-          estimated_cost: String(
-            parseFloat(existing.estimated_cost || '0') + tokenUsage.estimatedCostUsd
-          ),
-          last_request_at: new Date().toISOString(),
-        })
-        .eq('id', existing.id);
-    } else {
-      // Insert new daily record
-      await supabase.schema('ai').from('ai_user_cost_tracking').insert({
-        user_id: userId,
-        organization_id: orgId,
-        period_date: today,
-        request_count: 1,
-        estimated_cost: String(tokenUsage.estimatedCostUsd),
-        last_request_at: new Date().toISOString(),
-      });
-    }
+    const { error } = await supabase.schema('ai').rpc('increment_usage', {
+      p_user_id: userId,
+      p_organization_id: orgId,
+      p_tokens: Math.max(0, Math.trunc(tokenUsage.totalTokens || 0)),
+      p_cost: Math.max(0, Number(tokenUsage.estimatedCostUsd || 0)),
+    });
+    if (error) throw error;
   } catch (error: any) {
-    console.error('updateAiCostTracking error:', error.message);
+    console.error('updateAiCostTracking error:', error?.message || error);
   }
 }
 

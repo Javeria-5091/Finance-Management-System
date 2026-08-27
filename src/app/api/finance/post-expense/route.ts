@@ -246,6 +246,7 @@ export async function POST(req: NextRequest) {
       .eq('is_active', true)
       .eq('organization_id', auth.orgId)
       .like('code', '21%')
+      .order('code', { ascending: true })
       .limit(1)
       .single());
  

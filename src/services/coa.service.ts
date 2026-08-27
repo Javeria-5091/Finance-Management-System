@@ -1,5 +1,6 @@
 import { supabase as browserSupabase } from '@/lib/supabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { sanitizeSearch } from '@/lib/validations';
 
 // BUG-007 FIX: This service previously imported the browser supabase client
 // directly. When called from an API route, the browser client has no
@@ -60,7 +61,8 @@ export async function getCOAFiltered(filters: COAFilters = {}): Promise<ChartOfA
   let query = supabase.schema(SCHEMA).from('chart_of_accounts').select('*');
 
   if (filters.search) {
-    query = query.or(`code.ilike.%${filters.search}%,name.ilike.%${filters.search}%`);
+    const term = sanitizeSearch(filters.search);
+    query = query.or(`code.ilike.%${term}%,name.ilike.%${term}%`);
   }
 
   if (filters.accountType && filters.accountType !== 'ALL') {

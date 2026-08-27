@@ -198,7 +198,7 @@ export async function POST(req: NextRequest) {
 
     const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: `Invoice: ${invoice.invoice_number || 'N/A'} - ${invoice.description || 'Sales Invoice'}`,
-      p_transaction_date: invoice.invoice_date || new Date().toISOString().split('T')[0],
+      p_transaction_date: invoice.issue_date || new Date().toISOString().split('T')[0],
       p_period_id: period.id,
       p_lines: JSON.stringify(rpcLines),
       p_currency: invoice.currency || 'PKR',

@@ -3,7 +3,7 @@ import { supabase } from './supabase';
 
 export async function seedFinancialAccountsIfEmpty() {
   const { data: existing } = await supabase
-    .from('financial_accounts')
+    .schema('finance').from('financial_accounts')
     .select('id')
     .limit(1);
 
@@ -11,7 +11,7 @@ export async function seedFinancialAccountsIfEmpty() {
 
   // Get ledger account IDs from COA
   const { data: coa } = await supabase
-    .from('chart_of_accounts')
+    .schema('finance').from('chart_of_accounts')
     .select('id, code')
     .in('code', ['1110','1120','1130','1140','1150','1160','1170','1180']);
 
@@ -31,7 +31,7 @@ export async function seedFinancialAccountsIfEmpty() {
   ].filter(a => a.linked_ledger_account_id); // Only insert if COA account exists
 
   const { error } = await supabase
-    .from('financial_accounts')
+    .schema('finance').from('financial_accounts')
     .insert(accounts);
 
   if (error) console.error('Seed financial accounts failed:', error);

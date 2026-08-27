@@ -1,5 +1,5 @@
 'use client';
-import { Building2, Wallet, CreditCard, Landmark, Banknote, Layers } from 'lucide-react';
+import { Building2, Wallet, CreditCard, Landmark, Banknote, Layers, Power } from 'lucide-react';
 import type { ReconciliationSummary } from '../../services/bank.service';
 
 const getIcon = (type: string) => {
@@ -24,9 +24,13 @@ const formatCurrency = (amount: number, currency: string = 'PKR') =>
 export default function AccountCard({
   account,
   onClick,
+  onDeactivate,
+  canDeactivate = false,
 }: {
   account: ReconciliationSummary;
   onClick: () => void;
+  onDeactivate?: () => void;
+  canDeactivate?: boolean;
 }) {
   const hasDiff = Math.abs(account.difference) > 0.01;
   const pctColor =
@@ -58,6 +62,17 @@ export default function AccountCard({
         <span className="text-xs font-mono bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 px-2 py-0.5 rounded">
           {account.currency}
         </span>
+        {canDeactivate && onDeactivate && (
+          <button
+            type="button"
+            title="Deactivate account"
+            aria-label={`Deactivate ${account.account_name}`}
+            onClick={(e) => { e.stopPropagation(); onDeactivate(); }}
+            className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+          >
+            <Power size={15} />
+          </button>
+        )}
       </div>
 
       {/* Balances */}

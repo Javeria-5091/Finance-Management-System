@@ -138,13 +138,14 @@ export async function getAuthSupabase(req?: Request) {
     }
   };
 
-  const supabase = bearer
-    ? createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
-        global: { headers: { Authorization: `Bearer ${bearer}` } },
-      })
-    : createServerClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
-        cookies: { getAll: () => cookieStore.getAll(), setAll: setAllCookies },
-      });
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      global: bearer ? { headers: { Authorization: `Bearer ${bearer}` } } : undefined,
+      cookies: { getAll: () => cookieStore.getAll(), setAll: setAllCookies },
+    }
+  );
 
   const { data, error } = await supabase.auth.getUser();
   return { supabase, user: data.user ?? null, authError: error };
