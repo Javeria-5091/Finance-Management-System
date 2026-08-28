@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
   noStore();
   const auth = await requirePermission('BUDGET_READ');
   if (auth instanceof NextResponse) return auth;
-  // Use the authenticated server-side client for organization-scoped budget checks.
+  // BUG-007 FIX: pass the server-side authenticated supabase client.
   const { supabase } = await getAuthSupabase(req);
  
   const orgId = auth.orgId;
@@ -42,7 +42,7 @@ export async function POST(req: NextRequest) {
       amount: transactionAmount,
       currency,
       organization_id: orgId,
-      // Pass the authenticated server-side Supabase client.
+      // BUG-007 FIX: pass server-side authenticated supabase client.
       supabaseClient: supabase,
     });
  

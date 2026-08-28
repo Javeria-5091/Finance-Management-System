@@ -58,7 +58,7 @@ export async function POST(req: NextRequest) {
       let periodId: string | null = null;
       if (fiscalYearId) {
         const period = (await supabase
-          .from('finance.accounting_periods')
+          .schema('finance').from('accounting_periods')
           .select('id')
           .eq('fiscal_year_id', fiscalYearId)
           .eq('organization_id', auth.orgId)
@@ -78,31 +78,12 @@ export async function POST(req: NextRequest) {
       // BUG-001 FIX: Build journal lines with CORRECT column names (debit_amount/credit_amount)
       const rpcLines = [];
       for (const row of rows) {
-        let accountId = row.account_id || null;
-        if (!accountId) {
-          const { data: account, error: accountError } = await supabase
-            .schema('finance')
-            .from('chart_of_accounts')
-            .select('id')
-            .eq('organization_id', auth.orgId)
-            .eq('code', row.account_code)
-            .eq('is_active', true)
-            .maybeSingle();
-          if (accountError) {
-            return NextResponse.json({ error: `Failed to resolve account ${row.account_code}: ${accountError.message}` }, { status: 500 });
-          }
-          if (!account?.id) {
-            return NextResponse.json({ error: `No active chart-of-accounts record found for account code ${row.account_code}` }, { status: 400 });
-          }
-          accountId = account.id;
-        }
-
         const debit = Math.abs(Number(row.debit_amount) || 0);
         const credit = Math.abs(Number(row.credit_amount) || 0);
  
         if (debit > 0) {
           rpcLines.push({
-            account_id: accountId,
+            account_id: row.account_id || null,
             account_code: row.account_code,
             debit_amount: debit,
             credit_amount: 0,
@@ -111,7 +92,7 @@ export async function POST(req: NextRequest) {
         }
         if (credit > 0) {
           rpcLines.push({
-            account_id: accountId,
+            account_id: row.account_id || null,
             account_code: row.account_code,
             debit_amount: 0,
             credit_amount: credit,
@@ -138,7 +119,7 @@ export async function POST(req: NextRequest) {
  
       // Track each import row
       for (const row of rows) {
-        await supabase.from('finance.opening_balance_imports').insert({
+        await supabase.schema('finance').from('opening_balance_imports').insert({
           organization_id: auth.orgId,
           import_batch_id: batchId,
           account_id: row.account_id || null,

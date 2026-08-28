@@ -76,7 +76,7 @@ export async function POST(req: NextRequest) {
     // 1. Fetch the distribution
     const distribution = getData(
       await supabase
-        .from('finance.profit_distributions')
+        .schema('finance').from('profit_distributions')
         .select('*, distribution_lines(*)')
         .eq('id', distribution_id)
         .eq('organization_id', orgId)
@@ -101,7 +101,7 @@ export async function POST(req: NextRequest) {
     // 2. Idempotency check — already posted?
     const existingJournal = getData(
       await supabase
-        .from('finance.journal_entries')
+        .schema('finance').from('journal_entries')
         .select('id, reference')
         .eq('source_type', 'PROFIT_DISTRIBUTION')
         .eq('source_id', distribution_id)
@@ -122,7 +122,7 @@ export async function POST(req: NextRequest) {
     // cross-tenant GL postings.
     const period = getData(
       await supabase
-        .from('finance.accounting_periods')
+        .schema('finance').from('accounting_periods')
         .select('id')
         .eq('status', 'OPEN')
         .eq('organization_id', orgId)
@@ -193,7 +193,7 @@ export async function POST(req: NextRequest) {
     // Fetch the created journal
     const journal = getData(
       await supabase
-        .from('finance.journal_entries')
+        .schema('finance').from('journal_entries')
         .select('id, reference, total_debit, total_credit')
         .eq('id', journalId)
         .single()
@@ -207,7 +207,7 @@ export async function POST(req: NextRequest) {
     // 8. Update distribution lines with WHT amounts
     for (const line of whtCalculation.lines) {
       await supabase
-        .from('finance.distribution_lines')
+        .schema('finance').from('distribution_lines')
         .update({
           withholding_amount: line.withholding_amount,
           withholding_rate: line.withholding_rate,
@@ -315,7 +315,7 @@ export async function GET(req: NextRequest) {
  
     const distribution = getData(
       await supabase
-        .from('finance.profit_distributions')
+        .schema('finance').from('profit_distributions')
         .select('*, distribution_lines(*)')
         .eq('id', distributionId)
         .eq('organization_id', orgId)

@@ -159,7 +159,7 @@ export async function POST(
 
     // Idempotency check
     const existingJournal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference')
       .eq('source_type', 'CREDIT_NOTE')
       .eq('source_id', id)
@@ -179,7 +179,7 @@ export async function POST(
     // unfiltered revenue lookup. Resolved by exact seeded control-account
     // code instead.
     const receivableAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'ASSET')
       .eq('is_active', true)
@@ -188,7 +188,7 @@ export async function POST(
       .maybeSingle());
 
     const revenueAccount = getData(await supabase
-      .from('finance.chart_of_accounts')
+      .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'REVENUE')
       .eq('is_active', true)
@@ -203,7 +203,7 @@ export async function POST(
     // Get open period
     // BUG-020 FIX: Add organization_id filter to period lookup
     const period = getData(await supabase
-      .from('finance.accounting_periods')
+      .schema('finance').from('accounting_periods')
       .select('id')
       .eq('organization_id', auth.orgId)
       .eq('status', 'OPEN')
@@ -252,7 +252,7 @@ export async function POST(
 
     // Fetch the created journal to get reference number
     const journal = getData(await supabase
-      .from('finance.journal_entries')
+      .schema('finance').from('journal_entries')
       .select('id, reference')
       .eq('id', journalId)
       .single());

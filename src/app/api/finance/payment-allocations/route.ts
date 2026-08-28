@@ -10,7 +10,7 @@ function getData<T = any>(res: any): T | null {
  
 // ─── POST: Allocate a payment receipt across multiple invoices ───
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('APPROVE_INVOICE');
+  const auth = await requirePermission('PAYMENT_RECEIPT_UPDATE');
   if (auth instanceof NextResponse) return auth;
 
   const mfaCheck = await enforceMFA(auth);

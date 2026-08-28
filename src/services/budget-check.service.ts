@@ -266,16 +266,16 @@ export async function checkBudgetForTransaction(
     // BUG-009 FIX: Changed supabase.schema('finance').from('budgets') to
     // supabase.schema('finance').from('budgets').
     // Also added .eq('organization_id', organization_id) for org isolation.
-    const budget = getData(
-      await supabase
-        .schema('finance')
-        .from('budgets')
-        .select('*')
-        .eq('project_id', project_id)
-        .eq('organization_id', organization_id)
-        .eq('status', 'APPROVED')
-        .maybeSingle()
-    );
+    const { data: budget, error: projectBudgetError } = await supabase
+      .from('budgets')
+      .select('*')
+      .eq('project_id', project_id)
+      .eq('organization_id', organization_id)
+      .eq('status', 'APPROVED')
+      .maybeSingle();
+    if (projectBudgetError) {
+      throw new Error(`Budget check unavailable: ${projectBudgetError.message}`);
+    }
 
     if (budget) {
       results.push(checkSingleBudget(budget, transactionAmount, 'PROJECT_BUDGET', policy));
@@ -296,7 +296,10 @@ export async function checkBudgetForTransaction(
     if (category) query = query.eq('category', category);
     if (department) query = query.eq('department', department);
 
-    const { data: catBudgets } = await query;
+    const { data: catBudgets, error: categoryBudgetError } = await query;
+    if (categoryBudgetError) {
+      throw new Error(`Budget check unavailable: ${categoryBudgetError.message}`);
+    }
 
     if (catBudgets && catBudgets.length > 0) {
       for (const budget of catBudgets) {
@@ -310,15 +313,15 @@ export async function checkBudgetForTransaction(
   if (budget_id) {
     // BUG-009 FIX: Changed supabase.schema('finance').from('budgets') to
     // supabase.schema('finance').from('budgets').
-    const budget = getData(
-      await supabase
-        .schema('finance')
-        .from('budgets')
-        .select('*')
-        .eq('id', budget_id)
-        .eq('organization_id', organization_id)
-        .maybeSingle()
-    );
+    const { data: budget, error: directBudgetError } = await supabase
+      .from('budgets')
+      .select('*')
+      .eq('id', budget_id)
+      .eq('organization_id', organization_id)
+      .maybeSingle();
+    if (directBudgetError) {
+      throw new Error(`Budget check unavailable: ${directBudgetError.message}`);
+    }
 
     if (budget) {
       results.push(checkSingleBudget(budget, transactionAmount, 'DIRECT_BUDGET', policy));

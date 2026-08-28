@@ -222,6 +222,31 @@ export async function POST(req: NextRequest) {
     if (withholdingAmount > totalAmount) return NextResponse.json({ error: 'Withholding amount cannot exceed vendor bill total.' }, { status: 400 });
     rpcLines.push({ account_id: creditAccountId, debit_amount: 0, credit_amount: totalAmount, description: `Vendor payable: ${bill.bill_number || 'N/A'}` });
 
+    // Critical fix: mirror finance.post_vendor_bill() and add the WHT Payable
+    // credit when withholding is present. The existing route already debits
+    // the WHT receivable account, so this keeps the journal balanced.
+    if (withholdingAmount > 0) {
+      const withholdingPayableAccount = getData(await supabase
+        .schema('finance').from('chart_of_accounts').select('id')
+        .eq('code', '2210')
+        .eq('organization_id', auth.orgId)
+        .eq('is_active', true)
+        .maybeSingle());
+
+      if (!withholdingPayableAccount) {
+        return NextResponse.json({
+          error: 'Vendor bill has withholding_amount but WHT Payable control account 2210 is not configured.',
+        }, { status: 400 });
+      }
+
+      rpcLines.push({
+        account_id: withholdingPayableAccount.id,
+        debit_amount: 0,
+        credit_amount: withholdingAmount,
+        description: `WHT Payable: ${bill.bill_number || 'N/A'}`,
+      });
+    }
+
     const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${bill.vendor_id || 'Vendor'} - ${bill.description || ''}`,
       p_transaction_date: bill.bill_date || new Date().toISOString().split('T')[0],

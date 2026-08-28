@@ -55,7 +55,7 @@ const MODULES: Record<string, {
     },
   },
   journal_entry: {
-    table: 'finance.journal_entries', permPrefix: 'JOURNAL', amountField: 'total_debit', creatorField: 'created_by',
+    table: 'journal_entries', permPrefix: 'JOURNAL', amountField: 'total_debit', creatorField: 'created_by',
     periodIdField: 'period_id', periodDateField: 'transaction_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'JOURNAL_UPDATE' },
@@ -67,7 +67,7 @@ const MODULES: Record<string, {
     },
   },
   budget: {
-    table: 'finance.budgets', permPrefix: 'BUDGET', amountField: 'total_amount', creatorField: 'submitted_by',
+    table: 'budgets', permPrefix: 'BUDGET', amountField: 'total_amount', creatorField: 'submitted_by',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'BUDGET_UPDATE' },
       approve: { from: ['SUBMITTED'], perm: 'BUDGET_APPROVE' },
@@ -155,7 +155,10 @@ export async function POST(req: NextRequest) {
     }
  
     // H1 FIX: Add organization_id filter to record fetch
-    const { data: record, error: fetchErr } = await supabase.from(config.table).select('*').eq('id', recordId).eq('organization_id', auth.orgId).single();
+    const recordQuery = module === 'journal_entry' 
+      ? supabase.schema('finance').from(config.table)
+      : supabase.from(config.table);
+    const { data: record, error: fetchErr } = await recordQuery.select('*').eq('id', recordId).eq('organization_id', auth.orgId).single();
     if (fetchErr || !record) return NextResponse.json({ error: 'Record not found' }, { status: 404 });
  
     const currentStatus = (record.status || '').toUpperCase();
@@ -250,8 +253,10 @@ export async function POST(req: NextRequest) {
     }
  
     // FIXED: Add WHERE clause on current status to prevent TOCTOU race condition
-        const { count, error: updateErr } = await supabase
-      .from(config.table)
+        const updateQuery = module === 'journal_entry' 
+      ? supabase.schema('finance').from(config.table)
+      : supabase.from(config.table);
+    const { count, error: updateErr } = await updateQuery
       .update(updateData)
       .eq('id', recordId)
       .eq('status', currentStatus)

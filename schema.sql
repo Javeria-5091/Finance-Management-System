@@ -1003,7 +1003,7 @@ ALTER FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" 
 
 CREATE OR REPLACE FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
 DECLARE
   v_receipt finance.payment_receipts%ROWTYPE;
@@ -1023,7 +1023,7 @@ BEGIN
     RAISE EXCEPTION 'User context mismatch';
   END IF;
 
-  IF NOT core.has_permission(p_user_id, 'APPROVE_INVOICE') THEN
+  IF NOT core.has_permission(p_user_id, 'PAYMENT_RECEIPT_UPDATE') THEN
     RAISE EXCEPTION 'Permission denied';
   END IF;
 
@@ -1081,6 +1081,15 @@ BEGIN
 
     IF v_invoice.client_id <> v_receipt.client_id THEN
       RAISE EXCEPTION 'Invoice % does not belong to the payment receipt client', v_invoice.invoice_number;
+    END IF;
+
+    IF upper(COALESCE(v_invoice.currency, 'PKR'))
+       <> upper(COALESCE(v_receipt.currency, 'PKR')) THEN
+      RAISE EXCEPTION
+        'Currency mismatch: payment receipt is % but invoice % is %',
+        COALESCE(v_receipt.currency, 'PKR'),
+        v_invoice.invoice_number,
+        COALESCE(v_invoice.currency, 'PKR');
     END IF;
 
     IF (v_alloc->>'amount')::numeric >
@@ -2469,7 +2478,7 @@ ALTER FUNCTION "finance"."get_period_by_date"("p_date" "date") OWNER TO "postgre
 
 
 CREATE OR REPLACE FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p_organization_id" "uuid", "p_account_type" "text") RETURNS TABLE("account_id" "uuid", "code" "text", "name" "text", "balance" numeric)
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
 BEGIN
@@ -2486,7 +2495,7 @@ BEGIN
   LEFT JOIN finance.journal_lines jl ON jl.account_id=coa.id
   LEFT JOIN finance.journal_entries je ON je.id=jl.journal_entry_id
     AND je.status='POSTED' AND je.fiscal_year_id=p_fiscal_year_id AND je.organization_id=p_organization_id
-  WHERE coa.organization_id=p_organization_id AND coa.account_type=p_account_type
+  WHERE coa.organization_id=p_organization_id AND ((p_account_type='REVENUE' AND coa.account_type IN ('REVENUE','OTHER_INCOME')) OR (p_account_type='EXPENSE' AND coa.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE')))
   GROUP BY coa.id,coa.code,coa.name
   ORDER BY coa.code;
 END;
@@ -3189,6 +3198,10 @@ BEGIN
     RAISE EXCEPTION 'Insufficient privileges to record a payment receipt';
   END IF;
 
+  IF to_regprocedure('finance.post_payment_receipt(uuid,uuid,date)') IS NULL THEN
+    RAISE EXCEPTION 'Required posting function finance.post_payment_receipt(uuid,uuid,date) is not available';
+  END IF;
+
   IF p_amount IS NULL OR p_amount <= 0 THEN
     RAISE EXCEPTION 'Payment amount must be greater than zero';
   END IF;
@@ -3238,6 +3251,15 @@ BEGIN
         RAISE EXCEPTION 'Invoice % not found in your organization', (v_alloc->>'invoice_id');
       END IF;
 
+      IF upper(COALESCE(v_invoice.currency, 'PKR'))
+         <> upper(COALESCE(p_currency, 'PKR')) THEN
+        RAISE EXCEPTION
+          'Currency mismatch: payment receipt is % but invoice % is %',
+          COALESCE(p_currency, 'PKR'),
+          v_invoice.invoice_number,
+          COALESCE(v_invoice.currency, 'PKR');
+      END IF;
+
       v_alloc_amount := (v_alloc->>'amount')::NUMERIC(18,2);
       IF v_alloc_amount IS NULL OR v_alloc_amount <= 0 THEN
         RAISE EXCEPTION 'Invalid allocation amount for invoice %', v_invoice.invoice_number;
@@ -3268,8 +3290,8 @@ BEGIN
     END LOOP;
   END IF;
 
-  IF ABS(v_total_allocated - p_amount) > 0.01 THEN
-    RAISE EXCEPTION 'Total allocations (%) must equal payment amount (%)', v_total_allocated, p_amount;
+  IF v_total_allocated > p_amount + 0.01 THEN
+    RAISE EXCEPTION 'Total allocations (%) cannot exceed payment amount (%)', v_total_allocated, p_amount;
   END IF;
 
   v_journal_id := finance.post_payment_receipt(v_receipt_id, v_period_id, p_payment_date);
@@ -17081,8 +17103,6 @@ GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
 
 
-
-
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
 GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
 
@@ -17136,6 +17156,8 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
+
+
 
 
 
