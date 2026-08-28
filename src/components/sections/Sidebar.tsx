@@ -5,53 +5,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/context/PermissionContext";
-import {
-  LayoutDashboard,
-  FolderKanban,
-  ArrowDownCircle,
-  ArrowUpCircle,
-  FileText,
-  BarChart3,
-  Users,
-  ShieldCheck,
-  X,
-  LogOut,
-  CreditCard,
-  Wallet,
-  BookOpen,
-  ScrollText,
-  CalendarDays,
-  Building2,
-  ChevronDown,
-  ChevronRight,
-  ArrowLeftRight,
-  Scale,
-  TrendingUp,
-  TrendingDown,
-  Calculator,
-  Shield,
-  Landmark,
-  PieChart,
-  Receipt,
-  RotateCcw,
-  Download,
-  Upload,
-  CheckCircle,
-  PiggyBank,
-  UserCircle,
-  UserPlus,
-  Bell,
-  FileSpreadsheet,
-  Hash,
-  BookCheck,
-  FileBarChart,
-  UsersRound,
-  FileCheck,
-  CircleDollarSign,
-  Banknote,
-  Repeat,
-  HardHat,
-  Percent,
+import {LayoutDashboard, FolderKanban, ArrowDownCircle, ArrowUpCircle, FileText, BarChart3, Users, UserCog,
+  ShieldCheck, X, LogOut, CreditCard, Wallet, BookOpen, ScrollText, CalendarDays, Building2, ChevronDown,
+  ChevronRight, ArrowLeftRight, Scale, TrendingUp, TrendingDown, Calculator, Shield, Landmark, PieChart, Receipt,
+  RotateCcw, Download, Upload, CheckCircle, PiggyBank, UserCircle, UserPlus, Bell, FileSpreadsheet, Hash, BookCheck,
+  FileBarChart, UsersRound, FileCheck, CircleDollarSign, Banknote, Repeat, HardHat, Percent, ShieldAlert, KeyRound, 
 } from "lucide-react";
  
 interface SidebarProps {
@@ -61,12 +19,7 @@ interface SidebarProps {
  
 // ICON MAP - All icons used in navigation
 const ICONS: Record<string, any> = {
-  LayoutDashboard,
-  FolderKanban,
-  ArrowDownCircle,
-  ArrowUpCircle,
-  FileText,
-  BarChart3,
+  LayoutDashboard, FolderKanban, ArrowDownCircle, ArrowUpCircle, FileText, BarChart3,
   Users,
   ShieldCheck,
   CreditCard,
@@ -105,6 +58,9 @@ const ICONS: Record<string, any> = {
   Repeat,
   HardHat,
   Percent,
+  ShieldAlert,
+  KeyRound,
+  UserCog,
 };
  
 interface NavItem {
@@ -261,6 +217,12 @@ const navGroups: NavGroup[] = [
       { id: "numbering", label: "Numbering Sequences", icon: "Hash", path: "/dashboard/settings/numbering", perm: "SETTINGS_READ" },
       { id: "exchange-rates", label: "Exchange Rates", icon: "Scale", path: "/dashboard/settings/exchange-rates", perm: "SETTINGS_READ" },
       { id: "notifications", label: "Notifications", icon: "Bell", path: "/dashboard/settings/notifications", perm: "SETTINGS_READ" },
+      // NEW (Module 1 audit fix): these three tables (core.approval_limits,
+      // core.user_permission_overrides, core.delegations) previously had no
+      // UI anywhere in the app despite full RLS/audit support (spec 7.1-7.3).
+      { id: "approval-limits", label: "Approval Limits", icon: "ShieldAlert", path: "/dashboard/settings/approval-limits", perm: "ADMIN_USERS" },
+      { id: "permission-overrides", label: "Permission Overrides", icon: "KeyRound", path: "/dashboard/settings/permission-overrides", perm: "ADMIN_USERS" },
+      { id: "delegations", label: "Delegations", icon: "UserCog", path: "/dashboard/settings/delegations", perm: "ADMIN_USERS" },
     ],
   },
   {

@@ -7,7 +7,7 @@ import {
   ShieldCheck, Users, Key, Save, X, Plus, Trash2, 
   Loader2, AlertCircle, CheckCircle2, AlertTriangle, 
   Info, Crown, ArrowRightLeft, UserPlus, Calendar, UsersRound,
-  Search
+  Search, Settings2
 } from "lucide-react";
 
 const SCOPE_OPTIONS = ['ALL', 'DEPARTMENT', 'PROJECT', 'OWN'];
@@ -158,6 +158,59 @@ export default function UsersRolesPage() {
   const [transferMyNewRole, setTransferMyNewRole] = useState<string>("");
   const [transferring, setTransferring] = useState(false);
 
+  // NEW (Module 1 audit fix): department / manager / employment-status
+  // management. Spec 5.1 requires this; previously no UI or endpoint existed.
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [profileModalUser, setProfileModalUser] = useState<any>(null);
+  const [departments, setDepartments] = useState<any[]>([]);
+  const [profileForm, setProfileForm] = useState({ department_id: "", manager_id: "", employment_status: "ACTIVE" });
+  const [savingProfile, setSavingProfile] = useState(false);
+
+  const openProfileModal = async (u: any) => {
+    setProfileModalUser(u);
+    setProfileForm({
+      department_id: u.department_id || "",
+      manager_id: u.manager_id || "",
+      employment_status: u.employment_status || "ACTIVE",
+    });
+    setShowProfileModal(true);
+    if (departments.length === 0) {
+      try {
+        const res = await fetch("/api/admin/user-profile");
+        const payload = await res.json();
+        if (res.ok) setDepartments(payload.departments || []);
+      } catch { /* non-fatal — department dropdown will just be empty */ }
+    }
+  };
+
+  const saveProfile = async () => {
+    if (!profileModalUser) return;
+    setSavingProfile(true);
+    try {
+      const res = await fetch("/api/admin/user-profile", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: profileModalUser.user_id,
+          department_id: profileForm.department_id || null,
+          clear_department: !profileForm.department_id,
+          manager_id: profileForm.manager_id || null,
+          clear_manager: !profileForm.manager_id,
+          employment_status: profileForm.employment_status,
+        }),
+      });
+      const payload = await res.json();
+      if (!res.ok) throw new Error(payload?.error || "Save failed");
+      addToast("success", `Profile updated for "${profileModalUser.full_name || profileModalUser.email}"`);
+      setShowProfileModal(false);
+      fetchInitialData();
+    } catch (err: any) {
+      addToast("error", `Failed to update profile: ${err.message}`);
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
   // ==========================================
   // HELPERS
   // ==========================================
@@ -266,8 +319,19 @@ export default function UsersRolesPage() {
         });
       }
 
+      // NEW (Module 1 audit fix): department / manager / employment status,
+      // via the richer admin_list_users() RPC added in migration P1_070.
+      // Fetched separately and merged in below so the existing role-count
+      // logic above is untouched if this RPC isn't deployed yet.
+      const profileDetailsMap: Record<string, any> = {};
+      try {
+        const { data: profileDetails } = await supabase.rpc("admin_list_users");
+        (profileDetails || []).forEach((p: any) => { profileDetailsMap[p.user_id] = p; });
+      } catch { /* non-fatal — profile management fields just won't populate */ }
+
       const mergedUsers = allAuthUsers.map((u: any) => {
         const roleAssignment = userRolesMap[u.user_id];
+        const details = profileDetailsMap[u.user_id];
         return {
           user_id: u.user_id,
           full_name: u.full_name || '',
@@ -282,7 +346,12 @@ export default function UsersRolesPage() {
           effective_to: roleAssignment?.effective_to || null,
           delegated_from: roleAssignment?.delegated_from || null,
           is_active: roleAssignment?.is_active ?? false,
-          hasRole: !!roleAssignment
+          hasRole: !!roleAssignment,
+          department_id: details?.department_id || null,
+          department_name: details?.department_name || null,
+          manager_id: details?.manager_id || null,
+          manager_name: details?.manager_name || null,
+          employment_status: details?.employment_status || 'ACTIVE',
         };
       });
 
@@ -462,6 +531,16 @@ export default function UsersRolesPage() {
     setShowCEOTransfer(true);
   };
 
+  // FIX (Module 1 audit finding — Critical): this used to be 5 separate,
+  // unchecked Supabase writes (delete old CEO's user_roles, insert new CEO
+  // user_roles, insert demoted role, update profiles.role twice) with no
+  // transaction and no error-checking on 4 of the 5 calls. A failure partway
+  // through could leave the organization with NO CEO while the UI still
+  // reported success. It now delegates the entire operation to
+  // core.transfer_ceo_role(), a single SECURITY DEFINER function that runs
+  // as one transaction — any failure inside it rolls back everything, and
+  // the single RPC call surfaces a real error here instead of silently
+  // leaving a half-completed transfer.
   const executeCEOTransfer = async () => {
     const ceoRole = getCEORole();
     if (!ceoRole) { addToast("error", "CEO role not found"); return; }
@@ -471,17 +550,24 @@ export default function UsersRolesPage() {
 
     setTransferring(true);
     try {
-      await supabase.schema("core").from("user_roles").delete().eq("user_id", user?.id);
-      await supabase.schema("core").from("user_roles").insert({ user_id: transferTargetUserId, role_id: ceoRole.id, created_by: user?.id });
-      await supabase.schema("core").from("user_roles").insert({ user_id: user?.id, role_id: transferMyNewRole, created_by: user?.id });
-      await supabase.from("profiles").update({ role: roles.find(r => r.id === transferMyNewRole)?.name || 'EMPLOYEE' }).eq("user_id", user?.id);
-      await supabase.from("profiles").update({ role: ceoRole.name }).eq("user_id", transferTargetUserId);
+      const { error } = await supabase.schema("core").rpc("transfer_ceo_role", {
+        p_new_ceo_user_id: transferTargetUserId,
+        p_outgoing_role_id: transferMyNewRole,
+        p_reason: `CEO transfer initiated from Users & Roles admin screen by ${user?.email || user?.id}`,
+      });
+
+      if (error) throw error;
 
       const targetUser = allUsers.find(u => u.user_id === transferTargetUserId);
       addToast("success", `CEO transferred to "${targetUser?.full_name}". You are now "${roles.find(r => r.id === transferMyNewRole)?.display_name}".`);
       setShowCEOTransfer(false);
       fetchInitialData();
-    } catch (err: any) { addToast("error", `Transfer failed: ${err.message}`); }
+    } catch (err: any) {
+      // Nothing was changed — transfer_ceo_role() is one transaction, so an
+      // error here means the CEO role was NOT moved and no partial state
+      // was left behind.
+      addToast("error", `Transfer failed — nothing was changed: ${err.message}`);
+    }
     finally { setTransferring(false); }
   };
 
@@ -1289,6 +1375,7 @@ className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px
 <th className="p-4">User</th>
 <th className="p-4">Current Role</th>
 <th className="p-4 hidden sm:table-cell">Status</th>
+<th className="p-4 hidden md:table-cell">Department / Manager</th>
 <th className="p-4 text-right">Action</th>
 </tr>
 </thead>
@@ -1341,7 +1428,24 @@ Pending
 </span>
 )}
 </td>
+<td className="p-4 hidden md:table-cell text-xs text-gray-500 dark:text-gray-400">
+<div>{u.department_name || <span className="italic text-gray-400">No department</span>}</div>
+<div className="text-gray-400">{u.manager_name ? `Reports to ${u.manager_name}` : 'No manager set'}</div>
+<div className="mt-0.5">
+<span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${u.employment_status === 'ACTIVE' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300'}`}>
+{u.employment_status || 'ACTIVE'}
+</span>
+</div>
+</td>
 <td className="p-4 text-right">
+<div className="flex items-center justify-end gap-2">
+<button
+onClick={() => openProfileModal(u)}
+title="Manage department, manager, and employment status"
+className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded-lg transition-colors"
+>
+<Settings2 size={14} />
+</button>
 {isCEOUser && isMe ? (
 <span className="text-xs text-amber-600 dark:text-amber-400 font-medium flex items-center justify-end gap-1">
 <Crown size={12} /> Use Transfer
@@ -1370,6 +1474,7 @@ className="border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text
 ))}
 </select>
 )}
+</div>
 </td>
 </tr>
 );
@@ -1377,6 +1482,68 @@ className="border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text
 )}
 </tbody>
 </table>
+</div>
+</div>
+)}
+
+{/* NEW (Module 1 audit fix): Manage Profile Modal — department / manager / employment status */}
+{showProfileModal && profileModalUser && (
+<div className="fixed inset-0 z-[95] flex items-center justify-center p-4">
+<div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={!savingProfile ? () => setShowProfileModal(false) : undefined} />
+<div className="relative bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-2xl w-full max-w-md shadow-2xl">
+<div className="flex items-center justify-between p-6 border-b dark:border-gray-700">
+<h3 className="text-lg font-bold text-gray-900 dark:text-white">
+Manage Profile — {profileModalUser.full_name || profileModalUser.email}
+</h3>
+<button onClick={() => setShowProfileModal(false)} disabled={savingProfile} className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700">
+<X size={18} className="text-gray-500" />
+</button>
+</div>
+<div className="p-6 space-y-4">
+<div>
+<label className="block text-xs font-medium text-gray-500 mb-1.5">Department</label>
+<select
+value={profileForm.department_id}
+onChange={(e) => setProfileForm({ ...profileForm, department_id: e.target.value })}
+className="w-full px-4 py-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+>
+<option value="">-- No department --</option>
+{departments.map((d) => (<option key={d.id} value={d.id}>{d.name}</option>))}
+</select>
+</div>
+<div>
+<label className="block text-xs font-medium text-gray-500 mb-1.5">Manager</label>
+<select
+value={profileForm.manager_id}
+onChange={(e) => setProfileForm({ ...profileForm, manager_id: e.target.value })}
+className="w-full px-4 py-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+>
+<option value="">-- No manager --</option>
+{allUsers.filter(u => u.user_id !== profileModalUser.user_id).map((u) => (
+<option key={u.user_id} value={u.user_id}>{u.full_name || u.email}</option>
+))}
+</select>
+</div>
+<div>
+<label className="block text-xs font-medium text-gray-500 mb-1.5">Employment Status</label>
+<select
+value={profileForm.employment_status}
+onChange={(e) => setProfileForm({ ...profileForm, employment_status: e.target.value })}
+className="w-full px-4 py-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+>
+<option value="ACTIVE">Active</option>
+<option value="ON_LEAVE">On Leave</option>
+<option value="INACTIVE">Inactive</option>
+<option value="TERMINATED">Terminated</option>
+</select>
+</div>
+</div>
+<div className="flex gap-3 p-6 border-t dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/30 rounded-b-2xl">
+<button onClick={() => setShowProfileModal(false)} disabled={savingProfile} className="flex-1 px-4 py-2.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-xl text-sm font-medium transition-colors disabled:opacity-50">Cancel</button>
+<button onClick={saveProfile} disabled={savingProfile} className="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+{savingProfile ? <Loader2 size={16} className="animate-spin" /> : <Settings2 size={16} />} Save
+</button>
+</div>
 </div>
 </div>
 )}

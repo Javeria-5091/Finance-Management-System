@@ -3,8 +3,9 @@ import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/context/PermissionContext";
-import { Plus, CheckCircle, CreditCard, X, Loader2 } from "lucide-react";
+import { Plus, CheckCircle, CreditCard, X, Loader2, Layers3 } from "lucide-react";
 import ReasonModal from "@/components/finance/ReasonModal";
+import Link from "next/link";
 
 const STATUS_STYLES: Record<string, string> = {
   DRAFT: "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
@@ -339,6 +340,10 @@ export default function VendorPaymentsPage() {
             Pay vendors and allocate payments against multiple bills
           </p>
         </div>
+        <div className="flex items-center gap-2">
+          <Link href="/dashboard/vendor-payments/batches" className="flex items-center gap-2 border border-gray-300 dark:border-gray-600 px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700">
+            <Layers3 size={16} /> Payment Batches
+          </Link>
         {hasPermission("EXPENSE_CREATE") && (
           <button
             onClick={() => openCreateModal()}
@@ -347,6 +352,7 @@ export default function VendorPaymentsPage() {
             <Plus size={16} /> Record Payment
           </button>
         )}
+        </div>
       </div>
 
       {/* SUCCESS BANNER */}

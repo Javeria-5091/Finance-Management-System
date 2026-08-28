@@ -32,16 +32,22 @@ export default function ProjectsPage() {
     if (!user) return;
     setLoading(true);
     
-    const [projRes, budRes, expRes] = await Promise.all([
-      supabase.from("projects").select("*").order("created_at", { ascending: false }),
-      supabase.from("budgets").select("*"),
-      supabase.from("expenses").select("*")
-    ]);
-
-    if (projRes.data) setProjects(projRes.data);
-    if (budRes.data) setBudgets(budRes.data);
-    if (expRes.data) setExpenses(expRes.data);
-    setLoading(false);
+    try {
+      const [projRes, budRes, expRes] = await Promise.all([
+        fetch("/api/projects?page=1&pageSize=100"),
+        supabase.from("budgets").select("*").order("created_at", { ascending: false }),
+        supabase.from("expenses").select("*").eq("status", "POSTED")
+      ]);
+      const projectJson = await projRes.json();
+      if (!projRes.ok) throw new Error(projectJson.error || "Failed to load projects");
+      setProjects((projectJson.data || []) as Project[]);
+      if (budRes.data) setBudgets(budRes.data);
+      if (expRes.data) setExpenses(expRes.data);
+    } catch (err: any) {
+      toast.error("Failed to load projects: " + (err.message || "Unknown error"));
+    } finally {
+      setLoading(false);
+    }
   }, [user]);
 
   useEffect(() => { fetchProjects(); }, [fetchProjects]);
@@ -75,22 +81,24 @@ export default function ProjectsPage() {
       return;
     }
     setFormLoading(true);
-    const safeData = { ...data, end_date: data.end_date === "" ? null : data.end_date };
-    let error = null;
-
-    if (editingData) {
-      const res = await supabase.from("projects").update(safeData).eq("id", editingData.id);
-      error = res.error;
-      if (!error) await logAction({ action: "UPDATE", entityType: "Project", entityId: editingData.id, description: `Updated project: ${safeData.name}`, sourceModule: "projects" });
-    } else {
-      const res = await supabase.from("projects").insert({ ...safeData, user_id: user?.id }).select("id").single();
-      error = res.error;
-      if (!error && res.data?.id) await logAction({ action: "CREATE", entityType: "Project", entityId: res.data.id, description: `Created project: ${safeData.name}`, sourceModule: "projects" });
+    try {
+      const safeData = { ...data, end_date: data.end_date === "" ? null : data.end_date };
+      const response = await fetch(editingData ? `/api/projects/${editingData.id}` : "/api/projects", {
+        method: editingData ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(safeData),
+      });
+      const json = await response.json();
+      if (!response.ok) throw new Error(json.error || "Project save failed");
+      toast.success(editingData ? "Project updated successfully" : "Project created successfully");
+      setShowForm(false);
+      setEditingData(null);
+      await fetchProjects();
+    } catch (err: any) {
+      toast.error(`Project save failed: ${err.message || "Unknown error"}`);
+    } finally {
+      setFormLoading(false);
     }
-
-    if (error) alert("Database Error: " + error.message);
-    else { setShowForm(false); setEditingData(null); fetchProjects(); }
-    setFormLoading(false);
   }
 
   async function handleDelete() {
@@ -100,14 +108,21 @@ export default function ProjectsPage() {
       return;
     }
     const project = projects.find(p => p.id === deleteId);
-    const { error } = await supabase.from("projects").delete().eq("id", deleteId);
-    if (error) {
-      console.error("Project delete error:", error);
-      toast.error(`Failed to delete project: ${error.message}`);
-      return;
+    try {
+      const response = await fetch(`/api/projects/${deleteId}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Project deactivated from Projects module" }),
+      });
+      const json = await response.json();
+      if (!response.ok) throw new Error(json.error || "Project deletion failed");
+      if (project) await logAction({ action: "DELETE", entityType: "Project", entityId: deleteId, description: `Deactivated project: ${project.name}`, severity: "high", sourceModule: "projects" });
+      setDeleteId(null);
+      await fetchProjects();
+    } catch (err: any) {
+      console.error("Project delete error:", err);
+      toast.error(`Failed to deactivate project: ${err.message}`);
     }
-    if (project) await logAction({ action: "DELETE", entityType: "Project", entityId: deleteId, description: `Deleted project: ${project.name}`, severity: "high", sourceModule: "projects" });
-    setDeleteId(null); fetchProjects();
   }
   
   function getStatusColor(status: string) {

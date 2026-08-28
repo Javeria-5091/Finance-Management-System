@@ -3,12 +3,13 @@ import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/context/PermissionContext";
-import { FileText, Plus, Pencil, Eye, X, Loader2 } from "lucide-react";
+import { FileText, Plus, Pencil, Eye, X, Loader2, Repeat2 } from "lucide-react";
 import LineItemsEditor from "@/components/finance/LineItemsEditor";
 import StatusActions from "@/components/finance/StatusActions";
 import ReasonModal from "@/components/finance/ReasonModal";
 import { callWorkflow } from "@/lib/workflow";
 import toast from "react-hot-toast";
+import Link from "next/link";
 
 /* ═══════════════════════════════════════════════════════
    SAFE HELPERS — Null/undefined/NaN protection
@@ -515,6 +516,10 @@ const handleLineChange = useCallback((newLines: any[]) => {
             Record supplier expenses with line item breakdown and tax
           </p>
         </div>
+        <div className="flex items-center gap-2">
+          <Link href="/dashboard/vendor-bills/recurring" className="flex items-center gap-2 border border-gray-300 dark:border-gray-600 px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700">
+            <Repeat2 size={16} /> Recurring Bills
+          </Link>
         {hasPermission("EXPENSE_CREATE") && (
           <button
             onClick={openCreateModal}
@@ -523,6 +528,7 @@ const handleLineChange = useCallback((newLines: any[]) => {
             <Plus size={16} /> Create Bill
           </button>
         )}
+        </div>
       </div>
 
       {/* ═══════ TABLE ═══════ */}
