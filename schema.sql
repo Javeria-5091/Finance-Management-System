@@ -47,6 +47,12 @@ COMMENT ON SCHEMA "legacy" IS 'Archived legacy/duplicate tables retained for his
 
 
 
+CREATE SCHEMA IF NOT EXISTS "ops";
+
+
+ALTER SCHEMA "ops" OWNER TO "postgres";
+
+
 COMMENT ON SCHEMA "public" IS 'standard public schema';
 
 
@@ -1449,6 +1455,67 @@ $$;
 ALTER FUNCTION "finance"."check_journal_balance"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."close_period"("p_period_id" "uuid", "p_closed_by" "uuid" DEFAULT NULL::"uuid", "p_status" "text" DEFAULT 'SOFT_CLOSED'::"text", "p_reason" "text" DEFAULT NULL::"text") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_period finance.accounting_periods%ROWTYPE;
+  v_user_id uuid := COALESCE(p_closed_by, auth.uid());
+  v_org_id uuid := core.current_user_org_id();
+BEGIN
+  IF v_org_id IS NULL OR v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authentication and organization context are required';
+  END IF;
+
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Only CEO or Finance Head may close an accounting period';
+  END IF;
+
+  IF p_status NOT IN ('SOFT_CLOSED', 'HARD_CLOSED') THEN
+    RAISE EXCEPTION 'Invalid close status: %. Expected SOFT_CLOSED or HARD_CLOSED', p_status;
+  END IF;
+
+  IF NULLIF(btrim(COALESCE(p_reason, '')), '') IS NULL THEN
+    RAISE EXCEPTION 'A reason is required to close a period';
+  END IF;
+
+  SELECT ap.*
+  INTO v_period
+  FROM finance.accounting_periods ap
+  WHERE ap.id = p_period_id
+    AND ap.organization_id = v_org_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Accounting period not found or access denied';
+  END IF;
+
+  IF v_period.status NOT IN ('OPEN', 'SOFT_CLOSED') THEN
+    RAISE EXCEPTION 'Period cannot be closed from status %', v_period.status;
+  END IF;
+
+  IF v_period.status = 'SOFT_CLOSED' AND p_status = 'SOFT_CLOSED' THEN
+    RAISE EXCEPTION 'Period is already SOFT_CLOSED';
+  END IF;
+
+  PERFORM set_config('app.current_user_id', v_user_id::text, true);
+
+  UPDATE finance.accounting_periods
+  SET status = p_status,
+      closed_by = v_user_id,
+      closed_at = NOW(),
+      reopening_reason = p_reason,
+      updated_at = NOW()
+  WHERE id = v_period.id
+    AND organization_id = v_org_id;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."close_period"("p_period_id" "uuid", "p_closed_by" "uuid", "p_status" "text", "p_reason" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."compute_platform_fee"("p_platform_id" "uuid", "p_amount" numeric, "p_source_type" character varying DEFAULT 'EXPENSE'::character varying) RETURNS numeric
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
@@ -1628,77 +1695,76 @@ ALTER FUNCTION "finance"."compute_tax_liability"("p_tax_recon_id" "uuid") OWNER 
 
 CREATE OR REPLACE FUNCTION "finance"."create_fiscal_year_with_periods"("p_name" "text", "p_start_date" "date", "p_end_date" "date", "p_description" "text" DEFAULT NULL::"text", "p_created_by" "uuid" DEFAULT NULL::"uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ 
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
 DECLARE
-    v_fy_id UUID;
-    v_month_count INTEGER;
-    v_user_id UUID;  -- ✅ FIX: Declare variable
+  v_fy_id uuid;
+  v_month_count integer;
+  v_user_id uuid := COALESCE(p_created_by, auth.uid());
+  v_org_id uuid := core.current_user_org_id();
 BEGIN
-    -- ✅ FIX: Resolve user ID from multiple sources
-    v_user_id := COALESCE(
-        p_created_by,
-        auth.uid(),
-        NULL
-    );
+  IF v_org_id IS NULL THEN
+    RAISE EXCEPTION 'Organization context is required';
+  END IF;
 
-    -- ✅ FIX: Set session variable so audit triggers can read it
-    IF v_user_id IS NOT NULL THEN
-        PERFORM set_config('app.current_user_id', v_user_id::TEXT, true);
-    END IF;
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'Authenticated user is required';
+  END IF;
 
-    -- Validate dates
-    IF p_end_date <= p_start_date THEN
-        RAISE EXCEPTION 'End date must be after start date';
-    END IF;
-    
-    -- Calculate months
-    v_month_count := (EXTRACT(YEAR FROM p_end_date) - EXTRACT(YEAR FROM p_start_date)) * 12 
-                   + EXTRACT(MONTH FROM p_end_date) - EXTRACT(MONTH FROM p_start_date) + 1;
-    
-    IF v_month_count < 1 THEN
-        RAISE EXCEPTION 'Must be at least 1 month long';
-    END IF;
-    
-    IF v_month_count > 24 THEN
-        RAISE EXCEPTION 'Cannot exceed 24 months';
-    END IF;
-    
-    -- Check for overlapping fiscal years
-    IF EXISTS (
-        SELECT 1 FROM finance.fiscal_years 
-        WHERE p_start_date < end_date AND p_end_date > start_date
-    ) THEN
-        RAISE EXCEPTION 'Overlaps with an existing fiscal year';
-    END IF;
-    
-    -- Create fiscal year
-    INSERT INTO finance.fiscal_years (name, start_date, end_date, description, created_by)
-    VALUES (p_name, p_start_date, p_end_date, p_description, v_user_id)  -- ✅ FIX: Use v_user_id
-    RETURNING id INTO v_fy_id;
-    
-    -- Create periods with PENDING status
-    INSERT INTO finance.accounting_periods (fiscal_year_id, period_number, name, start_date, end_date, status, created_by)
-    SELECT 
-        v_fy_id,
-        gs.period_num,
-        TO_CHAR(gs.month_start, 'Month YYYY'),
-        gs.month_start,
-        LEAST(
-            (gs.month_start + INTERVAL '1 month' - INTERVAL '1 day')::date,
-            p_end_date
-        ),
-        'PENDING',
-        v_user_id  -- ✅ FIX: Removed duplicate p_created_by
-    FROM (
-        SELECT 
-            generate_series(1, v_month_count) AS period_num,
-            (p_start_date + (generate_series(1, v_month_count) - 1) * INTERVAL '1 month')::date AS month_start
-    ) gs;
-    
-    RETURN v_fy_id;
+  IF p_end_date <= p_start_date THEN
+    RAISE EXCEPTION 'End date must be after start date';
+  END IF;
+
+  v_month_count :=
+    (EXTRACT(YEAR FROM p_end_date) - EXTRACT(YEAR FROM p_start_date)) * 12
+    + EXTRACT(MONTH FROM p_end_date) - EXTRACT(MONTH FROM p_start_date) + 1;
+
+  IF v_month_count < 1 OR v_month_count > 24 THEN
+    RAISE EXCEPTION 'Fiscal year must be between 1 and 24 months';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM finance.fiscal_years fy
+    WHERE fy.organization_id = v_org_id
+      AND p_start_date < fy.end_date
+      AND p_end_date > fy.start_date
+  ) THEN
+    RAISE EXCEPTION 'Overlaps with an existing fiscal year in this organization';
+  END IF;
+
+  PERFORM set_config('app.current_user_id', v_user_id::text, true);
+
+  INSERT INTO finance.fiscal_years
+    (name, start_date, end_date, description, created_by, organization_id)
+  VALUES
+    (p_name, p_start_date, p_end_date, p_description, v_user_id, v_org_id)
+  RETURNING id INTO v_fy_id;
+
+  INSERT INTO finance.accounting_periods
+    (fiscal_year_id, period_number, name, start_date, end_date,
+     status, created_by, organization_id)
+  SELECT
+    v_fy_id,
+    gs.period_num,
+    TO_CHAR(gs.month_start, 'Month YYYY'),
+    gs.month_start,
+    LEAST(
+      (gs.month_start + INTERVAL '1 month' - INTERVAL '1 day')::date,
+      p_end_date
+    ),
+    'PENDING',
+    v_user_id,
+    v_org_id
+  FROM (
+    SELECT
+      generate_series(1, v_month_count) AS period_num,
+      (p_start_date + (generate_series(1, v_month_count) - 1) * INTERVAL '1 month')::date AS month_start
+  ) gs;
+
+  RETURN v_fy_id;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."create_fiscal_year_with_periods"("p_name" "text", "p_start_date" "date", "p_end_date" "date", "p_description" "text", "p_created_by" "uuid") OWNER TO "postgres";
@@ -4086,6 +4152,205 @@ $$;
 
 
 ALTER FUNCTION "finance"."validate_vendor_payment_allocation"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "ops"."health_summary"() RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'ops', 'public', 'core'
+    AS $$
+DECLARE
+  v_org           UUID;
+  v_open_errors   BIGINT;
+  v_open_critical BIGINT;
+  v_last_event    TIMESTAMPTZ;
+BEGIN
+
+  v_org := core.current_user_org_id();
+
+
+  -- --------------------------------------------------------------
+  -- Authenticated application health must have organization
+  -- context.
+  -- --------------------------------------------------------------
+
+  IF v_org IS NULL THEN
+
+    RAISE EXCEPTION
+      'organization context is required for health summary';
+
+  END IF;
+
+
+  -- --------------------------------------------------------------
+  -- Only current organization's monitoring events are included.
+  -- --------------------------------------------------------------
+
+  SELECT
+    count(*)
+      FILTER (
+        WHERE severity IN ('error', 'critical')
+          AND status = 'open'
+      ),
+
+    count(*)
+      FILTER (
+        WHERE severity = 'critical'
+          AND status = 'open'
+      ),
+
+    max(occurred_at)
+
+  INTO
+    v_open_errors,
+    v_open_critical,
+    v_last_event
+
+  FROM ops.monitoring_events
+
+  WHERE organization_id = v_org;
+
+
+  RETURN jsonb_build_object(
+
+    'status',
+      CASE
+        WHEN v_open_critical > 0
+          THEN 'critical'
+
+        WHEN v_open_errors > 0
+          THEN 'degraded'
+
+        ELSE 'healthy'
+      END,
+
+    'open_errors',
+      COALESCE(v_open_errors, 0),
+
+    'open_critical',
+      COALESCE(v_open_critical, 0),
+
+    'last_event_at',
+      v_last_event,
+
+    'organization_id',
+      v_org,
+
+    'checked_at',
+      now()
+
+  );
+
+END;
+$$;
+
+
+ALTER FUNCTION "ops"."health_summary"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "ops"."record_monitoring_event"("p_service" "text", "p_event_type" "text", "p_severity" "text", "p_message" "text", "p_metadata" "jsonb" DEFAULT '{}'::"jsonb") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'ops', 'public', 'core'
+    AS $$
+DECLARE
+  v_org UUID;
+  v_id  UUID;
+BEGIN
+
+  -- --------------------------------------------------------------
+  -- Resolve organization from authenticated context.
+  -- --------------------------------------------------------------
+
+  v_org := core.current_user_org_id();
+
+
+  -- --------------------------------------------------------------
+  -- Validate required fields.
+  -- --------------------------------------------------------------
+
+  IF p_service IS NULL
+     OR btrim(p_service) = '' THEN
+
+    RAISE EXCEPTION
+      'monitoring service is required';
+
+  END IF;
+
+
+  IF p_event_type IS NULL
+     OR btrim(p_event_type) = '' THEN
+
+    RAISE EXCEPTION
+      'monitoring event_type is required';
+
+  END IF;
+
+
+  IF p_message IS NULL
+     OR btrim(p_message) = '' THEN
+
+    RAISE EXCEPTION
+      'monitoring message is required';
+
+  END IF;
+
+
+  IF p_severity IS NULL
+     OR p_severity NOT IN (
+       'info',
+       'warning',
+       'error',
+       'critical'
+     ) THEN
+
+    RAISE EXCEPTION
+      'invalid monitoring severity';
+
+  END IF;
+
+
+  -- --------------------------------------------------------------
+  -- Organization context is mandatory for authenticated calls.
+  -- --------------------------------------------------------------
+
+  IF v_org IS NULL THEN
+
+    RAISE EXCEPTION
+      'organization context is required for monitoring events';
+
+  END IF;
+
+
+  -- --------------------------------------------------------------
+  -- Insert tenant-scoped monitoring event.
+  -- --------------------------------------------------------------
+
+  INSERT INTO ops.monitoring_events (
+    organization_id,
+    service,
+    event_type,
+    severity,
+    message,
+    metadata
+  )
+  VALUES (
+    v_org,
+    btrim(p_service),
+    btrim(p_event_type),
+    p_severity,
+    btrim(p_message),
+    COALESCE(p_metadata, '{}'::jsonb)
+  )
+  RETURNING id
+  INTO v_id;
+
+
+  RETURN v_id;
+
+END;
+$$;
+
+
+ALTER FUNCTION "ops"."record_monitoring_event"("p_service" "text", "p_event_type" "text", "p_severity" "text", "p_message" "text", "p_metadata" "jsonb") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."balance_sheet"() RETURNS json
@@ -8809,6 +9074,26 @@ COMMENT ON TABLE "legacy"."tax_returns" IS 'ARCHIVED (Migration 032): formerly p
 
 
 
+CREATE TABLE IF NOT EXISTS "ops"."monitoring_events" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid",
+    "service" "text" NOT NULL,
+    "event_type" "text" NOT NULL,
+    "severity" "text" DEFAULT 'info'::"text" NOT NULL,
+    "status" "text" DEFAULT 'open'::"text" NOT NULL,
+    "message" "text" NOT NULL,
+    "metadata" "jsonb" DEFAULT '{}'::"jsonb" NOT NULL,
+    "occurred_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "resolved_at" timestamp with time zone,
+    "resolved_by" "uuid",
+    CONSTRAINT "monitoring_events_severity_check" CHECK (("severity" = ANY (ARRAY['info'::"text", 'warning'::"text", 'error'::"text", 'critical'::"text"]))),
+    CONSTRAINT "monitoring_events_status_check" CHECK (("status" = ANY (ARRAY['open'::"text", 'acknowledged'::"text", 'resolved'::"text"])))
+);
+
+
+ALTER TABLE "ops"."monitoring_events" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."budgets" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -11708,6 +11993,11 @@ ALTER TABLE ONLY "legacy"."tax_returns"
 
 
 
+ALTER TABLE ONLY "ops"."monitoring_events"
+    ADD CONSTRAINT "monitoring_events_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."budgets"
     ADD CONSTRAINT "budgets_pkey" PRIMARY KEY ("id");
 
@@ -12594,6 +12884,14 @@ CREATE UNIQUE INDEX "uq_vendor_bill_number" ON "finance"."vendor_bills" USING "b
 
 
 CREATE INDEX "idx_financial_accounts_pub_active" ON "legacy"."financial_accounts" USING "btree" ("id") WHERE ("deleted_at" IS NULL);
+
+
+
+CREATE INDEX "idx_monitoring_events_org_time" ON "ops"."monitoring_events" USING "btree" ("organization_id", "occurred_at" DESC);
+
+
+
+CREATE INDEX "idx_monitoring_events_severity" ON "ops"."monitoring_events" USING "btree" ("severity", "status", "occurred_at" DESC);
 
 
 
@@ -17097,6 +17395,13 @@ CREATE POLICY "tax_returns_pub_update_frozen" ON "legacy"."tax_returns" FOR UPDA
 
 
 
+ALTER TABLE "ops"."monitoring_events" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "monitoring_events_select_org" ON "ops"."monitoring_events" FOR SELECT TO "authenticated" USING ((("organization_id" IS NOT NULL) AND ("organization_id" = "core"."current_user_org_id"())));
+
+
+
 CREATE POLICY "Service role full access on commissions" ON "public"."commissions" TO "service_role" USING (true) WITH CHECK (true);
 
 
@@ -17607,6 +17912,11 @@ GRANT USAGE ON SCHEMA "legacy" TO "service_role";
 
 
 
+GRANT USAGE ON SCHEMA "ops" TO "authenticated";
+GRANT USAGE ON SCHEMA "ops" TO "service_role";
+
+
+
 GRANT USAGE ON SCHEMA "public" TO "postgres";
 GRANT USAGE ON SCHEMA "public" TO "anon";
 GRANT USAGE ON SCHEMA "public" TO "authenticated";
@@ -17678,13 +17988,16 @@ GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", 
 
 
 
-
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
 
 
 GRANT ALL ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."close_period"("p_period_id" "uuid", "p_closed_by" "uuid", "p_status" "text", "p_reason" "text") TO "authenticated";
 
 
 
@@ -17744,6 +18057,18 @@ GRANT ALL ON FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "
 
 
 GRANT ALL ON FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "ops"."health_summary"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "ops"."health_summary"() TO "authenticated";
+GRANT ALL ON FUNCTION "ops"."health_summary"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "ops"."record_monitoring_event"("p_service" "text", "p_event_type" "text", "p_severity" "text", "p_message" "text", "p_metadata" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "ops"."record_monitoring_event"("p_service" "text", "p_event_type" "text", "p_severity" "text", "p_message" "text", "p_metadata" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "ops"."record_monitoring_event"("p_service" "text", "p_event_type" "text", "p_severity" "text", "p_message" "text", "p_metadata" "jsonb") TO "service_role";
 
 
 
@@ -17971,14 +18296,6 @@ GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
 
 
 
-
-
-
-
-
-
-
-
 GRANT SELECT,INSERT ON TABLE "audit"."audit_log" TO "authenticated";
 GRANT ALL ON TABLE "audit"."audit_log" TO "service_role";
 
@@ -18095,11 +18412,6 @@ GRANT ALL ON TABLE "core"."user_permission_overrides" TO "service_role";
 
 GRANT ALL ON TABLE "core"."user_roles" TO "authenticated";
 GRANT ALL ON TABLE "core"."user_roles" TO "service_role";
-
-
-
-
-
 
 
 
@@ -18447,6 +18759,10 @@ GRANT ALL ON TABLE "legacy"."numbering_sequences" TO "service_role";
 
 
 GRANT ALL ON TABLE "legacy"."tax_returns" TO "service_role";
+
+
+
+GRANT SELECT ON TABLE "ops"."monitoring_events" TO "authenticated";
 
 
 
@@ -18828,6 +19144,12 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
+
+
+
+
+
+
 
 
 
