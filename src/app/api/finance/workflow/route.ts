@@ -155,7 +155,7 @@ export async function POST(req: NextRequest) {
     }
  
     // H1 FIX: Add organization_id filter to record fetch
-    const recordQuery = module === 'journal_entry' 
+    const recordQuery = ['journal_entry', 'vendor_bill'].includes(module)
       ? supabase.schema('finance').from(config.table)
       : supabase.from(config.table);
     const { data: record, error: fetchErr } = await recordQuery.select('*').eq('id', recordId).eq('organization_id', auth.orgId).single();
@@ -253,7 +253,7 @@ export async function POST(req: NextRequest) {
     }
  
     // FIXED: Add WHERE clause on current status to prevent TOCTOU race condition
-        const updateQuery = module === 'journal_entry' 
+        const updateQuery = ['journal_entry', 'vendor_bill'].includes(module)
       ? supabase.schema('finance').from(config.table)
       : supabase.from(config.table);
     const { count, error: updateErr } = await updateQuery

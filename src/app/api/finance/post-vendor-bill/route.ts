@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
 
     // 1. Fetch vendor bill with line items (org isolated)
     const bill = getData(await supabase
-      .from('vendor_bills')
+      .schema('finance').from('vendor_bills')
       .select('*, vendor_bill_lines(*)')
       .eq('id', vendorBillId)
       .eq('organization_id', orgId)

@@ -37,10 +37,43 @@ if(b.action==='post'){
         throw new Error('Only APPROVED payroll runs can be posted');
     if(!b.period_id||!b.salary_expense_account_id||!b.payroll_payable_account_id)
         throw new Error('period_id and payroll accounts are required');
-    const {data:jid,error:jerr}=await supabase.schema('finance').rpc('post_journal_entry',{p_description:`Payroll ${r.payroll_period}`,p_transaction_date:r.period_end,p_period_id:b.period_id,p_lines:JSON.stringify([{account_id:b.salary_expense_account_id,debit_amount:r.total_gross_pay,credit_amount:0,description:'Payroll gross expense'},{account_id:b.payroll_payable_account_id,debit_amount:0,credit_amount:r.total_gross_pay,description:'Payroll payable'}]),p_currency:'PKR',p_exchange_rate:1,p_source_type:'PAYROLL_RUN',p_source_id:r.id});
-    if(jerr)
-        throw jerr;
-    const {data,error}=await supabase.from('payroll_runs').update({status:'POSTED',posted_by:auth.userId,posted_at:new Date().toISOString(),posted_journal_id:jid}).eq('id',r.id).eq('organization_id',auth.orgId).select().single();
+    // Idempotency guard: a retry must reuse the existing payroll journal,
+    // never create a second GL posting for the same payroll run.
+    const { data: existingJournal, error: existingJournalError } = await supabase
+        .schema('finance')
+        .from('journal_entries')
+        .select('id, reference')
+        .eq('source_type', 'PAYROLL_RUN')
+        .eq('source_id', r.id)
+        .eq('organization_id', auth.orgId)
+        .limit(1)
+        .maybeSingle();
+    if (existingJournalError) throw existingJournalError;
+
+    let jid: string;
+    if (existingJournal?.id) {
+        jid = existingJournal.id;
+    } else {
+        const {data:createdJournalId,error:jerr}=await supabase.schema('finance').rpc('post_journal_entry',{
+            p_description:`Payroll ${r.payroll_period}`,
+            p_transaction_date:r.period_end,
+            p_period_id:b.period_id,
+            p_lines:JSON.stringify([
+                {account_id:b.salary_expense_account_id,debit_amount:r.total_gross_pay,credit_amount:0,description:'Payroll gross expense'},
+                {account_id:b.payroll_payable_account_id,debit_amount:0,credit_amount:r.total_gross_pay,description:'Payroll payable'}
+            ]),
+            p_currency:'PKR',p_exchange_rate:1,
+            p_source_type:'PAYROLL_RUN',p_source_id:r.id
+        });
+        if(jerr || !createdJournalId) throw jerr || new Error('Payroll journal was not created');
+        jid = createdJournalId;
+    }
+
+    const {data,error}=await supabase.from('payroll_runs').update({
+        status:'POSTED',
+        posted_by:auth.userId,
+        posted_at:new Date().toISOString()
+    }).eq('id',r.id).eq('organization_id',auth.orgId).select().single();
     if(error)
         throw error;
     return NextResponse.json({data,journal_id:jid});

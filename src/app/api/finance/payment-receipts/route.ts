@@ -133,8 +133,19 @@ export async function POST(req: NextRequest) {
     }
 
     // Generate receipt number
-    const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'PMT-RC' });
-    const receiptNumber = numData || `PMT-RC-${Date.now().toString().slice(-6)}`;
+    const { data: numData, error: numberError } = await supabase
+      .schema('finance')
+      .rpc('get_next_number', {
+        p_type: 'PMT-RC',
+        p_organization_id: auth.orgId,
+      });
+    if (numberError || !numData) {
+      return NextResponse.json({
+        error: 'Payment receipt numbering sequence is not configured for this organization.',
+        details: numberError?.message || 'No PMT-RC sequence found',
+      }, { status: 500 });
+    }
+    const receiptNumber = numData;
 
     // BUG-020 FIX: Get open period with org filter
     const period = getData(await supabase

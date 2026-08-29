@@ -8,7 +8,7 @@ import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/context/PermissionContext";
 import { logAudit } from "@/lib/logAction";
 import { usePayrollEmployees, usePayrollRuns, usePayrollLines, usePayrollAdvances, usePayrollCommissions,
-         useCreatePayrollEmployee, useUpdatePayrollEmployee, useSetCompensation,} from "@/hooks/usePayroll";
+         useCreatePayrollEmployee, useUpdatePayrollEmployee, useSetCompensation,} from "@/hooks/usepayroll";
 import type { PayrollEmployee, PayrollRun, PayrollLine, PayrollAdvance, PayrollCommission, EmployeeFormData,
               CompensationFormData, } from "@/types/payroll.types";
 import { formatPKR, formatDate, formatPeriod, timeAgo, getEmploymentTypeBadge, getLastDayOfMonth, } from "@/lib/helpers";

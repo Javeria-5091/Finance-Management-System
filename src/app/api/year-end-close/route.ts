@@ -287,18 +287,39 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // ── 8. BUG-001 FIX: Single atomic RPC call with CORRECT signature ──
-    //    Replaces: manual journal header insert + manual lines insert + wrong RPC({ p_journal_id, p_posted_by })
-    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
+    // ── 8. Idempotency guard: if a closing journal already exists for this FY,
+    //    never post another closing journal on retry.
+    let journalId: string | null = null;
+    let postErr: any = null;
+    const existingClosingJournal = getData(
+      await supabase
+        .schema('finance')
+        .from('journal_entries')
+        .select('id, reference')
+        .eq('source_type', 'PERIOD_CLOSE')
+        .eq('source_id', fiscal_year_id)
+        .eq('organization_id', orgId)
+        .limit(1)
+        .maybeSingle()
+    );
+
+    if (existingClosingJournal) {
+      journalId = existingClosingJournal.id;
+    } else {
+      // Single atomic GL posting using the existing guarded RPC.
+      const result = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: description || `Year-End Close: FY ${fiscalYear.name || fiscal_year_id}`,
       p_transaction_date: new Date().toISOString().split('T')[0],
       p_period_id: closingPeriodId, // BUG-001 FIX: post to an OPEN period, not a HARD_CLOSED one
       p_lines: JSON.stringify(rpcLines),
       p_currency: 'PKR',
       p_exchange_rate: 1,
-      p_source_type: 'PERIOD_CLOSE',
-      p_source_id: fiscal_year_id,
-    });
+        p_source_type: 'PERIOD_CLOSE',
+        p_source_id: fiscal_year_id,
+      });
+      journalId = result.data;
+      postErr = result.error;
+    }
  
     if (postErr || !journalId) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
@@ -322,11 +343,10 @@ export async function POST(req: NextRequest) {
     const { error: fyErr } = await supabase
       .schema('finance').from('fiscal_years')
       .update({
-        status: 'CLOSED',
+        status: 'HARD_CLOSED',
         closed_at: new Date().toISOString(),
         closed_by: auth.userId,
-        journal_entry_id: journalId,
-        net_income: netIncome,
+        reopening_reason: `Year-end close completed. Journal: ${journalReference}`,
       })
       .eq('id', fiscal_year_id)
       .eq('organization_id', orgId);

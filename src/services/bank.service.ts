@@ -364,6 +364,9 @@ export const getBankTransfers = async (orgId: string) => {
 export const createBankTransfer = async (payload: Partial<BankTransfer> & { created_by: string }) => {
   // Don't send transfer_number - trigger will auto-generate
   const { transfer_number, ...rest } = payload as any;
+  const orgId = (payload as any).organization_id;
+  if (!orgId) return { data: null as any, error: new Error('organization_id is required') };
+  rest.organization_id = orgId;
   const { data, error } = await db
     .from('bank_transfers')
     .insert(rest)
@@ -401,8 +404,8 @@ export const postBankTransfer = async (
 
 export const getOpenPeriod = async (orgId: string) => {
   const { data, error } = await db
-    .from('accounting_periods')
-    .select('id, period_name, start_date, end_date')
+    .schema('finance').from('accounting_periods')
+    .select('id, name, start_date, end_date')
     .eq('organization_id', orgId)
     .eq('status', 'OPEN')
     .order('start_date', { ascending: false })
