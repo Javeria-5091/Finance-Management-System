@@ -531,7 +531,7 @@ export async function checkAiDailyLimit(
       .from('ai_user_cost_tracking')
       .select('request_count, estimated_cost')
       .eq('user_id', userId)
-      .eq('organization_id', orgId)
+      
       .eq('period_date', today)
       .maybeSingle();
 
@@ -572,7 +572,7 @@ export async function checkOrgAiDailyLimit(
       .schema('ai')
       .from('ai_user_cost_tracking')
       .select('request_count, estimated_cost')
-      .eq('organization_id', orgId)
+      
       .eq('period_date', today);
 
     if (error) {

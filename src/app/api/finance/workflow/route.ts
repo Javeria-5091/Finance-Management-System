@@ -198,49 +198,43 @@ export async function POST(req: NextRequest) {
     // while the GL still shows the original posting).
     let reversalJournalId: string | null = null;
     if (action === 'reverse' && currentStatus === 'POSTED') {
-      const sourceJournalId = record.journal_entry_id;
-      if (!sourceJournalId) {
-        // POSTED record has no linked journal entry — data integrity issue,
-        // but not safe to silently proceed. Fail loudly.
-        return NextResponse.json({
-          error: `Cannot reverse: ${module} is POSTED but has no linked journal entry. Manual reconciliation required.`,
-        }, { status: 500 });
-      }
-
       const reversalDate = new Date().toISOString().split('T')[0];
       const reversalReason = reason || `Reversal of ${module} ${recordId} by ${auth.userId}`;
+      const reversalRpc = module === 'expense'
+        ? 'reverse_expense_atomic'
+        : module === 'income'
+          ? 'reverse_income_atomic'
+          : null;
+
+      if (!reversalRpc) {
+        return NextResponse.json({ error: `Reversal is not supported for ${module}` }, { status: 400 });
+      }
+
+      // Reverse the GL and source record in one database transaction.
       const { data: revId, error: revErr } = await supabase
         .schema('finance')
-        .rpc('reverse_journal_entry', {
-          p_journal_id: sourceJournalId,
+        .rpc(reversalRpc, {
+          [module === 'expense' ? 'p_expense_id' : 'p_income_id']: recordId,
           p_reversal_date: reversalDate,
           p_reason: reversalReason,
         });
 
       if (revErr || !revId) {
         return NextResponse.json({
-          error: `Reversal journal entry creation failed: ${revErr?.message || 'Unknown error'}. The record's status was NOT changed.`,
+          error: `Reversal failed: ${revErr?.message || 'Unknown error'}. The GL and source record were rolled back together.`,
         }, { status: 500 });
       }
       reversalJournalId = revId;
     }
- 
+
     const updateData: Record<string, any> = {};
     const now = new Date().toISOString();
     if (action === 'reopen') { updateData.status = 'DRAFT'; updateData.rejection_reason = null; }
     else if (action === 'reject') { updateData.status = 'REJECTED'; updateData.rejection_reason = reason || 'No reason provided'; }
     else if (action === 'reverse') {
+      // Expense/income reversal was already committed atomically by the RPC.
       updateData.status = 'REVERSED';
-      updateData.reversal_reason = reason;
-      updateData.reversed_by = auth.userId;
-      updateData.reversed_at = now;
-      // BUG-004 FIX: link the source record to its reversal journal entry.
-      // The original posted journal is now REVERSED (handled by the RPC
-      // above); setting journal_entry_id to the new reversal journal's ID
-      // keeps the source-record→journal linkage intact for audit drill-down.
-      if (reversalJournalId) {
-        updateData.journal_entry_id = reversalJournalId;
-      }
+      if (reversalJournalId) updateData.journal_entry_id = reversalJournalId;
     }
     else if (action === 'cancel') { updateData.status = 'CANCELLED'; updateData.rejection_reason = reason; }
     else {
@@ -256,17 +250,22 @@ export async function POST(req: NextRequest) {
         const updateQuery = ['journal_entry', 'vendor_bill'].includes(module)
       ? supabase.schema('finance').from(config.table)
       : supabase.from(config.table);
-    const { count, error: updateErr } = await updateQuery
-      .update(updateData)
-      .eq('id', recordId)
-      .eq('status', currentStatus)
-      .eq('organization_id', auth.orgId); // Only update if status hasn't changed
- 
-    if (updateErr) return NextResponse.json({ error: 'Update failed: ' + updateErr.message }, { status: 500 });
-    if (count === 0) {
-      return NextResponse.json({ error: 'Concurrent modification detected. Record was modified by another user. Please refresh and try again.' }, { status: 409 });
+    const isAtomicBusinessReversal = action === 'reverse' && (module === 'expense' || module === 'income');
+    let count = 1;
+    if (!isAtomicBusinessReversal) {
+      const { count: updatedCount, error: updateErr } = await updateQuery
+        .update(updateData)
+        .eq('id', recordId)
+        .eq('status', currentStatus)
+        .eq('organization_id', auth.orgId); // Only update if status hasn't changed
+
+      if (updateErr) return NextResponse.json({ error: 'Update failed: ' + updateErr.message }, { status: 500 });
+      count = updatedCount ?? 0;
+      if (count === 0) {
+        return NextResponse.json({ error: 'Concurrent modification detected. Record was modified by another user. Please refresh and try again.' }, { status: 409 });
+      }
     }
- 
+
     // FIX: Use RPC for audit log (correct columns, server-side IP, role snapshot, hash)
     try {
       await supabase.schema('audit').rpc('log_action', {

@@ -110,7 +110,7 @@ function sv(val: string | null | undefined): string {
    COMPONENT
    ═══════════════════════════════════════════════════════ */
 export default function VendorsPage() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const { hasPermission, isLoading: permLoading } = usePermissions();
 
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -208,6 +208,7 @@ export default function VendorsPage() {
           vendor_code: `VND-${Date.now().toString().slice(-5)}`,
           is_active: true,
           created_by: user?.id,
+          organization_id: profile?.organization_id,
         });
         if (error) throw error;
       }

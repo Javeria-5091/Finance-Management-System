@@ -21,7 +21,7 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 export default function IncomePage() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const { hasPermission } = usePermissions(); 
   const canAdd = hasPermission("INCOME_CREATE"); 
 
@@ -65,7 +65,7 @@ export default function IncomePage() {
         const res = await supabase.from("incomes").update(data).eq("id", editingData.id);
         error = res.error;
       } else {
-        const res = await supabase.from("incomes").insert({ ...data, user_id: user?.id, status: "DRAFT" });
+        const res = await supabase.from("incomes").insert({ ...data, user_id: user?.id, organization_id: profile?.organization_id, status: "DRAFT" });
         error = res.error;
       }
 

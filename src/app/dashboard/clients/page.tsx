@@ -64,7 +64,7 @@ const labelCls = "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════
 export default function ClientsPage() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const { hasPermission } = usePermissions();
   const canCreate = hasPermission("CLIENT_CREATE");
   const canEdit = hasPermission("CLIENT_UPDATE");
@@ -138,7 +138,7 @@ export default function ClientsPage() {
       if (error) toast.error("Update failed: " + error.message);
       else { toast.success("Client updated"); logAction({ action: "UPDATE", entityType: "clients", entityId: editing.id, description: "..." }) }
     } else {
-      const { error } = await supabase.from("clients").insert({ ...form, user_id: user?.id });
+      const { error } = await supabase.from("clients").insert({ ...form, user_id: user?.id, organization_id: profile?.organization_id });
       if (error) toast.error("Create failed: " + error.message);
       else { toast.success("Client created"); logAction({ action: "CREATE", entityType: "clients", description: "..." })}
     }

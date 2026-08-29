@@ -23,7 +23,7 @@ const STATUS_STYLES: Record<string, string> = {
 // ─── APPROVAL LIMITS (PKR) by role ───
 
 export default function ExpensesPage() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const { hasPermission, role } = usePermissions(); 
   const canAdd = hasPermission("EXPENSE_CREATE"); 
   
@@ -65,7 +65,7 @@ export default function ExpensesPage() {
         const res = await supabase.from("expenses").update(data).eq("id", editingData.id);
         error = res.error;
       } else {
-        const res = await supabase.from("expenses").insert({ ...data, user_id: user?.id, created_by: user?.id, status: "DRAFT" });
+        const res = await supabase.from("expenses").insert({ ...data, user_id: user?.id, created_by: user?.id, organization_id: profile?.organization_id, status: "DRAFT" });
         error = res.error;
       }
       if (error) {

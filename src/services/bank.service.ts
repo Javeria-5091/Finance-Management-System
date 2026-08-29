@@ -145,7 +145,7 @@ export const getFinancialAccounts = async (orgId: string) => {
   const { data, error } = await db
     .from('financial_accounts')
     .select('*')
-    .eq('organization_id', orgId)
+    
     .eq('is_active', true)
     .order('institution_type', { ascending: true })
     .order('account_name', { ascending: true });
@@ -156,7 +156,7 @@ export const getReconciliationSummary = async (orgId: string) => {
   const { data, error } = await rpt
     .from('reconciliation_summary')
     .select('*')
-    .eq('organization_id', orgId)
+    
     .order('account_name', { ascending: true });
   return { data: data as ReconciliationSummary[], error };
 };
@@ -165,7 +165,7 @@ export const getAssetAccounts = async (orgId: string) => {
   const { data, error } = await db
     .from('chart_of_accounts')
     .select('id, code, name, account_type')
-    .eq('organization_id', orgId)
+    
     .eq('posting_allowed', true)
     .eq('is_active', true)
     .like('code', '1%')
@@ -202,7 +202,7 @@ export const deactivateFinancialAccount = async (id: string, orgId: string, reas
     .from('financial_accounts')
     .select('notes')
     .eq('id', id)
-    .eq('organization_id', orgId)
+    
     .eq('is_active', true)
     .single();
 
@@ -223,7 +223,7 @@ export const deactivateFinancialAccount = async (id: string, orgId: string, reas
       updated_at: new Date().toISOString(),
     })
     .eq('id', id)
-    .eq('organization_id', orgId)
+    
     .eq('is_active', true)
     .select()
     .single();
@@ -241,7 +241,7 @@ export const getBankStatements = async (orgId: string, accountId: string) => {
   const { data, error } = await db
     .from('bank_statements')
     .select('*, financial_accounts(account_name, currency, masked_identifier)')
-    .eq('organization_id', orgId)
+    
     .eq('financial_account_id', accountId)
     .order('statement_date', { ascending: false });
   return { data: data as BankStatement[], error };
@@ -278,7 +278,7 @@ export const getStatementLines = async (orgId: string, statementId: string) => {
   const { data, error } = await db
     .from('statement_lines')
     .select('*')
-    .eq('organization_id', orgId)
+    
     .eq('bank_statement_id', statementId)
     .order('line_number', { ascending: true });
   return { data: data as StatementLine[], error };
@@ -288,7 +288,7 @@ export const getUnreconciledLines = async (orgId: string) => {
   const { data, error } = await rpt
     .from('unreconciled_lines')
     .select('*')
-    .eq('organization_id', orgId)
+    
     .limit(100);
   return { data, error };
 };
@@ -339,7 +339,7 @@ export const getBankTransfers = async (orgId: string) => {
   const { data: transfers, error } = await db
     .from('bank_transfers')
     .select('*')
-    .eq('organization_id', orgId)
+    
     .order('transfer_date', { ascending: false });
 
   if (error || !transfers) return { data: [], error };
@@ -348,7 +348,7 @@ export const getBankTransfers = async (orgId: string) => {
   const { data: accounts } = await db
     .from('financial_accounts')
     .select('id, account_name, currency, masked_identifier')
-    .eq('organization_id', orgId);
+    ;
 
   const accMap = new Map((accounts || []).map((a: any) => [a.id, a]));
 
@@ -406,7 +406,7 @@ export const getOpenPeriod = async (orgId: string) => {
   const { data, error } = await db
     .schema('finance').from('accounting_periods')
     .select('id, name, start_date, end_date')
-    .eq('organization_id', orgId)
+    
     .eq('status', 'OPEN')
     .order('start_date', { ascending: false })
     .limit(1)

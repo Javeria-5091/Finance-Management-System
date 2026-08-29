@@ -127,11 +127,26 @@ export async function getParentAccounts(): Promise<ChartOfAccount[]> {
 }
 
 export async function createAccount(input: CreateAccountInput): Promise<ChartOfAccount> {
+  const { data: authData, error: authError } = await supabase.auth.getUser();
+  if (authError) throw authError;
+  const userId = authData.user?.id;
+  if (!userId) throw new Error('Authenticated user is required to create a chart of account.');
+
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('organization_id')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (profileError) throw profileError;
+  if (!profile?.organization_id) throw new Error('User organization is required to create a chart of account.');
+
   const { data, error } = await supabase
     .schema(SCHEMA)
     .from('chart_of_accounts')
     .insert({
       ...input,
+      organization_id: profile.organization_id,
+      created_by: userId,
       level: input.parent_id ? 2 : 0,
     })
     .select()

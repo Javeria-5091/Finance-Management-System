@@ -46,7 +46,7 @@ interface VendorPayment {
 const db = supabase.schema("finance");
 
 export default function VendorPaymentsPage() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const { hasPermission, isLoading: permLoading } = usePermissions();
   
   const [payments, setPayments] = useState<VendorPayment[]>([]);
@@ -193,6 +193,7 @@ export default function VendorPaymentsPage() {
           description: form.description || null,
           status: "DRAFT",
           created_by: user?.id,
+          organization_id: profile?.organization_id,
         })
         .select()
         .single();

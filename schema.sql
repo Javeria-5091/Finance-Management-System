@@ -2048,6 +2048,24 @@ COMMENT ON FUNCTION "finance"."enforce_transition_year_period_13"() IS 'BUG-027 
 
 
 
+CREATE OR REPLACE FUNCTION "finance"."ensure_payment_receipt_numbering_sequence"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+BEGIN
+  INSERT INTO finance.numbering_sequences
+    (sequence_type, prefix, current_number, padding, reset_per_period, format, organization_id, created_by)
+  VALUES
+    ('PMT-RC', 'PMT-RC-', 0, 4, false, '{PREFIX}{NUMBER}', NEW.id, NULL)
+  ON CONFLICT DO NOTHING;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."ensure_payment_receipt_numbering_sequence"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason" "text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
@@ -3856,6 +3874,104 @@ END;
 
 
 ALTER FUNCTION "finance"."reset_sequence"("p_type" "text", "p_fy_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."reverse_expense_atomic"("p_expense_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_journal_id uuid;
+  v_reversal_id uuid;
+BEGIN
+  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+
+  SELECT journal_entry_id
+    INTO v_journal_id
+  FROM public.expenses
+  WHERE id = p_expense_id
+    AND organization_id = v_org
+    AND status = 'POSTED'
+  FOR UPDATE;
+
+  IF NOT FOUND OR v_journal_id IS NULL THEN
+    RAISE EXCEPTION 'Posted expense not found or has no linked journal entry';
+  END IF;
+
+  v_reversal_id := finance.reverse_journal_entry(v_journal_id, p_reversal_date, p_reason);
+
+  UPDATE public.expenses
+  SET status = 'REVERSED',
+      reversal_reason = p_reason,
+      reversed_by = auth.uid(),
+      reversed_at = now(),
+      journal_entry_id = v_reversal_id
+  WHERE id = p_expense_id
+    AND organization_id = v_org
+    AND status = 'POSTED';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Expense status update failed';
+  END IF;
+
+  RETURN v_reversal_id;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."reverse_expense_atomic"("p_expense_id" "uuid", "p_reversal_date" "date", "p_reason" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."reverse_income_atomic"("p_income_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_journal_id uuid;
+  v_reversal_id uuid;
+BEGIN
+  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+
+  SELECT journal_entry_id
+    INTO v_journal_id
+  FROM public.incomes
+  WHERE id = p_income_id
+    AND organization_id = v_org
+    AND status = 'POSTED'
+  FOR UPDATE;
+
+  IF NOT FOUND OR v_journal_id IS NULL THEN
+    RAISE EXCEPTION 'Posted income not found or has no linked journal entry';
+  END IF;
+
+  v_reversal_id := finance.reverse_journal_entry(v_journal_id, p_reversal_date, p_reason);
+
+  UPDATE public.incomes
+  SET status = 'REVERSED',
+      reversal_reason = p_reason,
+      reversed_by = auth.uid(),
+      reversed_at = now(),
+      journal_entry_id = v_reversal_id
+  WHERE id = p_income_id
+    AND organization_id = v_org
+    AND status = 'POSTED';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Income status update failed';
+  END IF;
+
+  RETURN v_reversal_id;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."reverse_income_atomic"("p_income_id" "uuid", "p_reversal_date" "date", "p_reason" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
@@ -9378,6 +9494,11 @@ CREATE TABLE IF NOT EXISTS "public"."expenses" (
     "has_receipt" boolean DEFAULT false,
     "receipt_attachment_id" "uuid",
     "organization_id" "uuid" NOT NULL,
+    "verified_by" "uuid",
+    "verified_at" timestamp with time zone,
+    "reversal_reason" "text",
+    "reversed_by" "uuid",
+    "reversed_at" timestamp with time zone,
     CONSTRAINT "expenses_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
 );
 
@@ -9485,6 +9606,11 @@ CREATE TABLE IF NOT EXISTS "public"."incomes" (
     "rejection_reason" "text",
     "account_id" "uuid",
     "organization_id" "uuid",
+    "verified_by" "uuid",
+    "verified_at" timestamp with time zone,
+    "reversal_reason" "text",
+    "reversed_by" "uuid",
+    "reversed_at" timestamp with time zone,
     CONSTRAINT "incomes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "incomes_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
 );
@@ -10006,6 +10132,8 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_runs" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
+    "paid_by" "uuid",
+    "paid_at" timestamp with time zone,
     CONSTRAINT "payroll_runs_amounts_nonnegative_check" CHECK ((("total_gross_pay" >= (0)::numeric) AND ("total_deductions" >= (0)::numeric) AND ("total_net_pay" >= (0)::numeric) AND ("total_employer_cost" >= (0)::numeric))),
     CONSTRAINT "payroll_runs_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payroll_runs_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'CALCULATED'::character varying, 'UNDER_REVIEW'::character varying, 'APPROVED'::character varying, 'POSTED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying])::"text"[])))
@@ -13327,6 +13455,10 @@ CREATE OR REPLACE TRIGGER "shared_people_audit" AFTER INSERT OR DELETE OR UPDATE
 
 
 CREATE OR REPLACE TRIGGER "shared_people_updated_at" BEFORE UPDATE ON "core"."shared_people" FOR EACH ROW EXECUTE FUNCTION "core"."set_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_ensure_payment_receipt_numbering_sequence" AFTER INSERT ON "core"."organizations" FOR EACH ROW EXECUTE FUNCTION "finance"."ensure_payment_receipt_numbering_sequence"();
 
 
 
@@ -17931,7 +18063,6 @@ GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
 
 
-
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
 GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
 
@@ -17985,6 +18116,7 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
+
 
 
 
@@ -18049,6 +18181,14 @@ GRANT ALL ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uui
 
 
 REVOKE ALL ON FUNCTION "finance"."prevent_posted_capital_transaction_edit"() FROM PUBLIC;
+
+
+
+GRANT ALL ON FUNCTION "finance"."reverse_expense_atomic"("p_expense_id" "uuid", "p_reversal_date" "date", "p_reason" "text") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."reverse_income_atomic"("p_income_id" "uuid", "p_reversal_date" "date", "p_reason" "text") TO "authenticated";
 
 
 
@@ -18296,6 +18436,14 @@ GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
 
 
 
+
+
+
+
+
+
+
+
 GRANT SELECT,INSERT ON TABLE "audit"."audit_log" TO "authenticated";
 GRANT ALL ON TABLE "audit"."audit_log" TO "service_role";
 
@@ -18412,6 +18560,11 @@ GRANT ALL ON TABLE "core"."user_permission_overrides" TO "service_role";
 
 GRANT ALL ON TABLE "core"."user_roles" TO "authenticated";
 GRANT ALL ON TABLE "core"."user_roles" TO "service_role";
+
+
+
+
+
 
 
 
@@ -19144,12 +19297,6 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
-
-
-
-
-
-
 
 
 

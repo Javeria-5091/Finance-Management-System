@@ -85,7 +85,7 @@ function getStatusBadge(status: string): string {
 // MAIN COMPONENT
 // ==========================================
 export default function CreditNotesPage() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const { hasPermission, isLoading: permissionsLoading } = usePermissions();
 
   // Data States
@@ -325,6 +325,7 @@ export default function CreditNotesPage() {
           exchange_rate: exchangeRate,
           base_amount: baseAmount,
           status: "DRAFT",
+          organization_id: profile?.organization_id,
         })
         .select("*")
         .single();

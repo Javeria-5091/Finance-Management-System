@@ -2,8 +2,10 @@
 import { useState, useEffect } from "react";
 import { ArrowUpDown, Plus, RefreshCw, CheckCircle } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { useAuth } from "@/context/AuthContext";
 
 export default function ExchangeRatesPage() {
+  const { profile } = useAuth();
   const [rates, setRates] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -41,6 +43,7 @@ export default function ExchangeRatesPage() {
     ...form,
     rate: parseFloat(form.rate),
     entered_by: userId,
+    organization_id: profile?.organization_id,
     //created_by: userId // Yeh line humne naye column ke liye add ki hai
   });
 

@@ -8,7 +8,7 @@ import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/context/PermissionContext";
 import { logAudit } from "@/lib/logAction";
 import { usePayrollEmployees, usePayrollRuns, usePayrollLines, usePayrollAdvances, usePayrollCommissions,
-         useCreatePayrollEmployee, useUpdatePayrollEmployee, useSetCompensation,} from "@/hooks/usepayroll";
+         useCreatePayrollEmployee, useUpdatePayrollEmployee, useSetCompensation,} from "@/hooks/usePayroll";
 import type { PayrollEmployee, PayrollRun, PayrollLine, PayrollAdvance, PayrollCommission, EmployeeFormData,
               CompensationFormData, } from "@/types/payroll.types";
 import { formatPKR, formatDate, formatPeriod, timeAgo, getEmploymentTypeBadge, getLastDayOfMonth, } from "@/lib/helpers";
@@ -361,7 +361,7 @@ export default function PayrollPage() {
       });
       const result = await res.json();
       if (res.ok) {
-        toast.success(result.message || "Payroll run created and calculated");
+        toast.success(result.message || "Payroll run created");
         await logAudit.create(
           "payroll_runs",
           "",
@@ -1696,7 +1696,7 @@ export default function PayrollPage() {
                   onClick={handleCreateRun}
                   className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 flex items-center justify-center gap-2"
                 >
-                  Create & Calculate
+                  Create Payroll Run
                 </button>
               </div>
             </div>
