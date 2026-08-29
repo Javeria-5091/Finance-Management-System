@@ -35,7 +35,7 @@ export default function ProjectsPage() {
     try {
       const [projRes, budRes, expRes] = await Promise.all([
         fetch("/api/projects?page=1&pageSize=100"),
-        supabase.from("budgets").select("*").order("created_at", { ascending: false }),
+        fetch("/api/finance/budgets").then(async r => { const j = await r.json(); if (!r.ok) throw new Error(j.error || "Failed to load budgets"); return { data: j.data || [] }; }),
         supabase.from("expenses").select("*").eq("status", "POSTED")
       ]);
       const projectJson = await projRes.json();

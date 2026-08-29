@@ -76,11 +76,19 @@ export async function POST(req: NextRequest) {
     }
   }
   const { error: allocError } = await supabase.schema('finance').from('vendor_payment_allocations').insert(allocationRows);
-  if (allocError) return NextResponse.json({ error: `Payment allocations failed: ${allocError.message}` }, { status: 500 });
+  if (allocError) {
+    await supabase.schema('finance').from('vendor_payments').delete().eq('batch_id', batch.id).eq('organization_id', auth.orgId);
+    await supabase.schema('finance').from('vendor_payment_batches').delete().eq('id', batch.id).eq('organization_id', auth.orgId);
+    return NextResponse.json({ error: `Payment allocations failed: ${allocError.message}` }, { status: 500 });
+  }
 
   const batchLines = (payments as any[]).map(p => ({ batch_id: batch.id, vendor_payment_id: p.id, organization_id: auth.orgId, amount: p.amount }));
   const { error: lineError } = await supabase.schema('finance').from('vendor_payment_batch_lines').insert(batchLines);
-  if (lineError) return NextResponse.json({ error: `Batch lines failed: ${lineError.message}` }, { status: 500 });
+  if (lineError) {
+    await supabase.schema('finance').from('vendor_payments').delete().eq('batch_id', batch.id).eq('organization_id', auth.orgId);
+    await supabase.schema('finance').from('vendor_payment_batches').delete().eq('id', batch.id).eq('organization_id', auth.orgId);
+    return NextResponse.json({ error: `Batch lines failed: ${lineError.message}` }, { status: 500 });
+  }
 
   return NextResponse.json({ success: true, batch, payments }, { status: 201 });
 }

@@ -18,6 +18,10 @@ export default function BudgetForm({ initialData, onSubmit, onClose, loading }: 
     start_date: initialData?.start_date || new Date().toISOString().split('T')[0],
     end_date: initialData?.end_date || "",
     description: initialData?.description || "",
+    control_account_id: initialData?.control_account_id || null,
+    variance_alert_threshold: initialData?.variance_alert_threshold ?? 80,
+    project_id: initialData?.project_id || null,
+    department: initialData?.department || null,
   });
 
   function handleSubmit(e: React.FormEvent) {
@@ -112,6 +116,21 @@ export default function BudgetForm({ initialData, onSubmit, onClose, loading }: 
               placeholder="Details about this budget..."
               className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Variance Alert %</label>
+              <input type="number" min="0" max="100" step="0.01" value={form.variance_alert_threshold ?? 80}
+                onChange={e => setForm({...form, variance_alert_threshold: Number(e.target.value)})}
+                className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Department / Cost Center</label>
+              <input type="text" value={form.department || ""}
+                onChange={e => setForm({...form, department: e.target.value || null})}
+                className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white" />
+            </div>
           </div>
 
           {/* Buttons */}

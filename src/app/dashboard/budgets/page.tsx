@@ -36,37 +36,86 @@ export default function BudgetsPage() {
   const [editingData, setEditingData] = useState<Budget | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  const canModify = hasPermission("BUDGET_CREATE");
+  const canCreate = hasPermission("BUDGET_CREATE");
+  const canUpdate = hasPermission("BUDGET_UPDATE");
+  const canDelete = hasPermission("BUDGET_DELETE");
+  const canModify = canCreate || canUpdate;
 
   const fetchData = useCallback(async () => {
-    if (!user) return;
-    setLoading(true);
-    
-    try {
-      const [budRes, projRes, expRes, glActualRes] = await Promise.all([
-        supabase.from("budgets").select("*").order("created_at", { ascending: false }),
-        supabase.from("projects").select("*"),
-        supabase.from("expenses").select("*").eq("status", "POSTED"),
-        // Fetch GL-linked budget actuals from reporting view
-        reportingDB.from("budget_gl_actual").select("*").order("account_code"),
-      ]);
+  if (!user) return;
 
-      if (budRes.error) toast.error("Failed to load budgets: " + budRes.error.message);
-      else setBudgets(budRes.data || []);
-      
-      if (projRes.error) toast.error("Failed to load projects: " + projRes.error.message);
-      else setProjects(projRes.data || []);
-      
-      if (expRes.error) toast.error("Failed to load expenses: " + expRes.error.message);
-      else setExpenses(expRes.data || []);
+  setLoading(true);
 
-      if (glActualRes.data) setBudgetGLActual(glActualRes.data as BudgetGLActual[]);
-    } catch (err: any) {
-      toast.error("Error loading budget data: " + (err.message || "Unknown error"));
-    } finally {
-      setLoading(false);
+  try {
+    const [budRes, projRes, expRes, glActualRes] = await Promise.all([
+      fetch("/api/finance/budgets").then(async (response) => {
+        const json = await response.json();
+
+        if (!response.ok) {
+          throw new Error(json.error || "Failed to load budgets");
+        }
+
+        return json;
+      }),
+
+      supabase
+        .from("projects")
+        .select("*"),
+
+      supabase
+        .from("expenses")
+        .select("*")
+        .eq("status", "POSTED"),
+
+      reportingDB
+        .from("budget_gl_actual")
+        .select("*")
+        .order("account_code"),
+    ]);
+
+    // Budgets API
+    setBudgets(budRes.data ?? []);
+
+    // Projects
+    if (projRes.error) {
+      toast.error(
+        "Failed to load projects: " + projRes.error.message
+      );
+    } else {
+      setProjects(projRes.data ?? []);
     }
-  }, [user]);
+
+    // Expenses
+    if (expRes.error) {
+      toast.error(
+        "Failed to load expenses: " + expRes.error.message
+      );
+    } else {
+      setExpenses(expRes.data ?? []);
+    }
+
+    // GL actuals
+    if (glActualRes.error) {
+      toast.error(
+        "Failed to load budget GL actuals: " +
+          glActualRes.error.message
+      );
+    } else {
+      setBudgetGLActual(
+        (glActualRes.data ?? []) as BudgetGLActual[]
+      );
+    }
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error
+        ? err.message
+        : "Unknown error";
+
+    toast.error("Error loading budget data: " + message);
+  } finally {
+    setLoading(false);
+  }
+}, [user]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -92,23 +141,19 @@ export default function BudgetsPage() {
   async function handleSubmit(data: BudgetFormData) {
     setFormLoading(true);
     try {
-      let error;
-      if (editingData) {
-        const res = await supabase.from("budgets").update(data).eq("id", editingData.id);
-        error = res.error;
-      } else {
-        const res = await supabase.from("budgets").insert({ ...data, user_id: user?.id });
-        error = res.error;
-      }
-      
-      if (error) {
-        toast.error("Failed to save budget: " + error.message);
-      } else {
-        toast.success(editingData ? "Budget updated successfully" : "Budget created successfully");
-        setShowForm(false); 
-        setEditingData(null); 
-        fetchData();
-      }
+      if (editingData && !canUpdate) throw new Error("You do not have permission to update budgets");
+      if (!editingData && !canCreate) throw new Error("You do not have permission to create budgets");
+      const response = await fetch(editingData ? `/api/finance/budgets/${editingData.id}` : "/api/finance/budgets", {
+        method: editingData ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      const json = await response.json();
+      if (!response.ok) throw new Error(json.error || "Failed to save budget");
+      toast.success(editingData ? "Budget updated successfully" : "Budget created successfully");
+      setShowForm(false);
+      setEditingData(null);
+      await fetchData();
     } catch (err: any) {
       toast.error("Error saving budget: " + (err.message || "Unknown error"));
     } finally {
@@ -119,14 +164,13 @@ export default function BudgetsPage() {
   async function handleDelete() {
     if (!deleteId) return;
     try {
-      const { error } = await supabase.from("budgets").delete().eq("id", deleteId);
-      if (error) {
-        toast.error("Failed to delete budget: " + error.message);
-      } else {
-        toast.success("Budget deleted successfully");
-        setDeleteId(null); 
-        fetchData();
-      }
+      if (!canDelete) throw new Error("You do not have permission to delete budgets");
+      const response = await fetch(`/api/finance/budgets/${deleteId}`, { method: "DELETE" });
+      const json = await response.json();
+      if (!response.ok) throw new Error(json.error || "Failed to delete budget");
+      toast.success("Budget deleted successfully");
+      setDeleteId(null);
+      await fetchData();
     } catch (err: any) {
       toast.error("Error deleting budget: " + (err.message || "Unknown error"));
     }
@@ -175,12 +219,12 @@ export default function BudgetsPage() {
                       <h3 className="text-lg font-bold text-gray-900 dark:text-white">{bud.name}</h3>
                       <p className="text-sm text-gray-500 dark:text-gray-400">{bud.category} • Ends: {new Date(bud.end_date).toLocaleDateString("en-PK")}</p>
                     </div>
-                    {canModify && (
+                    {canUpdate || canDelete ? (
                       <div className="flex gap-2">
-                        <button onClick={() => { setEditingData(bud); setShowForm(true); }} className="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded transition-colors"><Pencil size={16}/></button>
-                        <button onClick={() => setDeleteId(bud.id)} className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 rounded transition-colors"><Trash2 size={16}/></button>
+                        <button disabled={!canUpdate} onClick={() => { if (!canUpdate) return; setEditingData(bud); setShowForm(true); }} className="p-1.5 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded transition-colors"><Pencil size={16}/></button>
+                        <button disabled={!canDelete} onClick={() => { if (canDelete) setDeleteId(bud.id); }} className="p-1.5 text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 rounded transition-colors"><Trash2 size={16}/></button>
                       </div>
-                    )}
+                    ) : null}
                   </div>
 
                   <div className="grid grid-cols-3 gap-4 mb-4 text-center p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-100 dark:border-gray-700/50">

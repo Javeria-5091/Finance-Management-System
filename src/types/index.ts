@@ -4,6 +4,7 @@
 export interface Project {
   id: string;
   user_id: string;
+  organization_id: string;
   name: string;
   client_name: string;
   description: string | null;
@@ -11,9 +12,11 @@ export interface Project {
   start_date: string;
   end_date: string | null;
   budget_id: string | null;
+  deleted_at?: string | null;
+  deleted_by?: string | null;
   created_at: string;
 }
-export type ProjectFormData = Omit<Project, "id" | "user_id" | "created_at">;
+export type ProjectFormData = Omit<Project, "id" | "user_id" | "organization_id" | "created_at" | "deleted_at" | "deleted_by">;
 export const PROJECT_STATUSES = ["Active", "Completed", "On Hold"] as const;
 
 // ==========================================
@@ -200,15 +203,21 @@ export interface UserProfile {
 export interface Budget {
   id: string;
   user_id: string;
+  organization_id: string;
   name: string;
   category: string;
   total_amount: number;
   start_date: string;
   end_date: string;
   description: string | null;
+  control_account_id?: string | null;
+  variance_alert_threshold?: number;
+  project_id?: string | null;
+  department?: string | null;
+  status?: "DRAFT" | "SUBMITTED" | "APPROVED" | "REJECTED";
   created_at: string;
 }
-export type BudgetFormData = Omit<Budget, "id" | "user_id" | "created_at">;
+export type BudgetFormData = Omit<Budget, "id" | "user_id" | "organization_id" | "created_at" | "status">;
 export const BUDGET_CATEGORIES = ["Operational", "Project Specific", "Marketing", "Salary", "IT & Infrastructure", "Misc"];
 
 // ==========================================

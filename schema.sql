@@ -2008,13 +2008,38 @@ ALTER FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason"
 
 
 CREATE OR REPLACE FUNCTION "finance"."fn_add_accumulated_depreciation"("p_asset_id" "uuid", "p_amount" numeric) RETURNS "void"
-    LANGUAGE "plpgsql"
-    AS $$ BEGIN
-    UPDATE finance.fixed_assets
-    SET accumulated_depreciation = accumulated_depreciation + p_amount
-    WHERE id = p_asset_id;
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org_id uuid;
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+  IF p_amount IS NULL OR p_amount <= 0 THEN
+    RAISE EXCEPTION 'Depreciation amount must be greater than zero';
+  END IF;
+
+  SELECT organization_id INTO v_org_id
+  FROM finance.fixed_assets
+  WHERE id = p_asset_id
+  FOR UPDATE;
+
+  IF v_org_id IS NULL THEN
+    RAISE EXCEPTION 'Asset not found';
+  END IF;
+  IF v_org_id IS DISTINCT FROM core.current_user_org_id() THEN
+    RAISE EXCEPTION 'Access denied: asset belongs to another organization';
+  END IF;
+
+  UPDATE finance.fixed_assets
+  SET accumulated_depreciation = accumulated_depreciation + p_amount,
+      net_book_value = GREATEST(base_cost - (accumulated_depreciation + p_amount), 0),
+      updated_at = now()
+  WHERE id = p_asset_id;
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."fn_add_accumulated_depreciation"("p_asset_id" "uuid", "p_amount" numeric) OWNER TO "postgres";
@@ -2285,11 +2310,36 @@ ALTER FUNCTION "finance"."fn_stmt_recon_status"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."fn_subtract_accumulated_depreciation"("p_asset_id" "uuid", "p_amount" numeric) RETURNS "void"
-    LANGUAGE "plpgsql"
-    AS $$ BEGIN
-    UPDATE finance.fixed_assets
-    SET accumulated_depreciation = GREATEST(accumulated_depreciation - p_amount, 0)
-    WHERE id = p_asset_id;
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org_id uuid;
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+  IF p_amount IS NULL OR p_amount <= 0 THEN
+    RAISE EXCEPTION 'Depreciation amount must be greater than zero';
+  END IF;
+
+  SELECT organization_id INTO v_org_id
+  FROM finance.fixed_assets
+  WHERE id = p_asset_id
+  FOR UPDATE;
+
+  IF v_org_id IS NULL THEN
+    RAISE EXCEPTION 'Asset not found';
+  END IF;
+  IF v_org_id IS DISTINCT FROM core.current_user_org_id() THEN
+    RAISE EXCEPTION 'Access denied: asset belongs to another organization';
+  END IF;
+
+  UPDATE finance.fixed_assets
+  SET accumulated_depreciation = GREATEST(accumulated_depreciation - p_amount, 0),
+      net_book_value = GREATEST(base_cost - GREATEST(accumulated_depreciation - p_amount, 0), 0),
+      updated_at = now()
+  WHERE id = p_asset_id;
 END;
 $$;
 
@@ -7108,6 +7158,7 @@ CREATE TABLE IF NOT EXISTS "finance"."budget_revisions" (
     "status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
+    CONSTRAINT "budget_revisions_amount_check" CHECK ((("previous_amount" >= (0)::numeric) AND ("revised_amount" >= (0)::numeric))),
     CONSTRAINT "budget_revisions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "budget_revisions_reason_not_blank" CHECK (("btrim"("reason") <> ''::"text")),
     CONSTRAINT "budget_revisions_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'APPROVED'::"text", 'REJECTED'::"text"])))
@@ -7380,6 +7431,30 @@ ALTER TABLE "finance"."exchange_rates" OWNER TO "postgres";
 
 COMMENT ON COLUMN "finance"."exchange_rates"."organization_id" IS 'Migration 040: now NOT NULL. Every manual exchange rate must belong to exactly one organization; a NULL value previously made the row invisible to the tenant boundary entirely (it satisfied neither side of core.same_org(), which fails closed, but also was never actually checked by the old fx_select/fx_insert policies).';
 
+
+
+CREATE TABLE IF NOT EXISTS "finance"."expense_allocations" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "expense_id" "uuid" NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "line_number" integer NOT NULL,
+    "account_id" "uuid" NOT NULL,
+    "project_id" "uuid",
+    "department_id" "uuid",
+    "cost_center_id" "uuid",
+    "amount" numeric(18,2) NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "base_amount" numeric(18,2) NOT NULL,
+    "description" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "expense_allocations_amount_check" CHECK (("amount" > (0)::numeric)),
+    CONSTRAINT "expense_allocations_base_amount_check" CHECK (("base_amount" > (0)::numeric)),
+    CONSTRAINT "expense_allocations_line_number_check" CHECK (("line_number" > 0))
+);
+
+
+ALTER TABLE "finance"."expense_allocations" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "finance"."expense_lines" (
@@ -7952,6 +8027,69 @@ CREATE TABLE IF NOT EXISTS "finance"."profit_distributions" (
 ALTER TABLE "finance"."profit_distributions" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "finance"."purchase_requests" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "request_number" "text" NOT NULL,
+    "description" "text" NOT NULL,
+    "amount" numeric(18,2) NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "category" "text",
+    "vendor_id" "uuid",
+    "project_id" "uuid",
+    "required_date" "date",
+    "justification" "text",
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "requested_by" "uuid" NOT NULL,
+    "submitted_by" "uuid",
+    "submitted_at" timestamp with time zone,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "rejection_reason" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "purchase_requests_amount_check" CHECK (("amount" > (0)::numeric)),
+    CONSTRAINT "purchase_requests_currency_check" CHECK (("currency" ~ '^[A-Z]{3}$'::"text")),
+    CONSTRAINT "purchase_requests_description_check" CHECK (("btrim"("description") <> ''::"text")),
+    CONSTRAINT "purchase_requests_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'APPROVED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
+);
+
+
+ALTER TABLE "finance"."purchase_requests" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."recurring_vendor_bills" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "template_name" "text" NOT NULL,
+    "vendor_id" "uuid" NOT NULL,
+    "frequency" "text" NOT NULL,
+    "next_run_date" "date" NOT NULL,
+    "end_date" "date",
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "exchange_rate" numeric(18,6) DEFAULT 1 NOT NULL,
+    "due_days" integer DEFAULT 30 NOT NULL,
+    "project_id" "uuid",
+    "description" "text",
+    "template_lines" "jsonb" DEFAULT '[]'::"jsonb" NOT NULL,
+    "last_generated_date" "date",
+    "is_active" boolean DEFAULT true NOT NULL,
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "recurring_vendor_bills_check" CHECK ((("end_date" IS NULL) OR ("end_date" >= "next_run_date"))),
+    CONSTRAINT "recurring_vendor_bills_currency_check" CHECK (("currency" ~ '^[A-Z]{3}$'::"text")),
+    CONSTRAINT "recurring_vendor_bills_due_days_check" CHECK (("due_days" >= 0)),
+    CONSTRAINT "recurring_vendor_bills_exchange_rate_check" CHECK (("exchange_rate" > (0)::numeric)),
+    CONSTRAINT "recurring_vendor_bills_frequency_check" CHECK (("frequency" = ANY (ARRAY['MONTHLY'::"text", 'QUARTERLY'::"text", 'YEARLY'::"text"]))),
+    CONSTRAINT "recurring_vendor_bills_template_lines_check" CHECK (("jsonb_typeof"("template_lines") = 'array'::"text")),
+    CONSTRAINT "recurring_vendor_bills_template_name_check" CHECK (("btrim"("template_name") <> ''::"text"))
+);
+
+
+ALTER TABLE "finance"."recurring_vendor_bills" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "finance"."reserve_policies" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "policy_type" "text" NOT NULL,
@@ -8471,6 +8609,49 @@ CREATE TABLE IF NOT EXISTS "finance"."vendor_payment_allocations" (
 ALTER TABLE "finance"."vendor_payment_allocations" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "finance"."vendor_payment_batch_lines" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "batch_id" "uuid" NOT NULL,
+    "vendor_payment_id" "uuid" NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "amount" numeric(18,2) NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "vendor_payment_batch_lines_amount_check" CHECK (("amount" > (0)::numeric))
+);
+
+
+ALTER TABLE "finance"."vendor_payment_batch_lines" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."vendor_payment_batches" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "batch_number" "text" NOT NULL,
+    "payment_date" "date" NOT NULL,
+    "financial_account_id" "uuid" NOT NULL,
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "total_amount" numeric(18,2) NOT NULL,
+    "payment_count" integer DEFAULT 0 NOT NULL,
+    "risk_flags" "jsonb" DEFAULT '[]'::"jsonb" NOT NULL,
+    "created_by" "uuid",
+    "submitted_by" "uuid",
+    "submitted_at" timestamp with time zone,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "posted_by" "uuid",
+    "posted_at" timestamp with time zone,
+    "cancellation_reason" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "vendor_payment_batches_payment_count_check" CHECK (("payment_count" > 0)),
+    CONSTRAINT "vendor_payment_batches_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'CANCELLED'::"text"]))),
+    CONSTRAINT "vendor_payment_batches_total_amount_check" CHECK (("total_amount" > (0)::numeric))
+);
+
+
+ALTER TABLE "finance"."vendor_payment_batches" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "finance"."vendor_payments" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "payment_number" "text",
@@ -8782,6 +8963,7 @@ END) STORED,
     CONSTRAINT "commissions_calculation_basis_check" CHECK ((("calculation_basis")::"text" = ANY ((ARRAY['PROJECT_REVENUE'::character varying, 'INVOICE_AMOUNT'::character varying, 'MILESTONE_VALUE'::character varying, 'CLIENT_PAYMENT'::character varying, 'SALES_TARGET'::character varying, 'FIXED_AMOUNT'::character varying])::"text"[]))),
     CONSTRAINT "commissions_commission_amount_check" CHECK (("commission_amount" >= (0)::numeric)),
     CONSTRAINT "commissions_commission_type_check" CHECK ((("commission_type")::"text" = ANY ((ARRAY['PERCENTAGE'::character varying, 'FIXED_AMOUNT'::character varying, 'TIERED'::character varying, 'FLAT_BONUS'::character varying, 'REFERRAL'::character varying])::"text"[]))),
+    CONSTRAINT "commissions_org_required" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "commissions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "commissions_person_type_check" CHECK ((("person_type")::"text" = ANY ((ARRAY['CONTRACTOR'::character varying, 'EMPLOYEE'::character varying])::"text"[]))),
     CONSTRAINT "commissions_rate_or_amount_check" CHECK (("rate_or_amount" >= (0)::numeric)),
@@ -9336,6 +9518,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_commissions" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
+    CONSTRAINT "payroll_commissions_amounts_check" CHECK ((("base_amount" >= (0)::numeric) AND ("commission_rate" >= (0)::numeric) AND ("commission_amount" >= (0)::numeric))),
     CONSTRAINT "payroll_commissions_commission_type_check" CHECK ((("commission_type")::"text" = ANY ((ARRAY['PERFORMANCE_BASED'::character varying, 'PROJECT_BASED'::character varying, 'SALES_BASED'::character varying, 'REFERRAL'::character varying, 'OTHER'::character varying])::"text"[]))),
     CONSTRAINT "payroll_commissions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payroll_commissions_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'APPROVED'::character varying, 'PAID'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying])::"text"[])))
@@ -9476,6 +9659,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_lines" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
+    CONSTRAINT "payroll_lines_nonnegative_check" CHECK ((("basic_salary" >= (0)::numeric) AND ("housing_allow" >= (0)::numeric) AND ("medical_allow" >= (0)::numeric) AND ("conveyance_allow" >= (0)::numeric) AND ("other_allowances" >= (0)::numeric) AND ("overtime_pay" >= (0)::numeric) AND ("commission_pay" >= (0)::numeric) AND ("bonus_pay" >= (0)::numeric) AND ("gross_pay" >= (0)::numeric) AND ("tax_deduction" >= (0)::numeric) AND ("provident_fund" >= (0)::numeric) AND ("eobi" >= (0)::numeric) AND ("advance_deduction" >= (0)::numeric) AND ("other_deductions" >= (0)::numeric) AND ("total_deductions" >= (0)::numeric) AND ("net_pay" >= (0)::numeric) AND ("employer_cost" >= (0)::numeric))),
     CONSTRAINT "payroll_lines_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payroll_lines_payment_status_check" CHECK ((("payment_status")::"text" = ANY ((ARRAY['PENDING'::character varying, 'PAID'::character varying, 'PARTIALLY_PAID'::character varying, 'FAILED'::character varying])::"text"[])))
 );
@@ -9537,6 +9721,7 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_runs" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
+    CONSTRAINT "payroll_runs_amounts_nonnegative_check" CHECK ((("total_gross_pay" >= (0)::numeric) AND ("total_deductions" >= (0)::numeric) AND ("total_net_pay" >= (0)::numeric) AND ("total_employer_cost" >= (0)::numeric))),
     CONSTRAINT "payroll_runs_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payroll_runs_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'CALCULATED'::character varying, 'UNDER_REVIEW'::character varying, 'APPROVED'::character varying, 'POSTED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying])::"text"[])))
 );
@@ -9652,6 +9837,10 @@ CREATE TABLE IF NOT EXISTS "public"."projects" (
 
 
 ALTER TABLE "public"."projects" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."projects" IS 'Project master data. Organization-scoped. Soft deletion uses deleted_at/deleted_by; status remains Active/Completed/On Hold for compatibility with the existing schema and UI.';
+
 
 
 COMMENT ON COLUMN "public"."projects"."organization_id" IS 'Added migration 036 (Compliance Audit Finding 4.1). Backfilled from public.profiles via user_id.';
@@ -11089,6 +11278,11 @@ ALTER TABLE ONLY "finance"."budget_revisions"
 
 
 
+ALTER TABLE ONLY "finance"."budget_revisions"
+    ADD CONSTRAINT "budget_revisions_unique_org_number" UNIQUE ("organization_id", "budget_id", "revision_number");
+
+
+
 ALTER TABLE ONLY "finance"."capital_transactions"
     ADD CONSTRAINT "capital_transactions_pkey" PRIMARY KEY ("id");
 
@@ -11151,6 +11345,16 @@ ALTER TABLE ONLY "finance"."distribution_lines"
 
 ALTER TABLE ONLY "finance"."exchange_rates"
     ADD CONSTRAINT "exchange_rates_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."expense_allocations"
+    ADD CONSTRAINT "expense_allocations_expense_id_line_number_key" UNIQUE ("expense_id", "line_number");
+
+
+
+ALTER TABLE ONLY "finance"."expense_allocations"
+    ADD CONSTRAINT "expense_allocations_pkey" PRIMARY KEY ("id");
 
 
 
@@ -11289,6 +11493,21 @@ ALTER TABLE ONLY "finance"."profit_distributions"
 
 
 
+ALTER TABLE ONLY "finance"."purchase_requests"
+    ADD CONSTRAINT "purchase_requests_organization_id_request_number_key" UNIQUE ("organization_id", "request_number");
+
+
+
+ALTER TABLE ONLY "finance"."purchase_requests"
+    ADD CONSTRAINT "purchase_requests_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."recurring_vendor_bills"
+    ADD CONSTRAINT "recurring_vendor_bills_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "finance"."reserve_policies"
     ADD CONSTRAINT "reserve_policies_pkey" PRIMARY KEY ("id");
 
@@ -11421,6 +11640,26 @@ ALTER TABLE ONLY "finance"."vendor_bills"
 
 ALTER TABLE ONLY "finance"."vendor_payment_allocations"
     ADD CONSTRAINT "vendor_payment_allocations_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batch_lines"
+    ADD CONSTRAINT "vendor_payment_batch_lines_batch_id_vendor_payment_id_key" UNIQUE ("batch_id", "vendor_payment_id");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batch_lines"
+    ADD CONSTRAINT "vendor_payment_batch_lines_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batches"
+    ADD CONSTRAINT "vendor_payment_batches_organization_id_batch_number_key" UNIQUE ("organization_id", "batch_number");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batches"
+    ADD CONSTRAINT "vendor_payment_batches_pkey" PRIMARY KEY ("id");
 
 
 
@@ -11954,6 +12193,10 @@ CREATE INDEX "idx_budget_revisions_budget" ON "finance"."budget_revisions" USING
 
 
 
+CREATE INDEX "idx_budget_revisions_org_budget" ON "finance"."budget_revisions" USING "btree" ("organization_id", "budget_id", "revision_number" DESC);
+
+
+
 CREATE INDEX "idx_capital_txn_date" ON "finance"."capital_transactions" USING "btree" ("transaction_date");
 
 
@@ -12019,6 +12262,10 @@ CREATE INDEX "idx_dimensions_parent" ON "finance"."dimensions" USING "btree" ("p
 
 
 CREATE INDEX "idx_dl_dist" ON "finance"."distribution_lines" USING "btree" ("profit_distribution_id");
+
+
+
+CREATE INDEX "idx_expense_alloc_org_expense" ON "finance"."expense_allocations" USING "btree" ("organization_id", "expense_id");
 
 
 
@@ -12135,6 +12382,14 @@ CREATE INDEX "idx_pd_fy" ON "finance"."profit_distributions" USING "btree" ("fis
 
 
 CREATE INDEX "idx_platforms_active" ON "finance"."platforms" USING "btree" ("id") WHERE ("deleted_at" IS NULL);
+
+
+
+CREATE INDEX "idx_purchase_requests_org_status" ON "finance"."purchase_requests" USING "btree" ("organization_id", "status", "created_at" DESC);
+
+
+
+CREATE INDEX "idx_recurring_vendor_bills_org_next_run" ON "finance"."recurring_vendor_bills" USING "btree" ("organization_id", "next_run_date") WHERE "is_active";
 
 
 
@@ -12286,6 +12541,14 @@ CREATE INDEX "idx_vbl_bill" ON "finance"."vendor_bill_lines" USING "btree" ("ven
 
 
 
+CREATE INDEX "idx_vendor_payment_batch_lines_org" ON "finance"."vendor_payment_batch_lines" USING "btree" ("organization_id", "batch_id");
+
+
+
+CREATE INDEX "idx_vendor_payment_batches_org_status" ON "finance"."vendor_payment_batches" USING "btree" ("organization_id", "status", "created_at" DESC);
+
+
+
 CREATE INDEX "idx_vendors_active" ON "finance"."vendors" USING "btree" ("id") WHERE ("deleted_at" IS NULL);
 
 
@@ -12346,6 +12609,10 @@ CREATE INDEX "idx_budgets_fy" ON "public"."budgets" USING "btree" ("fiscal_year_
 
 
 
+CREATE INDEX "idx_budgets_org_status_dates" ON "public"."budgets" USING "btree" ("organization_id", "status", "start_date", "end_date");
+
+
+
 CREATE INDEX "idx_budgets_organization_id" ON "public"."budgets" USING "btree" ("organization_id");
 
 
@@ -12371,6 +12638,14 @@ CREATE INDEX "idx_commissions_employee" ON "public"."payroll_commissions" USING 
 
 
 CREATE INDEX "idx_commissions_org" ON "public"."commissions" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_commissions_org_project" ON "public"."commissions" USING "btree" ("organization_id", "project_id");
+
+
+
+CREATE INDEX "idx_commissions_org_status_created" ON "public"."commissions" USING "btree" ("organization_id", "status", "created_at" DESC);
 
 
 
@@ -12498,7 +12773,19 @@ CREATE INDEX "idx_payroll_advances_org" ON "public"."payroll_advances" USING "bt
 
 
 
+CREATE INDEX "idx_payroll_advances_org_status" ON "public"."payroll_advances" USING "btree" ("organization_id", "approval_status");
+
+
+
 CREATE INDEX "idx_payroll_commissions_org" ON "public"."payroll_commissions" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_payroll_commissions_org_status_period" ON "public"."payroll_commissions" USING "btree" ("organization_id", "status", "period_month");
+
+
+
+CREATE INDEX "idx_payroll_compensation_employee_effective" ON "public"."payroll_compensation" USING "btree" ("employee_id", "effective_from" DESC);
 
 
 
@@ -12519,6 +12806,10 @@ CREATE INDEX "idx_payroll_employees_dept" ON "public"."payroll_employees" USING 
 
 
 CREATE INDEX "idx_payroll_employees_org" ON "public"."payroll_employees" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_payroll_employees_org_status" ON "public"."payroll_employees" USING "btree" ("organization_id", "status");
 
 
 
@@ -12543,6 +12834,10 @@ CREATE INDEX "idx_payroll_lines_run" ON "public"."payroll_lines" USING "btree" (
 
 
 CREATE INDEX "idx_payroll_reimbursements_org" ON "public"."payroll_reimbursements" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_payroll_reimbursements_org_status" ON "public"."payroll_reimbursements" USING "btree" ("organization_id", "status");
 
 
 
@@ -12583,6 +12878,14 @@ CREATE INDEX "idx_profiles_user_id" ON "public"."profiles" USING "btree" ("user_
 
 
 CREATE INDEX "idx_projects_active" ON "public"."projects" USING "btree" ("id") WHERE ("deleted_at" IS NULL);
+
+
+
+CREATE INDEX "idx_projects_org_budget" ON "public"."projects" USING "btree" ("organization_id", "budget_id");
+
+
+
+CREATE INDEX "idx_projects_org_status" ON "public"."projects" USING "btree" ("organization_id", "status", "created_at" DESC);
 
 
 
@@ -12825,6 +13128,10 @@ CREATE OR REPLACE TRIGGER "exchange_rates_audit" AFTER INSERT OR DELETE OR UPDAT
 
 
 
+CREATE OR REPLACE TRIGGER "expense_allocations_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."expense_allocations" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
 CREATE OR REPLACE TRIGGER "expense_lines_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."expense_lines" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
@@ -12922,6 +13229,14 @@ CREATE OR REPLACE TRIGGER "platforms_audit" AFTER INSERT OR DELETE OR UPDATE ON 
 
 
 CREATE OR REPLACE TRIGGER "profit_distributions_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."profit_distributions" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "purchase_requests_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."purchase_requests" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "recurring_vendor_bills_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."recurring_vendor_bills" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
@@ -13306,6 +13621,14 @@ CREATE OR REPLACE TRIGGER "vendor_bills_audit" AFTER INSERT OR DELETE OR UPDATE 
 
 
 CREATE OR REPLACE TRIGGER "vendor_payment_alloc_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."vendor_payment_allocations" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "vendor_payment_batch_lines_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."vendor_payment_batch_lines" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
+
+
+
+CREATE OR REPLACE TRIGGER "vendor_payment_batches_audit" AFTER INSERT OR DELETE OR UPDATE ON "finance"."vendor_payment_batches" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
 
@@ -13963,6 +14286,31 @@ ALTER TABLE ONLY "finance"."exchange_rates"
 
 
 
+ALTER TABLE ONLY "finance"."expense_allocations"
+    ADD CONSTRAINT "expense_allocations_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "finance"."chart_of_accounts"("id");
+
+
+
+ALTER TABLE ONLY "finance"."expense_allocations"
+    ADD CONSTRAINT "expense_allocations_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."expense_allocations"
+    ADD CONSTRAINT "expense_allocations_expense_id_fkey" FOREIGN KEY ("expense_id") REFERENCES "public"."expenses"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."expense_allocations"
+    ADD CONSTRAINT "expense_allocations_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id");
+
+
+
+ALTER TABLE ONLY "finance"."expense_allocations"
+    ADD CONSTRAINT "expense_allocations_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id");
+
+
+
 ALTER TABLE ONLY "finance"."expense_lines"
     ADD CONSTRAINT "expense_lines_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "finance"."chart_of_accounts"("id") ON DELETE RESTRICT;
 
@@ -14298,6 +14646,56 @@ ALTER TABLE ONLY "finance"."profit_distributions"
 
 
 
+ALTER TABLE ONLY "finance"."purchase_requests"
+    ADD CONSTRAINT "purchase_requests_approved_by_fkey" FOREIGN KEY ("approved_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."purchase_requests"
+    ADD CONSTRAINT "purchase_requests_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id");
+
+
+
+ALTER TABLE ONLY "finance"."purchase_requests"
+    ADD CONSTRAINT "purchase_requests_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id");
+
+
+
+ALTER TABLE ONLY "finance"."purchase_requests"
+    ADD CONSTRAINT "purchase_requests_requested_by_fkey" FOREIGN KEY ("requested_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."purchase_requests"
+    ADD CONSTRAINT "purchase_requests_submitted_by_fkey" FOREIGN KEY ("submitted_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."purchase_requests"
+    ADD CONSTRAINT "purchase_requests_vendor_id_fkey" FOREIGN KEY ("vendor_id") REFERENCES "finance"."vendors"("id");
+
+
+
+ALTER TABLE ONLY "finance"."recurring_vendor_bills"
+    ADD CONSTRAINT "recurring_vendor_bills_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."recurring_vendor_bills"
+    ADD CONSTRAINT "recurring_vendor_bills_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id");
+
+
+
+ALTER TABLE ONLY "finance"."recurring_vendor_bills"
+    ADD CONSTRAINT "recurring_vendor_bills_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id");
+
+
+
+ALTER TABLE ONLY "finance"."recurring_vendor_bills"
+    ADD CONSTRAINT "recurring_vendor_bills_vendor_id_fkey" FOREIGN KEY ("vendor_id") REFERENCES "finance"."vendors"("id");
+
+
+
 ALTER TABLE ONLY "finance"."reserve_policies"
     ADD CONSTRAINT "reserve_policies_approved_by_fkey" FOREIGN KEY ("approved_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
 
@@ -14399,7 +14797,7 @@ ALTER TABLE ONLY "finance"."tax_computations"
 
 
 ALTER TABLE ONLY "finance"."tax_computations"
-    ADD CONSTRAINT "tax_computations_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organization_config"("id");
+    ADD CONSTRAINT "tax_computations_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id");
 
 
 
@@ -14424,7 +14822,7 @@ ALTER TABLE ONLY "finance"."tax_credits_and_withholding"
 
 
 ALTER TABLE ONLY "finance"."tax_credits_and_withholding"
-    ADD CONSTRAINT "tax_credits_and_withholding_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organization_config"("id");
+    ADD CONSTRAINT "tax_credits_and_withholding_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id");
 
 
 
@@ -14459,7 +14857,7 @@ ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
 
 
 ALTER TABLE ONLY "finance"."tax_payments_and_refunds"
-    ADD CONSTRAINT "tax_payments_and_refunds_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organization_config"("id");
+    ADD CONSTRAINT "tax_payments_and_refunds_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id");
 
 
 
@@ -14499,7 +14897,7 @@ ALTER TABLE ONLY "finance"."tax_returns"
 
 
 ALTER TABLE ONLY "finance"."tax_returns"
-    ADD CONSTRAINT "tax_returns_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organization_config"("id");
+    ADD CONSTRAINT "tax_returns_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id");
 
 
 
@@ -14590,6 +14988,51 @@ ALTER TABLE ONLY "finance"."vendor_payment_allocations"
 
 ALTER TABLE ONLY "finance"."vendor_payment_allocations"
     ADD CONSTRAINT "vendor_payment_allocations_vendor_payment_id_fkey" FOREIGN KEY ("vendor_payment_id") REFERENCES "finance"."vendor_payments"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batch_lines"
+    ADD CONSTRAINT "vendor_payment_batch_lines_batch_id_fkey" FOREIGN KEY ("batch_id") REFERENCES "finance"."vendor_payment_batches"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batch_lines"
+    ADD CONSTRAINT "vendor_payment_batch_lines_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batch_lines"
+    ADD CONSTRAINT "vendor_payment_batch_lines_vendor_payment_id_fkey" FOREIGN KEY ("vendor_payment_id") REFERENCES "finance"."vendor_payments"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batches"
+    ADD CONSTRAINT "vendor_payment_batches_approved_by_fkey" FOREIGN KEY ("approved_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batches"
+    ADD CONSTRAINT "vendor_payment_batches_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batches"
+    ADD CONSTRAINT "vendor_payment_batches_financial_account_id_fkey" FOREIGN KEY ("financial_account_id") REFERENCES "finance"."financial_accounts"("id");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batches"
+    ADD CONSTRAINT "vendor_payment_batches_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batches"
+    ADD CONSTRAINT "vendor_payment_batches_posted_by_fkey" FOREIGN KEY ("posted_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."vendor_payment_batches"
+    ADD CONSTRAINT "vendor_payment_batches_submitted_by_fkey" FOREIGN KEY ("submitted_by") REFERENCES "auth"."users"("id");
 
 
 
@@ -15829,6 +16272,25 @@ CREATE POLICY "distribution_lines_update_org_scoped" ON "finance"."distribution_
 ALTER TABLE "finance"."exchange_rates" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "expense_alloc_delete" ON "finance"."expense_allocations" FOR DELETE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "expense_alloc_insert" ON "finance"."expense_allocations" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "expense_alloc_select" ON "finance"."expense_allocations" FOR SELECT TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "expense_alloc_update" ON "finance"."expense_allocations" FOR UPDATE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"())) WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+ALTER TABLE "finance"."expense_allocations" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "finance"."expense_lines" ENABLE ROW LEVEL SECURITY;
 
 
@@ -16125,6 +16587,36 @@ CREATE POLICY "profit_distributions_update_org_scoped" ON "finance"."profit_dist
 
 
 
+ALTER TABLE "finance"."purchase_requests" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "purchase_requests_insert" ON "finance"."purchase_requests" FOR INSERT TO "authenticated" WITH CHECK ((("organization_id" = "core"."current_user_org_id"()) AND ("requested_by" = "auth"."uid"())));
+
+
+
+CREATE POLICY "purchase_requests_select" ON "finance"."purchase_requests" FOR SELECT TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "purchase_requests_update" ON "finance"."purchase_requests" FOR UPDATE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"())) WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+ALTER TABLE "finance"."recurring_vendor_bills" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "recurring_vendor_bills_insert" ON "finance"."recurring_vendor_bills" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "recurring_vendor_bills_select" ON "finance"."recurring_vendor_bills" FOR SELECT TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "recurring_vendor_bills_update" ON "finance"."recurring_vendor_bills" FOR UPDATE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"())) WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
+
+
+
 ALTER TABLE "finance"."reserve_policies" ENABLE ROW LEVEL SECURITY;
 
 
@@ -16273,15 +16765,15 @@ ALTER TABLE "finance"."tax_computations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."tax_credits_and_withholding" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "tax_cw_delete" ON "finance"."tax_credits_and_withholding" FOR DELETE TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
+CREATE POLICY "tax_cw_delete" ON "finance"."tax_credits_and_withholding" FOR DELETE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
 
 
 
-CREATE POLICY "tax_cw_insert" ON "finance"."tax_credits_and_withholding" FOR INSERT TO "authenticated" WITH CHECK ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "tax_cw_insert" ON "finance"."tax_credits_and_withholding" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
 
 
 
-CREATE POLICY "tax_cw_select" ON "finance"."tax_credits_and_withholding" FOR SELECT TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('AUDITOR'::"text"))));
+CREATE POLICY "tax_cw_select" ON "finance"."tax_credits_and_withholding" FOR SELECT TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
 
 
 
@@ -16289,19 +16781,19 @@ CREATE POLICY "tax_cw_service" ON "finance"."tax_credits_and_withholding" TO "se
 
 
 
-CREATE POLICY "tax_cw_update" ON "finance"."tax_credits_and_withholding" FOR UPDATE TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "tax_cw_update" ON "finance"."tax_credits_and_withholding" FOR UPDATE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"())) WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
 
 
 
-CREATE POLICY "tax_pay_delete" ON "finance"."tax_payments_and_refunds" FOR DELETE TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
+CREATE POLICY "tax_pay_delete" ON "finance"."tax_payments_and_refunds" FOR DELETE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
 
 
 
-CREATE POLICY "tax_pay_insert" ON "finance"."tax_payments_and_refunds" FOR INSERT TO "authenticated" WITH CHECK ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "tax_pay_insert" ON "finance"."tax_payments_and_refunds" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
 
 
 
-CREATE POLICY "tax_pay_select" ON "finance"."tax_payments_and_refunds" FOR SELECT TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('AUDITOR'::"text"))));
+CREATE POLICY "tax_pay_select" ON "finance"."tax_payments_and_refunds" FOR SELECT TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
 
 
 
@@ -16309,7 +16801,7 @@ CREATE POLICY "tax_pay_service" ON "finance"."tax_payments_and_refunds" TO "serv
 
 
 
-CREATE POLICY "tax_pay_update" ON "finance"."tax_payments_and_refunds" FOR UPDATE TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "tax_pay_update" ON "finance"."tax_payments_and_refunds" FOR UPDATE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"())) WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
 
 
 
@@ -16319,15 +16811,15 @@ ALTER TABLE "finance"."tax_payments_and_refunds" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."tax_reconciliations" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "tax_ret_delete" ON "finance"."tax_returns" FOR DELETE TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
+CREATE POLICY "tax_ret_delete" ON "finance"."tax_returns" FOR DELETE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
 
 
 
-CREATE POLICY "tax_ret_insert" ON "finance"."tax_returns" FOR INSERT TO "authenticated" WITH CHECK ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "tax_ret_insert" ON "finance"."tax_returns" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
 
 
 
-CREATE POLICY "tax_ret_select" ON "finance"."tax_returns" FOR SELECT TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('AUDITOR'::"text"))));
+CREATE POLICY "tax_ret_select" ON "finance"."tax_returns" FOR SELECT TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
 
 
 
@@ -16335,7 +16827,7 @@ CREATE POLICY "tax_ret_service" ON "finance"."tax_returns" TO "service_role" USI
 
 
 
-CREATE POLICY "tax_ret_update" ON "finance"."tax_returns" FOR UPDATE TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "tax_ret_update" ON "finance"."tax_returns" FOR UPDATE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"())) WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
 
 
 
@@ -16448,6 +16940,32 @@ ALTER TABLE "finance"."vendor_bills" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "finance"."vendor_payment_allocations" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "finance"."vendor_payment_batch_lines" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "vendor_payment_batch_lines_insert" ON "finance"."vendor_payment_batch_lines" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "vendor_payment_batch_lines_select" ON "finance"."vendor_payment_batch_lines" FOR SELECT TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+ALTER TABLE "finance"."vendor_payment_batches" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "vendor_payment_batches_insert" ON "finance"."vendor_payment_batches" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "vendor_payment_batches_select" ON "finance"."vendor_payment_batches" FOR SELECT TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "vendor_payment_batches_update" ON "finance"."vendor_payment_batches" FOR UPDATE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"())) WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
+
 
 
 ALTER TABLE "finance"."vendor_payments" ENABLE ROW LEVEL SECURITY;
@@ -16678,19 +17196,19 @@ CREATE POLICY "clients_update_org_scoped" ON "public"."clients" FOR UPDATE TO "a
 ALTER TABLE "public"."commissions" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "commissions_delete_org_scoped" ON "public"."commissions" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+CREATE POLICY "commissions_delete_org" ON "public"."commissions" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
 
 
 
-CREATE POLICY "commissions_insert_org_scoped" ON "public"."commissions" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "commissions_insert_org" ON "public"."commissions" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "commissions_select_org_scoped" ON "public"."commissions" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "commissions_select_org" ON "public"."commissions" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "commissions_update_org_scoped" ON "public"."commissions" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "commissions_update_org" ON "public"."commissions" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
@@ -17103,6 +17621,7 @@ GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
 
 
+
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
 GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
 
@@ -17156,7 +17675,6 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
-
 
 
 
@@ -17258,7 +17776,6 @@ GRANT ALL ON FUNCTION "public"."execute_ai_readonly_query"("query_string" "text"
 
 
 REVOKE ALL ON FUNCTION "public"."execute_sql_query"("query_string" "text") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."execute_sql_query"("query_string" "text") TO "service_role";
 
 
 
@@ -17692,6 +18209,11 @@ GRANT ALL ON TABLE "finance"."exchange_rates" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "finance"."expense_allocations" TO "authenticated";
+GRANT ALL ON TABLE "finance"."expense_allocations" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "finance"."expense_lines" TO "authenticated";
 GRANT ALL ON TABLE "finance"."expense_lines" TO "service_role";
 
@@ -17792,6 +18314,16 @@ GRANT ALL ON TABLE "finance"."profit_distributions" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "finance"."purchase_requests" TO "authenticated";
+GRANT ALL ON TABLE "finance"."purchase_requests" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."recurring_vendor_bills" TO "authenticated";
+GRANT ALL ON TABLE "finance"."recurring_vendor_bills" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "finance"."reserve_policies" TO "authenticated";
 GRANT ALL ON TABLE "finance"."reserve_policies" TO "service_role";
 
@@ -17879,6 +18411,16 @@ GRANT ALL ON TABLE "finance"."vendor_bills" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."vendor_payment_allocations" TO "authenticated";
 GRANT ALL ON TABLE "finance"."vendor_payment_allocations" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."vendor_payment_batch_lines" TO "authenticated";
+GRANT ALL ON TABLE "finance"."vendor_payment_batch_lines" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."vendor_payment_batches" TO "authenticated";
+GRANT ALL ON TABLE "finance"."vendor_payment_batches" TO "service_role";
 
 
 
@@ -18335,3 +18877,4 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
+

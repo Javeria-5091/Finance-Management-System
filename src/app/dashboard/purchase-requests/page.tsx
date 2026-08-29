@@ -16,7 +16,7 @@ export default function PurchaseRequests()
             setForm({description:'',amount:'',currency:'PKR',category:'',justification:''});
             load()
         }};
-        const transition=async(id:string,status:string)=>{const r=await fetch(`/api/finance/purchase-requests/${id}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});
+        const transition=async(id:string,status:string)=>{const r=await fetch(`/api/finance/purchase-requests/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:status==='SUBMITTED'?'submit':status==='APPROVED'?'approve':status==='REJECTED'?'reject':'cancel'})});
         const j=await r.json();
         if(!r.ok)toast.error(j.error||'Failed');
         else{toast.success(`Request ${status.toLowerCase()}`);
