@@ -84,13 +84,19 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // ── 4. Fetch journal lines (WITH org_id filter) ──
+    // ── 4. Fetch journal lines ──
+    // BUG-002 FIX: finance.journal_lines has no organization_id column — it is scoped
+    // only through journal_entry_id -> finance.journal_entries.organization_id.
+    // The org check already happened in step 1 (the journal fetch above requires
+    // organization_id = orgId), so journal_entry_id here is already org-verified;
+    // filtering this query on a non-existent column made PostgREST fail with
+    // 42703 and getData() return null for every request. No security regression:
+    // access is still gated by the org-scoped journal fetch in step 1.
     const journalLines = getData(
       await supabase
         .schema('finance').from('journal_lines')
         .select('*')
         .eq('journal_entry_id', journal_entry_id)
-        .eq('organization_id', orgId)   // ← SECURITY FIX
         .order('line_number', { ascending: true })
     );
 

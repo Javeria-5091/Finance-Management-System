@@ -133,22 +133,56 @@ export async function POST(req: NextRequest) {
     }
  
     // ── 5. Get Retained Earnings account ──
-    const retainedEarningsAccount = getData(
+    // BUG-008 FIX: `.or('code.eq.3000,name.ilike.%retained%earnings%')` matched
+    // BOTH the '3000' level-0 "EQUITY" summary/header account AND '3200'
+    // "Retained Earnings" (its name also matches the ilike), then
+    // `.order('code').limit(1)` picked '3000' first because "3000" < "3200"
+    // alphabetically. Seeded summary accounts don't set posting_allowed=false
+    // (it defaults to true), so trg_enforce_postable_account never blocked
+    // the post — every year-end close silently credited the EQUITY summary
+    // account instead of Retained Earnings (spec 5.2: never post to a summary
+    // account; spec 4.1: close to Retained Earnings specifically).
+    //
+    // Fix: look up the real control account by its exact seeded code (3200)
+    // first. Only fall back to a name search if that's missing (e.g. a
+    // reseeded org), and when we do, explicitly exclude level-0/non-postable
+    // accounts so a same-tree summary account can never win the fallback.
+    let retainedEarningsAccount = getData(
       await supabase
         .schema('finance').from('chart_of_accounts')
-        .select('id, code, name')
+        .select('id, code, name, level, posting_allowed')
         .eq('account_type', 'EQUITY')
         .eq('organization_id', orgId)
-        .or('code.eq.3000,name.ilike.%retained%earnings%')
         .eq('is_active', true)
-        .order('code', { ascending: true })
-        .order('name', { ascending: true })
-        .limit(1)
+        .eq('code', '3200')
         .maybeSingle()
     );
- 
+
     if (!retainedEarningsAccount) {
-      return NextResponse.json({ error: 'Retained Earnings account not found. Create an EQUITY account with code 3000 or name containing "Retained Earnings".' }, { status: 400 });
+      retainedEarningsAccount = getData(
+        await supabase
+          .schema('finance').from('chart_of_accounts')
+          .select('id, code, name, level, posting_allowed')
+          .eq('account_type', 'EQUITY')
+          .eq('organization_id', orgId)
+          .eq('is_active', true)
+          .eq('posting_allowed', true)
+          .gt('level', 0)
+          .ilike('name', '%retained%earnings%')
+          .order('code', { ascending: true })
+          .limit(1)
+          .maybeSingle()
+      );
+    }
+
+    // Defensive: even an exact code-3200 match must actually be a postable,
+    // non-summary account — fail closed rather than post to a header row.
+    if (retainedEarningsAccount && (retainedEarningsAccount.level === 0 || retainedEarningsAccount.posting_allowed === false)) {
+      retainedEarningsAccount = null;
+    }
+
+    if (!retainedEarningsAccount) {
+      return NextResponse.json({ error: 'Postable Retained Earnings account not found. Create a non-summary EQUITY account with code 3200 (posting_allowed = true) or a distinctly named "Retained Earnings" account.' }, { status: 400 });
     }
  
     // ── 6. Build closing journal lines for RPC ──

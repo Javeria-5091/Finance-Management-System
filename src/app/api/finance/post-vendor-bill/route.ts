@@ -173,43 +173,63 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Vendor bill has withholding_amount but withholding-tax receivable account 1410 is not configured.' }, { status: 400 });
     }
 
+    // BUG-007 FIX: finance.vendor_bill_lines has NO `amount` or `category`
+    // columns (see schema.sql ~8909-8926) — it has `account_id` (NOT NULL,
+    // the actual line coding chosen by the user) and `quantity`/`unit_price`
+    // (the net, pre-tax line amount). The old code read `line.amount` and
+    // `line.category`, both always undefined, so `Number(line.amount)||0`
+    // was always 0 and `if (lineAmount <= 0) continue;` skipped every single
+    // line — discarding the split coding entirely. It then silently dumped
+    // the *entire* subtotal onto whichever OPERATING_EXPENSE account
+    // happened to sort first by code, so books stayed balanced while every
+    // vendor bill's expense classification (and therefore project
+    // profitability / department reporting) was wrong.
+    //
+    // Fix: post each line to the account it was actually coded to
+    // (line.account_id), using quantity*unit_price as the line's net
+    // (pre-tax, pre-withholding) amount — this is the amount that must sum
+    // to bill.subtotal, matching how bill.tax_amount and
+    // bill.withholding_amount are already posted separately below. If a
+    // line has no coded account (should be impossible — account_id is
+    // NOT NULL — but the API must not guess), or the bill has no lines at
+    // all, posting fails closed with a clear error instead of guessing an
+    // account (spec 5.5: split coding must be preserved on posting).
     const rpcLines: any[] = [];
     let expenseTotal = 0;
-    if (bill.vendor_bill_lines && bill.vendor_bill_lines.length > 0) {
-      for (const line of bill.vendor_bill_lines) {
-        const lineAmount = Number(line.amount) || 0;
-        if (lineAmount <= 0) continue;
-        let expenseAccountId: string | null = line.account_id || null;
-        if (!expenseAccountId && line.category) {
-          const escapedCategory = line.category.replace(/[%_]/g, '\\$&');
-          const matched = getData(await supabase
-            .schema('finance').from('chart_of_accounts').select('id')
-            .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true)
-            .eq('organization_id', auth.orgId)
-            .ilike('name', `%${escapedCategory}%`).order('code').limit(1).maybeSingle());
-          expenseAccountId = matched?.id || null;
-        }
-        if (!expenseAccountId) {
-          const defaultExp = getData(await supabase
-            .schema('finance').from('chart_of_accounts').select('id')
-            .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).eq('organization_id', auth.orgId).order('code').limit(1).maybeSingle());
-          expenseAccountId = defaultExp?.id || null;
-        }
-        if (!expenseAccountId) return NextResponse.json({ error: 'No operating expense account is configured for a vendor bill line.' }, { status: 400 });
-        expenseTotal += lineAmount;
-        rpcLines.push({ account_id: expenseAccountId, debit_amount: lineAmount, credit_amount: 0, description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${line.description || line.category || 'Expense'}` });
+    const billLines = Array.isArray(bill.vendor_bill_lines) ? bill.vendor_bill_lines : [];
+
+    if (billLines.length === 0) {
+      return NextResponse.json({
+        error: 'Vendor bill has no coded line items (vendor_bill_lines). Add split-coded lines before posting (spec 5.5).',
+      }, { status: 400 });
+    }
+
+    for (const line of billLines) {
+      const qty = Number(line.quantity) || 1;
+      const unitPrice = Number(line.unit_price) || 0;
+      const lineAmount = Math.round(qty * unitPrice * 100) / 100;
+      if (lineAmount <= 0) continue;
+
+      if (!line.account_id) {
+        return NextResponse.json({
+          error: `Vendor bill line ${line.line_number ?? line.id} has no coded GL account. Every line must be coded to an account before posting (spec 5.5).`,
+        }, { status: 400 });
       }
+
+      expenseTotal += lineAmount;
+      rpcLines.push({
+        account_id: line.account_id,
+        debit_amount: lineAmount,
+        credit_amount: 0,
+        description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${line.description || 'Expense'}`,
+      });
     }
-    if (expenseTotal > 0 && Math.abs(expenseTotal - subtotal) > 0.01) {
+
+    if (rpcLines.length === 0) {
+      return NextResponse.json({ error: 'Vendor bill has no positive-amount coded lines to post.' }, { status: 400 });
+    }
+    if (Math.abs(expenseTotal - subtotal) > 0.01) {
       return NextResponse.json({ error: `Vendor bill line total (${expenseTotal}) does not match subtotal (${subtotal}).` }, { status: 400 });
-    }
-    if (expenseTotal === 0) {
-      const expenseAccount = getData(await supabase
-        .schema('finance').from('chart_of_accounts').select('id, code, name')
-        .eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).eq('organization_id', auth.orgId).order('code').limit(1).maybeSingle());
-      if (!expenseAccount) return NextResponse.json({ error: 'No OPERATING_EXPENSE account found in Chart of Accounts.' }, { status: 400 });
-      expenseTotal = subtotal;
-      rpcLines.push({ account_id: expenseAccount.id, debit_amount: subtotal, credit_amount: 0, description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${bill.description || 'Vendor Expense'}` });
     }
     if (totalTax > 0) rpcLines.push({ account_id: inputTaxAccount.id, debit_amount: totalTax, credit_amount: 0, description: `Input tax: ${bill.bill_number || 'N/A'}` });
     if (withholdingAmount > 0) rpcLines.push({ account_id: withholdingReceivableAccount.id, debit_amount: withholdingAmount, credit_amount: 0, description: `Withholding tax receivable: ${bill.bill_number || 'N/A'}` });

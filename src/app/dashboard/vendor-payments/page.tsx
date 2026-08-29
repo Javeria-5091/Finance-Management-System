@@ -81,16 +81,15 @@ export default function VendorPaymentsPage() {
   const isBalanced =
     unallocated >= -0.01 && unallocated <= 0.01 && totalAllocated > 0;
 
+  // BUG-010 FIX: payments are now read through the permission-gated API
+  // (VENDOR_PAYMENT_READ) instead of a raw client-side table select.
   const fetchPayments = useCallback(async () => {
     setLoading(true);
     try {
-      const { data, error } = await db
-        .from("vendor_payments")
-        .select("*")
-        .order("payment_date", { ascending: false });
-
-      if (error) throw error;
-      setPayments((data as VendorPayment[]) || []);
+      const res = await fetch("/api/finance/vendor-payments");
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "Failed to load payments");
+      setPayments((result.data as VendorPayment[]) || []);
     } catch (err: any) {
       console.error("Failed to fetch payments:", err.message);
     } finally {
@@ -165,6 +164,13 @@ export default function VendorPaymentsPage() {
     });
   };
 
+  // BUG-010 FIX: creation now goes through the server API. The server
+  // re-validates every allocation against the real (server-side)
+  // outstanding balance of each bill — it never trusts the amounts this
+  // component happens to be showing — and the record is created as DRAFT
+  // only. Nothing here posts to the ledger anymore; posting requires a
+  // separate APPROVE step (by someone other than the creator) followed by
+  // a separate POST step, both permission-gated server-side.
   const handleSubmit = async () => {
     if (!isBalanced || !form.amount || !form.vendor_id) {
       return alert(
@@ -174,88 +180,37 @@ export default function VendorPaymentsPage() {
 
     setSubmitting(true);
     try {
-      const { data: numData } = await db.rpc("get_next_number", {
-        p_type: "VENDOR_PAYMENT",
-      });
-
-      const { data: payment, error } = await db
-        .from("vendor_payments")
-        .insert({
-          payment_number: numData || `VP-${Date.now()}`,
-          payment_date: new Date().toISOString().split("T")[0],
-          amount: parseFloat(form.amount),
-          currency: "PKR",
-          exchange_rate: 1,
-          base_amount: parseFloat(form.amount),
+      const res = await fetch("/api/finance/vendor-payments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
           vendor_id: form.vendor_id,
           payment_method: form.payment_method,
-          reference: form.reference || null,
-          description: form.description || null,
-          status: "DRAFT",
-          created_by: user?.id,
-          organization_id: profile?.organization_id,
-        })
-        .select()
-        .single();
+          reference: form.reference || undefined,
+          description: form.description || undefined,
+          allocations: Object.entries(allocations).map(([billId, amount]) => ({
+            vendor_bill_id: billId,
+            allocated_amount: amount,
+          })),
+        }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "Failed to create payment");
 
-      if (error) throw new Error(error.message);
-
-      const allocInserts = Object.entries(allocations).map(
-        ([billId, amount]) => ({
-          vendor_payment_id: payment.id,
-          vendor_bill_id: billId,
-          allocated_amount: amount,
-          base_allocated_amount: amount,
-          allocated_by: user?.id,
-        })
+      setShowModal(false);
+      setSuccessMsg(
+        "Payment of " +
+          formatCurrency(parseFloat(form.amount || "0")) +
+          " recorded as DRAFT. It now needs approval and posting before it affects the ledger."
       );
 
-      if (allocInserts.length > 0) {
-        const { error: allocError } = await db
-          .from("vendor_payment_allocations")
-          .insert(allocInserts);
-        if (allocError)
-          throw new Error("Allocation failed: " + allocError.message);
-      }
-
-      // Try to post to ledger (graceful failure)
-      try {
-        const { data: periodData, error: periodError } = await db
-          .from("accounting_periods")
-          .select("id")
-          .eq("status", "OPEN")
-          .limit(1)
-          .maybeSingle();
-
-        if (!periodError && periodData) {
-          const { error: postError } = await db.rpc("post_vendor_payment", {
-            p_payment_id: payment.id,
-            p_period_id: periodData.id,
-            p_transaction_date: new Date().toISOString().split("T")[0],
-          });
-
-          if (!postError) {
-            await db
-              .from("vendor_payments")
-              .update({ status: "POSTED" })
-              .eq("id", payment.id);
-          }
-        }
-      } catch (postErr: any) {
-        console.warn("Ledger posting skipped:", postErr?.message);
-      }
-
-      // Success
-      setShowModal(false);
-      setSuccessMsg("Payment of " + formatCurrency(parseFloat(form.amount || "0")) + " recorded & allocated successfully!");
-      
       try {
         await fetchPayments();
       } catch (e) {
         console.error(e);
       }
 
-      setTimeout(() => setSuccessMsg(""), 4000);
+      setTimeout(() => setSuccessMsg(""), 5000);
     } catch (err: any) {
       alert("Error: " + err.message);
     } finally {
@@ -263,39 +218,20 @@ export default function VendorPaymentsPage() {
     }
   };
 
-     const processAction = async (payId: string, action: string) => {
-    const updates: any = {};
-
-    // ✅ CANCELLED ki jagah REVERSED use karo (Accounting standard)
-    if (action === "cancel") {
-      updates.status = "REVERSED";
-    } else {
-      const map: Record<string, string> = {
-        approve: "APPROVED",
-        post: "POSTED",
-      };
-      updates.status = map[action];
-    }
-
+  // BUG-010 FIX: approve/post/cancel now go through the permission-gated,
+  // maker-checker-enforced PATCH endpoint instead of raw client-side
+  // `.update()` calls. Bill status (PAID/PARTIALLY_PAID) is maintained
+  // automatically by the DB trigger when allocations are posted/removed —
+  // this page no longer touches vendor_bills directly.
+  const processAction = async (payId: string, action: string, reason?: string) => {
     try {
-      const { error } = await db.from("vendor_payments").update(updates).eq("id", payId);
-      if (error) throw error;
-      
-      if (action === "post") {
-        const { data: allocs } = await db
-          .from("vendor_payment_allocations")
-          .select("vendor_bill_id")
-          .eq("vendor_payment_id", payId);
-        
-        if (allocs && allocs.length > 0) {
-          const billIds = allocs.map((a) => a.vendor_bill_id);
-          await db
-            .from("vendor_bills")
-            .update({ status: "PAID" })
-            .in("id", billIds);
-        }
-      }
-
+      const res = await fetch(`/api/finance/vendor-payments/${payId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, reason }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "Action failed");
       fetchPayments();
     } catch (err: any) {
       alert("Action failed: " + err.message);
@@ -321,7 +257,11 @@ export default function VendorPaymentsPage() {
   const inputClass =
     "w-full p-2.5 border dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm outline-none focus:ring-2 focus:ring-blue-500";
 
-  if (permLoading || !hasPermission("EXPENSE_READ")) {
+  // BUG-010 FIX: this page was gated on EXPENSE_READ/EXPENSE_CREATE — the
+  // wrong permission domain, meaning anyone with expense access (not
+  // necessarily vendor-payment access) could view/create cash
+  // disbursements. Gate on the correct VENDOR_PAYMENT_* permissions.
+  if (permLoading || !hasPermission("VENDOR_PAYMENT_READ")) {
     return (
       <div className="p-6 flex items-center justify-center min-h-[60vh]">
         <p className="text-gray-500">Access Denied</p>
@@ -345,7 +285,7 @@ export default function VendorPaymentsPage() {
           <Link href="/dashboard/vendor-payments/batches" className="flex items-center gap-2 border border-gray-300 dark:border-gray-600 px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-gray-50 dark:hover:bg-gray-700">
             <Layers3 size={16} /> Payment Batches
           </Link>
-        {hasPermission("EXPENSE_CREATE") && (
+        {hasPermission("VENDOR_PAYMENT_CREATE") && (
           <button
             onClick={() => openCreateModal()}
             className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium shadow-sm transition-colors"
@@ -436,7 +376,7 @@ export default function VendorPaymentsPage() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-1">
-                        {p.status?.toUpperCase() === "DRAFT" && (
+                        {p.status?.toUpperCase() === "DRAFT" && hasPermission("VENDOR_PAYMENT_APPROVE") && (
                           <button
                             onClick={() => handleAction(p.id, "approve")}
                             className="px-2 py-1 text-[10px] font-bold bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 rounded hover:bg-blue-200 dark:hover:bg-blue-900/50 transition-colors"
@@ -444,7 +384,7 @@ export default function VendorPaymentsPage() {
                             ✓ Approve
                           </button>
                         )}
-                        {p.status?.toUpperCase() === "APPROVED" && (
+                        {p.status?.toUpperCase() === "APPROVED" && hasPermission("VENDOR_PAYMENT_POST") && (
                           <button
                             onClick={() => handleAction(p.id, "post")}
                             className="px-2 py-1 text-[10px] font-bold bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 rounded hover:bg-green-200 dark:hover:bg-green-900/50 transition-colors"
@@ -452,7 +392,7 @@ export default function VendorPaymentsPage() {
                             ⇒ Post
                           </button>
                         )}
-                        {["DRAFT", "APPROVED"].includes(p.status?.toUpperCase() || "") && (
+                        {["DRAFT", "APPROVED"].includes(p.status?.toUpperCase() || "") && hasPermission("VENDOR_PAYMENT_UPDATE") && (
                           <button
                             onClick={() => handleAction(p.id, "cancel", true)}
                             className="px-2 py-1 text-[10px] font-bold bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400 rounded hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors"
@@ -672,7 +612,7 @@ export default function VendorPaymentsPage() {
         open={reasonState.open}
         title={reasonState.title}
         description={`Are you sure you want to ${reasonState.action} this payment?`}
-        onConfirm={(reason: string) => processAction(reasonState.id, reasonState.action)}
+        onConfirm={(reason: string) => processAction(reasonState.id, reasonState.action, reason)}
         onCancel={() => setReasonState({ open: false, title: "", action: "", id: "" })}
       />
     </div>
