@@ -67,7 +67,6 @@ export async function fetchSubscriptions(filters?: {
 }) {
   const orgId = await getCurrentOrganizationId();
   let query = supabase
-    .schema('finance')
     .from('subscriptions')
     .select('*')
     .eq('organization_id', orgId)
@@ -94,7 +93,6 @@ export async function fetchSubscriptions(filters?: {
 export async function fetchSubscriptionById(id: string) {
   const orgId = await getCurrentOrganizationId();
   const { data, error } = await supabase
-    .schema('finance')
     .from('subscriptions')
     .select('*')
     .eq('id', id)
@@ -121,7 +119,6 @@ export async function createSubscription(subData: Record<string, any>) {
   }
 
   const { data, error } = await supabase
-    .schema('finance')
     .from('subscriptions')
     .insert(cleaned)
     .select('*')
@@ -146,7 +143,6 @@ export async function updateSubscription(id: string, updates: Record<string, any
   }
 
   const { data, error } = await supabase
-    .schema('finance')
     .from('subscriptions')
     .update(cleaned)
     .eq('id', id)
@@ -161,7 +157,6 @@ export async function updateSubscription(id: string, updates: Record<string, any
 export async function deleteSubscription(id: string) {
   const orgId = await getCurrentOrganizationId();
   const { error } = await supabase
-    .schema('finance')
     .from('subscriptions')
     .delete()
     .eq('id', id)
@@ -171,12 +166,14 @@ export async function deleteSubscription(id: string) {
 
 // ─── Fetch upcoming renewals (from view) ───
 export async function fetchUpcomingRenewals() {
-  const orgId = await getCurrentOrganizationId();
+  // BUG-027 FIX: v_subscription_renewals lives in public (not reporting, fixed
+  // above) and does not expose an organization_id column at all -- it simply
+  // reads public.subscriptions directly, which is already org-scoped by RLS
+  // (security_invoker view). Filtering on a non-existent column raised 42703
+  // on every call.
   const { data, error } = await supabase
-    .schema('reporting')
     .from('v_subscription_renewals')
     .select('*')
-    .eq('organization_id', orgId)
     .order('renewal_date', { ascending: true });
   if (error) throw new Error(error.message);
   return (data as SubscriptionRenewalRow[]) || [];
@@ -184,12 +181,11 @@ export async function fetchUpcomingRenewals() {
 
 // ─── Fetch spend summary (from view) ───
 export async function fetchSpendSummary() {
-  const orgId = await getCurrentOrganizationId();
+  // BUG-027 FIX: same as fetchUpcomingRenewals -- v_subscription_spend has no
+  // organization_id column; it's already RLS-scoped via public.subscriptions.
   const { data, error } = await supabase
-    .schema('reporting')
     .from('v_subscription_spend')
-    .select('*')
-    .eq('organization_id', orgId);
+    .select('*');
   if (error) throw new Error(error.message);
   return (data as SubscriptionSpendRow[]) || [];
 }
@@ -199,16 +195,15 @@ export async function fetchSubscriptionStats(): Promise<SubscriptionStats> {
   const orgId = await getCurrentOrganizationId();
   const [activeRes, renewalsRes] = await Promise.all([
     supabase
-      .schema('finance')
       .from('subscriptions')
       .select('id, amount, billing_frequency')
       .eq('status', 'ACTIVE')
       .eq('organization_id', orgId),
+    // BUG-027 FIX: v_subscription_renewals has no organization_id column (see
+    // fetchUpcomingRenewals above).
     supabase
-      .schema('reporting')
       .from('v_subscription_renewals')
-      .select('id, renewal_bucket')
-      .eq('organization_id', orgId),
+      .select('id, renewal_bucket'),
   ]);
 
   const active = activeRes.data || [];

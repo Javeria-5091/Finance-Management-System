@@ -63,6 +63,10 @@ export interface IncomeFormData {
   account_id?: string | null;
   tax_rate?: number;
   tax_amount?: number;
+  // BUG-032 FIX: optional link to the invoice this income represents
+  // payment/revenue for, so post-income can refuse to double-count
+  // revenue that's already recognized by the invoice itself.
+  invoice_id?: string | null;
 }
 
 // ==========================================

@@ -235,11 +235,16 @@ export async function POST(
     ];
 
     // BUG-001 FIX: Use RPC with CORRECT signature — creates header + lines + posts atomically
+    // BUG-021 FIX: JSON.stringify(rpcLines) here double-encodes the jsonb
+    // parameter (PostgREST binds a jsonb *scalar string* instead of an
+    // array, so finance.post_journal_entry's jsonb_array_length(p_lines)
+    // call fails) — pass the array directly, same as the other
+    // already-correct posting routes (post-vendor-bill, etc.).
     const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: `Credit Note: ${creditNote.credit_note_number} - ${creditNote.reason}`,
       p_transaction_date: creditNote.credit_note_date || new Date().toISOString().split('T')[0],
       p_period_id: period.id,
-      p_lines: JSON.stringify(rpcLines),
+      p_lines: rpcLines,
       p_currency: creditNote.currency || 'PKR',
       p_exchange_rate: creditNote.exchange_rate || 1,
       p_source_type: 'CREDIT_NOTE',
@@ -327,12 +332,44 @@ export async function POST(
       auditLogFailedPost = true;
     }
 
+    // BUG-021 FIX: "Expected: credit note lifecycle reduces receivable
+    // and sets CREDITED (spec 5.6). Actual: ... AR is never relieved."
+    // Posting the GL journal above only affects the ledger — it never
+    // touched the invoice row itself. Reduce the invoice's total_amount
+    // and outstanding_amount by the credited amount, and move it to
+    // CREDITED once fully cleared this way.
+    let invoiceReliefWarning: string | undefined;
+    const invoiceRow = getData(await supabase
+      .from('invoices')
+      .select('total_amount, amount_paid, outstanding_amount, status')
+      .eq('id', creditNote.invoice_id)
+      .eq('organization_id', auth.orgId)
+      .maybeSingle());
+    if (invoiceRow) {
+      const newTotal = Math.max(0, Number(invoiceRow.total_amount || 0) - totalAmount);
+      const newOutstanding = Math.max(0, newTotal - Number(invoiceRow.amount_paid || 0));
+      const newStatus = newOutstanding <= 0.01 ? 'CREDITED' : invoiceRow.status;
+      const { error: invUpdErr } = await supabase
+        .from('invoices')
+        .update({ total_amount: newTotal, outstanding_amount: newOutstanding, status: newStatus })
+        .eq('id', creditNote.invoice_id)
+        .eq('organization_id', auth.orgId);
+      if (invUpdErr) {
+        console.error('Failed to relieve invoice after credit note posting:', invUpdErr, { invoice_id: creditNote.invoice_id, credit_note_id: id });
+        invoiceReliefWarning = 'Credit note posted to GL, but the linked invoice balance failed to update. Please notify an administrator.';
+      }
+    } else {
+      console.error('Credit note posted but linked invoice was not found to relieve:', { invoice_id: creditNote.invoice_id, credit_note_id: id });
+      invoiceReliefWarning = 'Credit note posted to GL, but the linked invoice could not be found to update its balance.';
+    }
+
     return NextResponse.json({
       success: true,
       journalId: journal.id,
       reference,
       message: `Credit note posted to GL: ${reference}`,
       audit_log_warning: auditLogFailedPost ? 'Posting succeeded but the audit log entry failed to write. Please notify an administrator.' : undefined,
+      invoice_relief_warning: invoiceReliefWarning,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });

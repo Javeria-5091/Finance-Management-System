@@ -292,11 +292,17 @@ export async function POST(req: NextRequest) {
     // — passing 'finance.post_journal_entry' as the rpc() name string is NOT
     // schema-qualified; PostgREST treats the entire dotted string as the
     // function name and fails to find it in the default (public) schema.
+    // BUG-001 FIX: p_lines is `jsonb` in the SQL signature — passing
+    // JSON.stringify(journalLines) double-encodes it (PostgREST binds a
+    // jsonb *scalar string*, and jsonb_array_length(p_lines) inside the
+    // function then fails with "cannot get array length of a scalar").
+    // Pass the array directly, same as the already-correct
+    // post-vendor-bill route.
     const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: `Expense: ${expense.title}${expense.category ? ` [${expense.category}]` : ''}`,
       p_transaction_date: expense.expense_date,
       p_period_id: period.id,
-      p_lines: JSON.stringify(journalLines),
+      p_lines: journalLines,
       p_currency: expense.currency || 'PKR',
       p_exchange_rate: expense.exchange_rate || 1,
       p_source_type: 'EXPENSE',

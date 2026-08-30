@@ -102,11 +102,14 @@ export async function POST(req: NextRequest) {
       }
  
       // BUG-001 FIX: Use `finance.post_journal_entry` (with schema prefix) and CORRECT parameter names
+      // BUG-001 FIX (part 2): p_lines is jsonb — JSON.stringify(rpcLines)
+      // double-encodes it into a jsonb scalar string and crashes
+      // jsonb_array_length(p_lines) inside the function. Pass the array.
       const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
         p_description: 'Opening Balance Import',
         p_transaction_date: new Date().toISOString().split('T')[0],
         p_period_id: periodId,
-        p_lines: JSON.stringify(rpcLines),
+        p_lines: rpcLines,
         p_currency: 'PKR',
         p_exchange_rate: 1,
         p_source_type: 'OPENING_BALANCE',

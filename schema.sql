@@ -1325,17 +1325,30 @@ ALTER FUNCTION "finance"."approve_tax_reconciliation"("p_recon_id" "uuid", "p_us
 
 CREATE OR REPLACE FUNCTION "finance"."auto_match_statement_lines"("p_statement_id" "uuid") RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
 DECLARE
     v_matched INTEGER := 0;
     v_ledger UUID;
     v_row_count INTEGER;
+    v_org uuid;
 BEGIN
+    -- BUG-026 FIX: this SECURITY DEFINER function took no organization
+    -- parameter, had no REVOKE (Postgres defaults EXECUTE to PUBLIC on new
+    -- functions), and definer execution bypasses RLS -- so any authenticated
+    -- user of ANY organization could call this with an arbitrary
+    -- p_statement_id and auto-match another tenant's bank statement. The
+    -- organization is now taken from the caller's own session
+    -- (core.current_user_org_id()), matching the pattern used elsewhere in
+    -- this schema (e.g. finance.reverse_journal_entry), and checked against
+    -- the statement's actual organization_id before anything is touched.
+    v_org := core.current_user_org_id();
+    IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
+
     SELECT fa.linked_ledger_account_id INTO v_ledger
     FROM finance.bank_statements bs JOIN finance.financial_accounts fa ON fa.id = bs.financial_account_id
-    WHERE bs.id = p_statement_id;
-    IF v_ledger IS NULL THEN RAISE EXCEPTION 'Statement not found'; END IF;
+    WHERE bs.id = p_statement_id AND bs.organization_id = v_org;
+    IF v_ledger IS NULL THEN RAISE EXCEPTION 'Statement not found or access denied'; END IF;
 
     -- Round 1: exact amount + same date
     UPDATE finance.statement_lines sl SET
@@ -1889,15 +1902,26 @@ ALTER FUNCTION "finance"."create_fiscal_year_with_periods"("p_name" "text", "p_s
 
 CREATE OR REPLACE FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ DECLARE v_count INT;
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$ DECLARE v_count INT; v_org uuid;
 BEGIN
+    -- BUG-026 FIX: same cross-tenant gap as auto_match_statement_lines -- no
+    -- organization check at all on a SECURITY DEFINER function with no
+    -- REVOKE. Scoped to the caller's own organization before touching
+    -- anything.
+    v_org := core.current_user_org_id();
+    IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM finance.bank_statements WHERE id = p_statement_id AND organization_id = v_org) THEN
+        RAISE EXCEPTION 'Statement not found or access denied';
+    END IF;
+
     UPDATE finance.statement_lines sl SET reconciliation_status = 'DUPLICATE', exclusion_reason = 'Auto-detected duplicate'
     WHERE sl.bank_statement_id = p_statement_id AND sl.reconciliation_status = 'UNRECONCILED'
       AND EXISTS (
           SELECT 1 FROM finance.statement_lines sl2
           JOIN finance.bank_statements bs2 ON bs2.id = sl2.bank_statement_id
           WHERE bs2.financial_account_id = (SELECT financial_account_id FROM finance.bank_statements WHERE id = p_statement_id)
+            AND bs2.organization_id = v_org
             AND sl2.id != sl.id AND sl2.amount = sl.amount AND sl2.transaction_date = sl.transaction_date
             AND (sl2.description = sl.description OR SIMILARITY(sl2.description, sl.description) > 0.85)
             AND sl2.reconciliation_status NOT IN ('DUPLICATE','EXCLUDED')
@@ -2199,6 +2223,89 @@ $$;
 
 
 ALTER FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason" "text") OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."bank_statements" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "financial_account_id" "uuid" NOT NULL,
+    "statement_date" "date" NOT NULL,
+    "opening_balance" numeric(18,2) NOT NULL,
+    "closing_balance" numeric(18,2) NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "total_debits" numeric(18,2) DEFAULT 0,
+    "total_credits" numeric(18,2) DEFAULT 0,
+    "line_count" integer DEFAULT 0,
+    "imported_at" timestamp with time zone DEFAULT "now"(),
+    "imported_by" "uuid" NOT NULL,
+    "file_name" "text",
+    "reconciliation_status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
+    "reconciled_at" timestamp with time zone,
+    "reconciled_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "organization_id" "uuid",
+    CONSTRAINT "bank_statements_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
+    CONSTRAINT "bank_statements_reconciliation_status_check" CHECK (("reconciliation_status" = ANY (ARRAY['PENDING'::"text", 'IN_PROGRESS'::"text", 'COMPLETED'::"text", 'PARTIAL'::"text"])))
+);
+
+
+ALTER TABLE "finance"."bank_statements" OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS "finance"."bank_statements"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := COALESCE(p_organization_id, core.current_user_org_id());
+  v_statement RECORD;
+  v_unresolved integer;
+  v_result finance.bank_statements;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Organization context is required';
+  END IF;
+  IF p_user_id IS NULL THEN
+    RAISE EXCEPTION 'Approving user is required';
+  END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+
+  SELECT * INTO v_statement
+  FROM finance.bank_statements
+  WHERE id = p_statement_id AND organization_id = v_org
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Bank statement not found or access denied';
+  END IF;
+
+  IF v_statement.reconciliation_status = 'COMPLETED' AND v_statement.reconciled_by IS NOT NULL THEN
+    RAISE EXCEPTION 'This statement has already been reconciled and approved';
+  END IF;
+
+  SELECT COUNT(*) INTO v_unresolved
+  FROM finance.statement_lines
+  WHERE bank_statement_id = p_statement_id AND reconciliation_status = 'UNRECONCILED';
+
+  IF v_unresolved > 0 THEN
+    RAISE EXCEPTION 'Cannot finalize: % statement line(s) are still unresolved (unmatched, not excluded, not flagged as duplicate)', v_unresolved;
+  END IF;
+
+  UPDATE finance.bank_statements
+  SET reconciliation_status = 'COMPLETED',
+      reconciled_by = p_user_id,
+      reconciled_at = now(),
+      updated_at = now()
+  WHERE id = p_statement_id
+  RETURNING * INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "uuid"
@@ -2574,11 +2681,20 @@ ALTER FUNCTION "finance"."fn_prevent_double_match"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."fn_set_dual_approval"() RETURNS "trigger"
     LANGUAGE "plpgsql"
-    AS $$ DECLARE v_min NUMERIC;
+    AS $$ DECLARE v_min NUMERIC; v_flag BOOLEAN;
 BEGIN
-    SELECT MIN(COALESCE(min_dual_approval_amount, 999999999999))
-    INTO v_min FROM finance.financial_accounts WHERE id IN (NEW.from_account_id, NEW.to_account_id);
-    IF NEW.from_amount >= v_min THEN NEW.requires_dual_approval := TRUE; END IF;
+    -- BUG-025 FIX: this previously only ever looked at min_dual_approval_amount,
+    -- so an account with requires_dual_approval = TRUE but no configured
+    -- min_dual_approval_amount (NULL, defaulted to a practically-unreachable
+    -- 999999999999 fallback) could NEVER actually trigger dual approval on a
+    -- transfer -- the account-level "always needs dual approval" flag was
+    -- effectively dead. BOOL_OR now also propagates that flag directly: if
+    -- either the source or destination account is flagged, the transfer
+    -- requires dual approval regardless of amount. The existing amount-
+    -- threshold behavior (v_min) is unchanged.
+    SELECT MIN(COALESCE(min_dual_approval_amount, 999999999999)), BOOL_OR(COALESCE(requires_dual_approval, false))
+    INTO v_min, v_flag FROM finance.financial_accounts WHERE id IN (NEW.from_account_id, NEW.to_account_id);
+    IF COALESCE(v_flag, false) OR NEW.from_amount >= v_min THEN NEW.requires_dual_approval := TRUE; END IF;
     RETURN NEW;
 END;
  $$;
@@ -3088,11 +3204,330 @@ END;
 ALTER FUNCTION "finance"."peek_next_number"("p_type" "text") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
+CREATE TABLE IF NOT EXISTS "finance"."fixed_assets" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "code" character varying(50) NOT NULL,
+    "name" character varying(300) NOT NULL,
+    "category_id" "uuid" NOT NULL,
+    "description" "text",
+    "vendor_id" "uuid",
+    "purchase_date" "date" NOT NULL,
+    "purchase_cost" numeric(18,2) NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "base_cost" numeric(18,2) NOT NULL,
+    "exchange_rate_id" "uuid",
+    "serial_number" character varying(200),
+    "warranty_start" "date",
+    "warranty_end" "date",
+    "location" character varying(200),
+    "assigned_user_id" "uuid",
+    "useful_life_months" integer,
+    "residual_value_pct" numeric(5,2),
+    "depreciation_method" character varying(50),
+    "residual_value_amount" numeric(18,2),
+    "accumulated_depreciation" numeric(18,2) DEFAULT 0 NOT NULL,
+    "net_book_value" numeric(18,2) DEFAULT 0 NOT NULL,
+    "linked_asset_account_id" "uuid",
+    "linked_depreciation_account_id" "uuid",
+    "linked_expense_account_id" "uuid",
+    "project_id" "uuid",
+    "department_id" "uuid",
+    "cost_center_id" "uuid",
+    "status" character varying(50) DEFAULT 'pending_capitalization'::character varying NOT NULL,
+    "disposal_date" "date",
+    "disposal_value" numeric(18,2),
+    "disposal_currency" "text",
+    "disposal_method" character varying(100),
+    "gain_loss_amount" numeric(18,2),
+    "disposal_journal_id" "uuid",
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "created_by" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
+    "financial_account_id" "uuid",
+    "capitalization_journal_id" "uuid",
+    CONSTRAINT "fixed_assets_base_cost_check" CHECK (("base_cost" >= (0)::numeric)),
+    CONSTRAINT "fixed_assets_depreciation_method_check" CHECK ((("depreciation_method" IS NULL) OR (("depreciation_method")::"text" = ANY ((ARRAY['straight_line'::character varying, 'declining_balance'::character varying, 'units_of_production'::character varying])::"text"[])))),
+    CONSTRAINT "fixed_assets_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
+    CONSTRAINT "fixed_assets_purchase_cost_check" CHECK (("purchase_cost" >= (0)::numeric)),
+    CONSTRAINT "fixed_assets_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['pending_capitalization'::character varying, 'active'::character varying, 'fully_depreciated'::character varying, 'under_repair'::character varying, 'disposed'::character varying, 'sold'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "finance"."fixed_assets" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "finance"."fixed_assets"."financial_account_id" IS 'BUG-024 FIX: the bank/cash account that funded this asset''s purchase (used as the capitalization credit leg when the asset was not bought on vendor credit) and/or that receives disposal proceeds.';
+
+
+
+COMMENT ON COLUMN "finance"."fixed_assets"."capitalization_journal_id" IS 'BUG-024 FIX: the journal entry that recorded this asset''s initial capitalization, for register-to-ledger reconciliation (spec 5.10). Mirrors disposal_journal_id.';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_asset_capitalization"("p_asset_id" "uuid", "p_posted_by" "uuid") RETURNS "finance"."fixed_assets"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
     AS $$
 DECLARE
+  v_asset finance.fixed_assets%ROWTYPE;
+  v_org UUID;
+  v_period_id UUID;
+  v_credit_account_id UUID;
+  v_journal_id UUID;
+  v_lines JSONB;
+BEGIN
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to capitalize a fixed asset. Requires Finance Head, CEO, or Accountant.';
+  END IF;
+
+  SELECT * INTO v_asset FROM finance.fixed_assets WHERE id = p_asset_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Fixed asset not found: %', p_asset_id;
+  END IF;
+
+  v_org := v_asset.organization_id;
+  IF v_org IS DISTINCT FROM core.current_user_org_id() THEN
+    RAISE EXCEPTION 'Access denied: asset belongs to another organization';
+  END IF;
+
+  IF v_asset.status <> 'pending_capitalization' THEN
+    RAISE EXCEPTION 'Only pending_capitalization assets can be capitalized. Current status: %', v_asset.status;
+  END IF;
+
+  IF v_asset.linked_asset_account_id IS NULL THEN
+    RAISE EXCEPTION 'Asset % has no linked_asset_account_id configured (set on the asset or its category)', v_asset.code;
+  END IF;
+
+  -- Resolve the credit leg.
+  IF v_asset.financial_account_id IS NOT NULL THEN
+    SELECT linked_ledger_account_id INTO v_credit_account_id
+    FROM finance.financial_accounts
+    WHERE id = v_asset.financial_account_id AND organization_id = v_org AND is_active = true;
+    IF v_credit_account_id IS NULL THEN
+      RAISE EXCEPTION 'Asset %''s financial account is missing, inactive, or has no linked GL ledger account', v_asset.code;
+    END IF;
+  ELSE
+    SELECT id INTO v_credit_account_id
+    FROM finance.chart_of_accounts
+    WHERE organization_id = v_org AND code = '2110' AND is_active = true AND posting_allowed IS NOT FALSE;
+    IF v_credit_account_id IS NULL THEN
+      RAISE EXCEPTION 'No financial_account_id set on asset % and the Vendor Payables control account (code 2110) is missing or not postable', v_asset.code;
+    END IF;
+  END IF;
+
+  -- Resolve the OPEN accounting period covering the purchase date.
+  SELECT id INTO v_period_id
+  FROM finance.accounting_periods
+  WHERE organization_id = v_org AND status = 'OPEN'
+    AND v_asset.purchase_date BETWEEN start_date AND end_date
+  ORDER BY start_date DESC LIMIT 1;
+  IF v_period_id IS NULL THEN
+    SELECT id INTO v_period_id
+    FROM finance.accounting_periods
+    WHERE organization_id = v_org AND status = 'OPEN'
+    ORDER BY start_date DESC LIMIT 1;
+  END IF;
+  IF v_period_id IS NULL THEN
+    RAISE EXCEPTION 'No OPEN accounting period found to post asset capitalization for %', v_asset.code;
+  END IF;
+
+  v_lines := jsonb_build_array(
+    jsonb_build_object('account_id', v_asset.linked_asset_account_id, 'debit_amount', v_asset.base_cost, 'credit_amount', 0, 'description', 'Capitalize asset ' || v_asset.code || ' - ' || v_asset.name, 'project_id', v_asset.project_id),
+    jsonb_build_object('account_id', v_credit_account_id, 'debit_amount', 0, 'credit_amount', v_asset.base_cost, 'description', 'Capitalize asset ' || v_asset.code || ' - ' || v_asset.name)
+  );
+
+  v_journal_id := finance.post_journal_entry(
+    p_description := 'Asset capitalization: ' || v_asset.code || ' - ' || v_asset.name,
+    p_transaction_date := v_asset.purchase_date,
+    p_period_id := v_period_id,
+    p_lines := v_lines,
+    p_currency := v_asset.currency,
+    p_exchange_rate := 1,
+    p_source_type := 'ASSET_CAPITALIZATION',
+    p_source_id := v_asset.id,
+    p_project_id := v_asset.project_id,
+    p_department_id := v_asset.department_id
+  );
+
+  UPDATE finance.fixed_assets
+  SET status = 'active',
+      approved_by = p_posted_by,
+      approved_at = now(),
+      capitalization_journal_id = v_journal_id,
+      updated_at = now()
+  WHERE id = p_asset_id
+  RETURNING * INTO v_asset;
+
+  RETURN v_asset;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_asset_capitalization"("p_asset_id" "uuid", "p_posted_by" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_asset_capitalization"("p_asset_id" "uuid", "p_posted_by" "uuid") IS 'BUG-024 FIX: previously missing entirely, so no asset could ever leave pending_capitalization. Posts DR asset account / CR funding account (financial_account_id if paid immediately, else Vendor Payables 2110) through finance.post_journal_entry(), then flips the asset to active.';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_asset_disposal"("p_asset_id" "uuid", "p_disposal_date" "date", "p_disposal_value" numeric, "p_disposal_currency" "text", "p_disposal_method" "text") RETURNS "finance"."fixed_assets"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_asset finance.fixed_assets%ROWTYPE;
+  v_org UUID;
+  v_period_id UUID;
+  v_nbv NUMERIC(18,2);
+  v_gain_loss NUMERIC(18,2);
+  v_cash_ledger_account_id UUID;
+  v_gain_account_id UUID;
+  v_loss_account_id UUID;
+  v_journal_id UUID;
+  v_lines JSONB := '[]'::jsonb;
+BEGIN
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to dispose a fixed asset. Requires Finance Head, CEO, or Accountant.';
+  END IF;
+
+  IF p_disposal_value IS NULL OR p_disposal_value < 0 THEN
+    RAISE EXCEPTION 'Disposal value must be zero or a positive number';
+  END IF;
+
+  SELECT * INTO v_asset FROM finance.fixed_assets WHERE id = p_asset_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Fixed asset not found: %', p_asset_id;
+  END IF;
+
+  v_org := v_asset.organization_id;
+  IF v_org IS DISTINCT FROM core.current_user_org_id() THEN
+    RAISE EXCEPTION 'Access denied: asset belongs to another organization';
+  END IF;
+
+  IF v_asset.status NOT IN ('active', 'fully_depreciated', 'under_repair') THEN
+    RAISE EXCEPTION 'Only active, fully_depreciated, or under_repair assets can be disposed. Current status: %', v_asset.status;
+  END IF;
+
+  IF v_asset.linked_asset_account_id IS NULL THEN
+    RAISE EXCEPTION 'Asset % has no linked_asset_account_id configured', v_asset.code;
+  END IF;
+  IF v_asset.accumulated_depreciation > 0 AND v_asset.linked_depreciation_account_id IS NULL THEN
+    RAISE EXCEPTION 'Asset % has accumulated depreciation but no linked_depreciation_account_id configured', v_asset.code;
+  END IF;
+
+  v_nbv := v_asset.base_cost - v_asset.accumulated_depreciation;
+  v_gain_loss := p_disposal_value - v_nbv;
+
+  IF p_disposal_value > 0 THEN
+    IF v_asset.financial_account_id IS NULL THEN
+      RAISE EXCEPTION 'Asset % has a disposal value but no financial_account_id set to receive the proceeds', v_asset.code;
+    END IF;
+    SELECT linked_ledger_account_id INTO v_cash_ledger_account_id
+    FROM finance.financial_accounts
+    WHERE id = v_asset.financial_account_id AND organization_id = v_org AND is_active = true;
+    IF v_cash_ledger_account_id IS NULL THEN
+      RAISE EXCEPTION 'Asset %''s financial account is missing, inactive, or has no linked GL ledger account', v_asset.code;
+    END IF;
+  END IF;
+
+  IF v_gain_loss > 0 THEN
+    SELECT id INTO v_gain_account_id FROM finance.chart_of_accounts
+    WHERE organization_id = v_org AND code = '7031' AND is_active = true AND posting_allowed IS NOT FALSE;
+    IF v_gain_account_id IS NULL THEN
+      RAISE EXCEPTION 'Fixed Asset Disposal Gain account (code 7031) is missing or not postable';
+    END IF;
+  ELSIF v_gain_loss < 0 THEN
+    SELECT id INTO v_loss_account_id FROM finance.chart_of_accounts
+    WHERE organization_id = v_org AND code = '7131' AND is_active = true AND posting_allowed IS NOT FALSE;
+    IF v_loss_account_id IS NULL THEN
+      RAISE EXCEPTION 'Fixed Asset Disposal Loss account (code 7131) is missing or not postable';
+    END IF;
+  END IF;
+
+  SELECT id INTO v_period_id
+  FROM finance.accounting_periods
+  WHERE organization_id = v_org AND status = 'OPEN'
+    AND p_disposal_date BETWEEN start_date AND end_date
+  ORDER BY start_date DESC LIMIT 1;
+  IF v_period_id IS NULL THEN
+    SELECT id INTO v_period_id
+    FROM finance.accounting_periods
+    WHERE organization_id = v_org AND status = 'OPEN'
+    ORDER BY start_date DESC LIMIT 1;
+  END IF;
+  IF v_period_id IS NULL THEN
+    RAISE EXCEPTION 'No OPEN accounting period found to post disposal of asset %', v_asset.code;
+  END IF;
+
+  v_lines := v_lines || jsonb_build_array(
+    jsonb_build_object('account_id', v_asset.linked_asset_account_id, 'debit_amount', 0, 'credit_amount', v_asset.base_cost, 'description', 'Disposal of asset ' || v_asset.code || ' - remove cost')
+  );
+  IF v_asset.accumulated_depreciation > 0 THEN
+    v_lines := v_lines || jsonb_build_array(
+      jsonb_build_object('account_id', v_asset.linked_depreciation_account_id, 'debit_amount', v_asset.accumulated_depreciation, 'credit_amount', 0, 'description', 'Disposal of asset ' || v_asset.code || ' - remove accumulated depreciation')
+    );
+  END IF;
+  IF p_disposal_value > 0 THEN
+    v_lines := v_lines || jsonb_build_array(
+      jsonb_build_object('account_id', v_cash_ledger_account_id, 'debit_amount', p_disposal_value, 'credit_amount', 0, 'description', 'Disposal proceeds: asset ' || v_asset.code)
+    );
+  END IF;
+  IF v_gain_loss > 0 THEN
+    v_lines := v_lines || jsonb_build_array(
+      jsonb_build_object('account_id', v_gain_account_id, 'debit_amount', 0, 'credit_amount', v_gain_loss, 'description', 'Gain on disposal: asset ' || v_asset.code)
+    );
+  ELSIF v_gain_loss < 0 THEN
+    v_lines := v_lines || jsonb_build_array(
+      jsonb_build_object('account_id', v_loss_account_id, 'debit_amount', abs(v_gain_loss), 'credit_amount', 0, 'description', 'Loss on disposal: asset ' || v_asset.code)
+    );
+  END IF;
+
+  v_journal_id := finance.post_journal_entry(
+    p_description := 'Asset disposal: ' || v_asset.code || ' - ' || v_asset.name,
+    p_transaction_date := p_disposal_date,
+    p_period_id := v_period_id,
+    p_lines := v_lines,
+    p_currency := COALESCE(p_disposal_currency, v_asset.currency),
+    p_exchange_rate := 1,
+    p_source_type := 'ASSET_DISPOSAL',
+    p_source_id := v_asset.id,
+    p_project_id := v_asset.project_id,
+    p_department_id := v_asset.department_id
+  );
+
+  UPDATE finance.fixed_assets
+  SET status = CASE WHEN p_disposal_value > 0 THEN 'sold' ELSE 'disposed' END,
+      disposal_date = p_disposal_date,
+      disposal_value = p_disposal_value,
+      disposal_currency = p_disposal_currency,
+      disposal_method = p_disposal_method,
+      gain_loss_amount = v_gain_loss,
+      disposal_journal_id = v_journal_id,
+      updated_at = now()
+  WHERE id = p_asset_id
+  RETURNING * INTO v_asset;
+
+  RETURN v_asset;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_asset_disposal"("p_asset_id" "uuid", "p_disposal_date" "date", "p_disposal_value" numeric, "p_disposal_currency" "text", "p_disposal_method" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_asset_disposal"("p_asset_id" "uuid", "p_disposal_date" "date", "p_disposal_value" numeric, "p_disposal_currency" "text", "p_disposal_method" "text") IS 'BUG-024 FIX: previously missing entirely, so no asset could ever be disposed. Removes the asset at cost and its accumulated depreciation, records any sale proceeds and the resulting gain/loss, through finance.post_journal_entry().';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+    v_org uuid;
     v_t RECORD;
     v_fy_id UUID;
     v_from_ledger UUID;
@@ -3106,9 +3541,31 @@ DECLARE
     v_from_rate NUMERIC(18,6);
     v_to_rate NUMERIC(18,6);
 BEGIN
-    SELECT * INTO v_t FROM finance.bank_transfers WHERE id = p_transfer_id;
-    IF NOT FOUND THEN RAISE EXCEPTION 'Transfer not found'; END IF;
-    IF v_t.status NOT IN ('APPROVED','SUBMITTED') THEN RAISE EXCEPTION 'Must be approved, status: %', v_t.status; END IF;
+    -- BUG-025 FIX (four issues in this one check, all from the same missing
+    -- guard block):
+    -- 1) No organization scoping at all -- any authenticated user of any org
+    --    could post an arbitrary transfer by id (see BUG-026 for the same
+    --    pattern on the reconciliation-matching functions).
+    -- 2) No role/permission check at all.
+    -- 3) 'SUBMITTED' was an accepted status for posting, meaning a transfer
+    --    that was never actually approved could still be posted.
+    -- 4) requires_dual_approval / second_approved_by were never checked, so
+    --    even a transfer correctly left at SUBMITTED pending its second
+    --    approval could be posted by calling this function directly.
+    v_org := core.current_user_org_id();
+    IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
+    IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+        RAISE EXCEPTION 'Access denied';
+    END IF;
+
+    SELECT * INTO v_t FROM finance.bank_transfers
+    WHERE id = p_transfer_id AND organization_id = v_org
+    FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Transfer not found or access denied'; END IF;
+    IF v_t.status <> 'APPROVED' THEN RAISE EXCEPTION 'Must be approved, status: %', v_t.status; END IF;
+    IF v_t.requires_dual_approval AND v_t.second_approved_by IS NULL THEN
+        RAISE EXCEPTION 'This transfer requires a second approval before it can be posted';
+    END IF;
 
     SELECT fiscal_year_id INTO v_fy_id FROM finance.accounting_periods WHERE id = p_period_id;
     IF v_fy_id IS NULL THEN RAISE EXCEPTION 'Invalid period'; END IF;
@@ -3215,6 +3672,97 @@ $$;
 
 
 ALTER FUNCTION "finance"."post_credit_note"("p_cn_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_depreciation_for_period"("p_period_id" "uuid", "p_created_by" "uuid") RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org UUID := core.current_user_org_id();
+  v_period_org UUID;
+  v_row RECORD;
+  v_lines JSONB := '[]'::jsonb;
+  v_journal_id UUID;
+  v_posted_count INTEGER := 0;
+BEGIN
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to post depreciation. Requires Finance Head, CEO, or Accountant.';
+  END IF;
+
+  SELECT organization_id INTO v_period_org FROM finance.accounting_periods WHERE id = p_period_id;
+  IF v_period_org IS NULL THEN
+    RAISE EXCEPTION 'Invalid period_id: %', p_period_id;
+  END IF;
+  IF v_period_org IS DISTINCT FROM v_org THEN
+    RAISE EXCEPTION 'Access denied: accounting period % does not belong to your organization', p_period_id;
+  END IF;
+
+  FOR v_row IN
+    SELECT ds.id AS schedule_id, ds.asset_id, ds.depreciation_amount,
+           fa.code AS asset_code, fa.name AS asset_name,
+           fa.linked_depreciation_account_id, fa.linked_expense_account_id,
+           fa.project_id, fa.department_id, fa.currency
+    FROM finance.depreciation_schedule ds
+    JOIN finance.fixed_assets fa ON fa.id = ds.asset_id
+    WHERE ds.period_id = p_period_id
+      AND ds.status = 'calculated'
+      AND fa.organization_id = v_org
+    ORDER BY fa.code
+  LOOP
+    IF v_row.linked_depreciation_account_id IS NULL OR v_row.linked_expense_account_id IS NULL THEN
+      RAISE EXCEPTION 'Asset % has no linked_depreciation_account_id/linked_expense_account_id configured', v_row.asset_code;
+    END IF;
+
+    v_lines := v_lines || jsonb_build_array(
+      jsonb_build_object('account_id', v_row.linked_expense_account_id, 'debit_amount', v_row.depreciation_amount, 'credit_amount', 0, 'description', 'Depreciation: ' || v_row.asset_code || ' - ' || v_row.asset_name, 'project_id', v_row.project_id),
+      jsonb_build_object('account_id', v_row.linked_depreciation_account_id, 'debit_amount', 0, 'credit_amount', v_row.depreciation_amount, 'description', 'Depreciation: ' || v_row.asset_code || ' - ' || v_row.asset_name)
+    );
+    v_posted_count := v_posted_count + 1;
+  END LOOP;
+
+  IF v_posted_count = 0 THEN
+    RETURN 0;
+  END IF;
+
+  v_journal_id := finance.post_journal_entry(
+    p_description := 'Depreciation run for period ' || p_period_id::text,
+    p_transaction_date := CURRENT_DATE,
+    p_period_id := p_period_id,
+    p_lines := v_lines,
+    p_currency := 'PKR',
+    p_exchange_rate := 1,
+    p_source_type := 'DEPRECIATION_RUN',
+    p_source_id := p_period_id
+  );
+
+  -- Wire up finance.fn_add_accumulated_depreciation() (previously had no
+  -- caller anywhere), and mark each schedule row posted.
+  FOR v_row IN
+    SELECT ds.id AS schedule_id, ds.asset_id, ds.depreciation_amount
+    FROM finance.depreciation_schedule ds
+    JOIN finance.fixed_assets fa ON fa.id = ds.asset_id
+    WHERE ds.period_id = p_period_id
+      AND ds.status = 'calculated'
+      AND fa.organization_id = v_org
+  LOOP
+    PERFORM finance.fn_add_accumulated_depreciation(v_row.asset_id, v_row.depreciation_amount);
+
+    UPDATE finance.depreciation_schedule
+    SET status = 'posted', posted_at = now(), journal_entry_id = v_journal_id
+    WHERE id = v_row.schedule_id;
+  END LOOP;
+
+  RETURN v_posted_count;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_depreciation_for_period"("p_period_id" "uuid", "p_created_by" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_depreciation_for_period"("p_period_id" "uuid", "p_created_by" "uuid") IS 'BUG-024 FIX: previously missing entirely, so finance.fn_generate_depreciation_for_period()''s output sat at status=calculated forever and finance.fn_add_accumulated_depreciation() (which existed) was never called. Posts one journal covering every calculated schedule row in the period, then updates each asset''s accumulated_depreciation/net_book_value and marks the schedule rows posted.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_distribution_payment"("p_line_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_bank_account_id" "uuid") RETURNS "uuid"
@@ -4361,11 +4909,21 @@ ALTER FUNCTION "finance"."sync_budget_line_committed_amount"() OWNER TO "postgre
 
 CREATE OR REPLACE FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text" DEFAULT NULL::"text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ DECLARE v_sl RECORD;
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$ DECLARE v_sl RECORD; v_org uuid;
 BEGIN
-    SELECT * INTO v_sl FROM finance.statement_lines WHERE id = p_line_id;
-    IF NOT FOUND THEN RAISE EXCEPTION 'Line not found'; END IF;
+    -- BUG-026 FIX: same cross-tenant gap as auto_match_statement_lines/
+    -- detect_duplicate_statement_lines -- no organization check at all,
+    -- letting any authenticated user of any org unmatch an arbitrary
+    -- statement line by id. Scoped via the line's parent bank_statement.
+    v_org := core.current_user_org_id();
+    IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
+
+    SELECT sl.* INTO v_sl
+    FROM finance.statement_lines sl
+    JOIN finance.bank_statements bs ON bs.id = sl.bank_statement_id
+    WHERE sl.id = p_line_id AND bs.organization_id = v_org;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Line not found or access denied'; END IF;
     IF v_sl.reconciliation_status NOT IN ('MATCHED','MANUAL_MATCH') THEN RAISE EXCEPTION 'Can only unmatch matched lines'; END IF;
     UPDATE finance.statement_lines SET reconciliation_status = 'UNRECONCILED', matched_journal_line_id = NULL, matched_at = NULL, matched_by = NULL, match_method = NULL WHERE id = p_line_id;
 END;
@@ -4373,6 +4931,154 @@ END;
 
 
 ALTER FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text") OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."bank_transfers" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "transfer_number" "text",
+    "description" "text",
+    "from_account_id" "uuid" NOT NULL,
+    "from_currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "from_amount" numeric(18,2) NOT NULL,
+    "to_account_id" "uuid" NOT NULL,
+    "to_currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "to_amount" numeric(18,2) NOT NULL,
+    "exchange_rate" numeric(18,6) DEFAULT 1.000000 NOT NULL,
+    "fx_rate_date" "date",
+    "transfer_date" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "requires_dual_approval" boolean DEFAULT false,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "second_approved_by" "uuid",
+    "second_approved_at" timestamp with time zone,
+    "rejected_by" "uuid",
+    "rejected_at" timestamp with time zone,
+    "rejection_reason" "text",
+    "journal_entry_id" "uuid",
+    "period_id" "uuid",
+    "posted_by" "uuid",
+    "posted_at" timestamp with time zone,
+    "reversal_reason" "text",
+    "reversed_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    "organization_id" "uuid",
+    CONSTRAINT "bank_transfers_exchange_rate_check" CHECK (("exchange_rate" > (0)::numeric)),
+    CONSTRAINT "bank_transfers_from_amount_check" CHECK (("from_amount" > (0)::numeric)),
+    CONSTRAINT "bank_transfers_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
+    CONSTRAINT "bank_transfers_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"]))),
+    CONSTRAINT "bank_transfers_to_amount_check" CHECK (("to_amount" > (0)::numeric)),
+    CONSTRAINT "chk_diff_accounts" CHECK (("from_account_id" <> "to_account_id"))
+);
+
+
+ALTER TABLE "finance"."bank_transfers" OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."update_bank_transfer_status"("p_transfer_id" "uuid", "p_status" "text", "p_rejection_reason" "text" DEFAULT NULL::"text") RETURNS "finance"."bank_transfers"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_user uuid := auth.uid();
+  v_transfer RECORD;
+  v_result finance.bank_transfers;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Organization context is required';
+  END IF;
+  IF v_user IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+  IF p_status NOT IN ('SUBMITTED', 'APPROVED', 'REJECTED', 'CANCELLED') THEN
+    RAISE EXCEPTION 'Unsupported status transition: %', p_status;
+  END IF;
+
+  SELECT * INTO v_transfer
+  FROM finance.bank_transfers
+  WHERE id = p_transfer_id AND organization_id = v_org
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Bank transfer not found or access denied';
+  END IF;
+
+  IF p_status = 'SUBMITTED' THEN
+    IF v_transfer.status <> 'DRAFT' THEN
+      RAISE EXCEPTION 'Only a DRAFT transfer can be submitted, current: %', v_transfer.status;
+    END IF;
+    IF NOT (core.has_role('ACCOUNTANT') OR core.is_finance_head()) THEN
+      RAISE EXCEPTION 'Access denied';
+    END IF;
+
+    UPDATE finance.bank_transfers SET status = 'SUBMITTED'
+    WHERE id = p_transfer_id RETURNING * INTO v_result;
+
+  ELSIF p_status = 'APPROVED' THEN
+    IF v_transfer.status <> 'SUBMITTED' THEN
+      RAISE EXCEPTION 'Only a SUBMITTED transfer can be approved, current: %', v_transfer.status;
+    END IF;
+    IF NOT core.is_finance_head() THEN
+      RAISE EXCEPTION 'Only CEO or Finance Head may approve a bank transfer';
+    END IF;
+
+    IF v_transfer.approved_by IS NULL THEN
+      -- First approval leg. enforce_maker_checker blocks creator == approver.
+      IF v_transfer.requires_dual_approval THEN
+        UPDATE finance.bank_transfers SET approved_by = v_user, approved_at = now()
+        WHERE id = p_transfer_id RETURNING * INTO v_result; -- status stays SUBMITTED, awaiting second approval
+      ELSE
+        UPDATE finance.bank_transfers SET status = 'APPROVED', approved_by = v_user, approved_at = now()
+        WHERE id = p_transfer_id RETURNING * INTO v_result;
+      END IF;
+    ELSE
+      IF NOT v_transfer.requires_dual_approval THEN
+        RAISE EXCEPTION 'This transfer has already received its required approval';
+      END IF;
+      IF v_transfer.second_approved_by IS NOT NULL THEN
+        RAISE EXCEPTION 'This transfer has already received its second approval';
+      END IF;
+      -- Second approval leg. enforce_maker_checker blocks creator/first-approver == second approver.
+      UPDATE finance.bank_transfers SET status = 'APPROVED', second_approved_by = v_user, second_approved_at = now()
+      WHERE id = p_transfer_id RETURNING * INTO v_result;
+    END IF;
+
+  ELSIF p_status = 'REJECTED' THEN
+    IF v_transfer.status <> 'SUBMITTED' THEN
+      RAISE EXCEPTION 'Only a SUBMITTED transfer can be rejected, current: %', v_transfer.status;
+    END IF;
+    IF NOT core.is_finance_head() THEN
+      RAISE EXCEPTION 'Only CEO or Finance Head may reject a bank transfer';
+    END IF;
+    IF p_rejection_reason IS NULL OR btrim(p_rejection_reason) = '' THEN
+      RAISE EXCEPTION 'Rejection reason is mandatory';
+    END IF;
+
+    UPDATE finance.bank_transfers
+    SET status = 'REJECTED', rejected_by = v_user, rejected_at = now(), rejection_reason = p_rejection_reason
+    WHERE id = p_transfer_id RETURNING * INTO v_result;
+
+  ELSIF p_status = 'CANCELLED' THEN
+    IF v_transfer.status NOT IN ('DRAFT', 'SUBMITTED') THEN
+      RAISE EXCEPTION 'An APPROVED or POSTED transfer cannot be cancelled directly, current: %', v_transfer.status;
+    END IF;
+    IF NOT (v_transfer.created_by = v_user OR core.is_finance_head()) THEN
+      RAISE EXCEPTION 'Access denied';
+    END IF;
+
+    UPDATE finance.bank_transfers
+    SET status = 'CANCELLED', rejection_reason = COALESCE(p_rejection_reason, rejection_reason)
+    WHERE id = p_transfer_id RETURNING * INTO v_result;
+  END IF;
+
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."update_bank_transfer_status"("p_transfer_id" "uuid", "p_status" "text", "p_rejection_reason" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."validate_ownership_percentage_total"() RETURNS "trigger"
@@ -7950,77 +8656,6 @@ COMMENT ON TABLE "finance"."attendance_period_snapshots" IS 'Immutable, versione
 
 
 
-CREATE TABLE IF NOT EXISTS "finance"."bank_statements" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "financial_account_id" "uuid" NOT NULL,
-    "statement_date" "date" NOT NULL,
-    "opening_balance" numeric(18,2) NOT NULL,
-    "closing_balance" numeric(18,2) NOT NULL,
-    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
-    "total_debits" numeric(18,2) DEFAULT 0,
-    "total_credits" numeric(18,2) DEFAULT 0,
-    "line_count" integer DEFAULT 0,
-    "imported_at" timestamp with time zone DEFAULT "now"(),
-    "imported_by" "uuid" NOT NULL,
-    "file_name" "text",
-    "reconciliation_status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
-    "reconciled_at" timestamp with time zone,
-    "reconciled_by" "uuid",
-    "created_at" timestamp with time zone DEFAULT "now"(),
-    "updated_at" timestamp with time zone DEFAULT "now"(),
-    "organization_id" "uuid",
-    CONSTRAINT "bank_statements_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
-    CONSTRAINT "bank_statements_reconciliation_status_check" CHECK (("reconciliation_status" = ANY (ARRAY['PENDING'::"text", 'IN_PROGRESS'::"text", 'COMPLETED'::"text", 'PARTIAL'::"text"])))
-);
-
-
-ALTER TABLE "finance"."bank_statements" OWNER TO "postgres";
-
-
-CREATE TABLE IF NOT EXISTS "finance"."bank_transfers" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "transfer_number" "text",
-    "description" "text",
-    "from_account_id" "uuid" NOT NULL,
-    "from_currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
-    "from_amount" numeric(18,2) NOT NULL,
-    "to_account_id" "uuid" NOT NULL,
-    "to_currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
-    "to_amount" numeric(18,2) NOT NULL,
-    "exchange_rate" numeric(18,6) DEFAULT 1.000000 NOT NULL,
-    "fx_rate_date" "date",
-    "transfer_date" "date" DEFAULT CURRENT_DATE NOT NULL,
-    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
-    "requires_dual_approval" boolean DEFAULT false,
-    "approved_by" "uuid",
-    "approved_at" timestamp with time zone,
-    "second_approved_by" "uuid",
-    "second_approved_at" timestamp with time zone,
-    "rejected_by" "uuid",
-    "rejected_at" timestamp with time zone,
-    "rejection_reason" "text",
-    "journal_entry_id" "uuid",
-    "period_id" "uuid",
-    "posted_by" "uuid",
-    "posted_at" timestamp with time zone,
-    "reversal_reason" "text",
-    "reversed_at" timestamp with time zone,
-    "created_at" timestamp with time zone DEFAULT "now"(),
-    "updated_at" timestamp with time zone DEFAULT "now"(),
-    "created_by" "uuid",
-    "organization_id" "uuid",
-    CONSTRAINT "bank_transfers_exchange_rate_check" CHECK (("exchange_rate" > (0)::numeric)),
-    CONSTRAINT "bank_transfers_from_amount_check" CHECK (("from_amount" > (0)::numeric)),
-    CONSTRAINT "bank_transfers_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
-    CONSTRAINT "bank_transfers_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"]))),
-    CONSTRAINT "bank_transfers_to_amount_check" CHECK (("to_amount" > (0)::numeric)),
-    CONSTRAINT "chk_diff_accounts" CHECK (("from_account_id" <> "to_account_id"))
-);
-
-
-ALTER TABLE "finance"."bank_transfers" OWNER TO "postgres";
-
-
 CREATE TABLE IF NOT EXISTS "finance"."budget_commitments" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "budget_line_id" "uuid" NOT NULL,
@@ -8233,10 +8868,17 @@ CASE
     WHEN ("invoice_id" IS NOT NULL) THEN 'AR'::"text"
     ELSE 'AP'::"text"
 END) STORED,
+    "client_id" "uuid",
+    "line_items" "jsonb" DEFAULT '[]'::"jsonb" NOT NULL,
+    "tax_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "notes" "text",
+    "credit_note_date" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "rejection_reason" "text",
     CONSTRAINT "credit_notes_amount_check" CHECK (("amount" > (0)::numeric)),
     CONSTRAINT "credit_notes_exactly_one_source" CHECK (((("invoice_id" IS NOT NULL) AND ("vendor_bill_id" IS NULL)) OR (("invoice_id" IS NULL) AND ("vendor_bill_id" IS NOT NULL)))),
     CONSTRAINT "credit_notes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
-    CONSTRAINT "credit_notes_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text"])))
+    CONSTRAINT "credit_notes_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text"]))),
+    CONSTRAINT "credit_notes_tax_amount_check" CHECK (("tax_amount" >= (0)::numeric))
 );
 
 
@@ -8244,6 +8886,10 @@ ALTER TABLE "finance"."credit_notes" OWNER TO "postgres";
 
 
 COMMENT ON TABLE "finance"."credit_notes" IS 'Credit notes against either a client invoice (AR, invoice_id set) or a vendor bill (AP, vendor_bill_id set) -- see credit_notes_exactly_one_source. Extended for AP support in Migration 035 (spec §5.7 / §2.1 / §12.3).';
+
+
+
+COMMENT ON COLUMN "finance"."credit_notes"."tax_amount" IS 'Informational breakdown only — GL posting in credit-notes/[id]/route.ts uses `amount` (exposed as total_amount) for both the revenue debit and receivable credit lines; tax_amount does not separately hit a tax account.';
 
 
 
@@ -8601,59 +9247,6 @@ CREATE OR REPLACE VIEW "finance"."fiscal_year_summary" WITH ("security_invoker"=
 ALTER VIEW "finance"."fiscal_year_summary" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "finance"."fixed_assets" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "code" character varying(50) NOT NULL,
-    "name" character varying(300) NOT NULL,
-    "category_id" "uuid" NOT NULL,
-    "description" "text",
-    "vendor_id" "uuid",
-    "purchase_date" "date" NOT NULL,
-    "purchase_cost" numeric(18,2) NOT NULL,
-    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
-    "base_cost" numeric(18,2) NOT NULL,
-    "exchange_rate_id" "uuid",
-    "serial_number" character varying(200),
-    "warranty_start" "date",
-    "warranty_end" "date",
-    "location" character varying(200),
-    "assigned_user_id" "uuid",
-    "useful_life_months" integer,
-    "residual_value_pct" numeric(5,2),
-    "depreciation_method" character varying(50),
-    "residual_value_amount" numeric(18,2),
-    "accumulated_depreciation" numeric(18,2) DEFAULT 0 NOT NULL,
-    "net_book_value" numeric(18,2) DEFAULT 0 NOT NULL,
-    "linked_asset_account_id" "uuid",
-    "linked_depreciation_account_id" "uuid",
-    "linked_expense_account_id" "uuid",
-    "project_id" "uuid",
-    "department_id" "uuid",
-    "cost_center_id" "uuid",
-    "status" character varying(50) DEFAULT 'pending_capitalization'::character varying NOT NULL,
-    "disposal_date" "date",
-    "disposal_value" numeric(18,2),
-    "disposal_currency" "text",
-    "disposal_method" character varying(100),
-    "gain_loss_amount" numeric(18,2),
-    "disposal_journal_id" "uuid",
-    "approved_by" "uuid",
-    "approved_at" timestamp with time zone,
-    "created_by" "uuid" NOT NULL,
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "organization_id" "uuid",
-    CONSTRAINT "fixed_assets_base_cost_check" CHECK (("base_cost" >= (0)::numeric)),
-    CONSTRAINT "fixed_assets_depreciation_method_check" CHECK ((("depreciation_method" IS NULL) OR (("depreciation_method")::"text" = ANY ((ARRAY['straight_line'::character varying, 'declining_balance'::character varying, 'units_of_production'::character varying])::"text"[])))),
-    CONSTRAINT "fixed_assets_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
-    CONSTRAINT "fixed_assets_purchase_cost_check" CHECK (("purchase_cost" >= (0)::numeric)),
-    CONSTRAINT "fixed_assets_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['pending_capitalization'::character varying, 'active'::character varying, 'fully_depreciated'::character varying, 'under_repair'::character varying, 'disposed'::character varying, 'sold'::character varying])::"text"[])))
-);
-
-
-ALTER TABLE "finance"."fixed_assets" OWNER TO "postgres";
-
-
 CREATE TABLE IF NOT EXISTS "finance"."invoice_lines" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "invoice_id" "uuid" NOT NULL,
@@ -8685,6 +9278,64 @@ ALTER TABLE ONLY "finance"."invoice_lines" FORCE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "finance"."invoice_lines" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."invoice_milestones" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "invoice_id" "uuid" NOT NULL,
+    "milestone_ref" "text" NOT NULL,
+    "description" "text" NOT NULL,
+    "milestone_date" "date" NOT NULL,
+    "amount" numeric(18,2) NOT NULL,
+    "percentage" numeric(5,2),
+    "evidence_ref" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "invoice_milestones_amount_check" CHECK (("amount" > (0)::numeric)),
+    CONSTRAINT "invoice_milestones_percentage_check" CHECK ((("percentage" IS NULL) OR (("percentage" > (0)::numeric) AND ("percentage" <= (100)::numeric))))
+);
+
+
+ALTER TABLE "finance"."invoice_milestones" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "finance"."invoice_milestones" IS 'BUG-020 fix: table did not exist; src/app/api/finance/invoices/milestones/route.ts failed at runtime on every call.';
+
+
+
+CREATE TABLE IF NOT EXISTS "finance"."invoice_refunds" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "invoice_id" "uuid" NOT NULL,
+    "refund_number" "text" NOT NULL,
+    "amount" numeric(18,2) NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "exchange_rate" numeric(18,6) DEFAULT 1 NOT NULL,
+    "reason" "text" NOT NULL,
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "financial_account_id" "uuid",
+    "journal_entry_id" "uuid",
+    "created_by" "uuid",
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "posted_at" timestamp with time zone,
+    "paid_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "invoice_refunds_amount_check" CHECK (("amount" > (0)::numeric)),
+    CONSTRAINT "invoice_refunds_currency_check" CHECK (("currency" ~ '^[A-Z]{3}$'::"text")),
+    CONSTRAINT "invoice_refunds_exchange_rate_check" CHECK (("exchange_rate" > (0)::numeric)),
+    CONSTRAINT "invoice_refunds_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'PENDING_APPROVAL'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'PAID'::"text", 'REJECTED'::"text"])))
+);
+
+
+ALTER TABLE "finance"."invoice_refunds" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "finance"."invoice_refunds" IS 'BUG-020 fix: table did not exist; src/app/api/finance/invoices/refunds/route.ts failed at runtime on every call.';
+
 
 
 CREATE TABLE IF NOT EXISTS "finance"."journal_entries" (
@@ -9961,12 +10612,20 @@ CREATE OR REPLACE VIEW "public"."credit_notes" WITH ("security_invoker"='true') 
  SELECT "id",
     "credit_note_number",
     "invoice_id",
+    "vendor_bill_id",
+    "credit_note_type",
+    "client_id",
     "reason",
-    "amount",
+    "amount" AS "total_amount",
+    "tax_amount",
+    "line_items",
+    "notes",
     "currency",
     "exchange_rate",
     "base_amount",
+    "credit_note_date",
     "status",
+    "rejection_reason",
     "journal_entry_id",
     "period_id",
     "created_by",
@@ -9975,11 +10634,16 @@ CREATE OR REPLACE VIEW "public"."credit_notes" WITH ("security_invoker"='true') 
     "posted_by",
     "posted_at",
     "created_at",
-    "updated_at"
+    "updated_at",
+    "organization_id"
    FROM "finance"."credit_notes";
 
 
 ALTER VIEW "public"."credit_notes" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."credit_notes" IS 'BUG-021 fix: previously exposed only 18 columns, missing organization_id/client_id/line_items/tax_amount/notes that src/app/api/finance/credit-notes/*.ts read and wrote — every query against this view failed.';
+
 
 
 CREATE OR REPLACE VIEW "public"."exchange_rates" WITH ("security_invoker"='true') AS
@@ -10147,12 +10811,18 @@ CREATE TABLE IF NOT EXISTS "public"."incomes" (
     "reversal_reason" "text",
     "reversed_by" "uuid",
     "reversed_at" timestamp with time zone,
+    "invoice_id" "uuid",
+    "client_id" "uuid",
     CONSTRAINT "incomes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "incomes_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
 );
 
 
 ALTER TABLE "public"."incomes" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."incomes"."invoice_id" IS 'BUG-032 fix: optional link to the invoice this income represents payment/revenue for. post-income/route.ts refuses to GL-post an income with invoice_id set, since that revenue is already recognized by the invoice — link it here instead of double-recording it as separate income.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."invoices" (
@@ -10766,6 +11436,31 @@ CREATE OR REPLACE VIEW "public"."roles" WITH ("security_invoker"='true') AS
 
 
 ALTER VIEW "public"."roles" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."subscription_renewal_events" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "subscription_id" "uuid" NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "renewal_date" "date" NOT NULL,
+    "reminder_days" integer DEFAULT 30 NOT NULL,
+    "status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
+    "acknowledged_by" "uuid",
+    "acknowledged_at" timestamp with time zone,
+    "draft_vendor_bill_id" "uuid",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "subscription_renewal_events_reminder_days_check" CHECK ((("reminder_days" >= 0) AND ("reminder_days" <= 365))),
+    CONSTRAINT "subscription_renewal_events_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'ACKNOWLEDGED'::"text", 'DRAFT_BILL_CREATED'::"text"])))
+);
+
+
+ALTER TABLE "public"."subscription_renewal_events" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."subscription_renewal_events" IS 'Generated renewal reminders for subscriptions nearing their renewal date, with acknowledgement and optional draft-vendor-bill linkage (spec 5.11).';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."subscriptions" (
@@ -12316,6 +13011,26 @@ ALTER TABLE ONLY "finance"."invoice_lines"
 
 
 
+ALTER TABLE ONLY "finance"."invoice_milestones"
+    ADD CONSTRAINT "invoice_milestones_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."invoice_milestones"
+    ADD CONSTRAINT "invoice_milestones_ref_unique" UNIQUE ("invoice_id", "milestone_ref");
+
+
+
+ALTER TABLE ONLY "finance"."invoice_refunds"
+    ADD CONSTRAINT "invoice_refunds_number_unique" UNIQUE ("organization_id", "refund_number");
+
+
+
+ALTER TABLE ONLY "finance"."invoice_refunds"
+    ADD CONSTRAINT "invoice_refunds_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "finance"."journal_entries"
     ADD CONSTRAINT "je_reference_unique" UNIQUE ("reference");
 
@@ -12733,6 +13448,16 @@ ALTER TABLE ONLY "public"."profiles"
 
 ALTER TABLE ONLY "public"."projects"
     ADD CONSTRAINT "projects_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."subscription_renewal_events"
+    ADD CONSTRAINT "subscription_renewal_events_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."subscription_renewal_events"
+    ADD CONSTRAINT "subscription_renewal_events_subscription_id_renewal_date_key" UNIQUE ("subscription_id", "renewal_date");
 
 
 
@@ -13227,6 +13952,18 @@ CREATE INDEX "idx_fy_status" ON "finance"."fiscal_years" USING "btree" ("status"
 
 
 
+CREATE INDEX "idx_invoice_milestones_invoice" ON "finance"."invoice_milestones" USING "btree" ("invoice_id");
+
+
+
+CREATE INDEX "idx_invoice_refunds_invoice" ON "finance"."invoice_refunds" USING "btree" ("invoice_id");
+
+
+
+CREATE INDEX "idx_invoice_refunds_org_status" ON "finance"."invoice_refunds" USING "btree" ("organization_id", "status");
+
+
+
 CREATE INDEX "idx_je_created_by" ON "finance"."journal_entries" USING "btree" ("created_by");
 
 
@@ -13631,6 +14368,10 @@ CREATE INDEX "idx_incomes_date" ON "public"."incomes" USING "btree" ("income_dat
 
 
 
+CREATE INDEX "idx_incomes_invoice_id" ON "public"."incomes" USING "btree" ("invoice_id") WHERE ("invoice_id" IS NOT NULL);
+
+
+
 CREATE INDEX "idx_incomes_org" ON "public"."incomes" USING "btree" ("organization_id");
 
 
@@ -13815,6 +14556,18 @@ CREATE INDEX "idx_reimb_employee" ON "public"."payroll_reimbursements" USING "bt
 
 
 
+CREATE INDEX "idx_sre_org" ON "public"."subscription_renewal_events" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_sre_status" ON "public"."subscription_renewal_events" USING "btree" ("status");
+
+
+
+CREATE INDEX "idx_sre_subscription" ON "public"."subscription_renewal_events" USING "btree" ("subscription_id");
+
+
+
 CREATE INDEX "idx_subscriptions_category" ON "public"."subscriptions" USING "btree" ("category");
 
 
@@ -13832,6 +14585,10 @@ CREATE INDEX "idx_subscriptions_renewal" ON "public"."subscriptions" USING "btre
 
 
 CREATE INDEX "idx_subscriptions_status" ON "public"."subscriptions" USING "btree" ("status");
+
+
+
+CREATE UNIQUE INDEX "uq_incomes_invoice_posted" ON "public"."incomes" USING "btree" ("invoice_id") WHERE (("invoice_id" IS NOT NULL) AND ("status" = 'POSTED'::"text"));
 
 
 
@@ -14702,6 +15459,10 @@ CREATE OR REPLACE TRIGGER "trg_prevent_posted_payroll_run_edit" BEFORE DELETE OR
 
 
 
+CREATE OR REPLACE TRIGGER "trg_subscription_renewal_events_updated" BEFORE UPDATE ON "public"."subscription_renewal_events" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_subscriptions_updated" BEFORE UPDATE ON "public"."subscriptions" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
 
 
@@ -15369,6 +16130,11 @@ ALTER TABLE ONLY "finance"."fixed_assets"
 
 
 ALTER TABLE ONLY "finance"."fixed_assets"
+    ADD CONSTRAINT "fixed_assets_capitalization_journal_id_fkey" FOREIGN KEY ("capitalization_journal_id") REFERENCES "finance"."journal_entries"("id");
+
+
+
+ALTER TABLE ONLY "finance"."fixed_assets"
     ADD CONSTRAINT "fixed_assets_category_id_fkey" FOREIGN KEY ("category_id") REFERENCES "finance"."asset_categories"("id");
 
 
@@ -15385,6 +16151,11 @@ ALTER TABLE ONLY "finance"."fixed_assets"
 
 ALTER TABLE ONLY "finance"."fixed_assets"
     ADD CONSTRAINT "fixed_assets_exchange_rate_id_fkey" FOREIGN KEY ("exchange_rate_id") REFERENCES "finance"."exchange_rates"("id");
+
+
+
+ALTER TABLE ONLY "finance"."fixed_assets"
+    ADD CONSTRAINT "fixed_assets_financial_account_id_fkey" FOREIGN KEY ("financial_account_id") REFERENCES "finance"."financial_accounts"("id");
 
 
 
@@ -15435,6 +16206,46 @@ ALTER TABLE ONLY "finance"."invoice_lines"
 
 ALTER TABLE ONLY "finance"."invoice_lines"
     ADD CONSTRAINT "invoice_lines_tax_code_id_fkey" FOREIGN KEY ("tax_code_id") REFERENCES "finance"."tax_codes"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."invoice_milestones"
+    ADD CONSTRAINT "invoice_milestones_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."invoice_milestones"
+    ADD CONSTRAINT "invoice_milestones_invoice_id_fkey" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id");
+
+
+
+ALTER TABLE ONLY "finance"."invoice_milestones"
+    ADD CONSTRAINT "invoice_milestones_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."invoice_refunds"
+    ADD CONSTRAINT "invoice_refunds_approved_by_fkey" FOREIGN KEY ("approved_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."invoice_refunds"
+    ADD CONSTRAINT "invoice_refunds_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."invoice_refunds"
+    ADD CONSTRAINT "invoice_refunds_financial_account_id_fkey" FOREIGN KEY ("financial_account_id") REFERENCES "finance"."financial_accounts"("id");
+
+
+
+ALTER TABLE ONLY "finance"."invoice_refunds"
+    ADD CONSTRAINT "invoice_refunds_invoice_id_fkey" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id");
+
+
+
+ALTER TABLE ONLY "finance"."invoice_refunds"
+    ADD CONSTRAINT "invoice_refunds_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
 
 
 
@@ -16119,6 +16930,11 @@ ALTER TABLE ONLY "public"."incomes"
 
 
 ALTER TABLE ONLY "public"."incomes"
+    ADD CONSTRAINT "incomes_invoice_id_fkey" FOREIGN KEY ("invoice_id") REFERENCES "public"."invoices"("id");
+
+
+
+ALTER TABLE ONLY "public"."incomes"
     ADD CONSTRAINT "incomes_journal_entry_id_fkey" FOREIGN KEY ("journal_entry_id") REFERENCES "finance"."journal_entries"("id");
 
 
@@ -16345,6 +17161,31 @@ ALTER TABLE ONLY "public"."projects"
 
 ALTER TABLE ONLY "public"."projects"
     ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."subscription_renewal_events"
+    ADD CONSTRAINT "subscription_renewal_events_acknowledged_by_fkey" FOREIGN KEY ("acknowledged_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "public"."subscription_renewal_events"
+    ADD CONSTRAINT "subscription_renewal_events_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "public"."subscription_renewal_events"
+    ADD CONSTRAINT "subscription_renewal_events_draft_vendor_bill_id_fkey" FOREIGN KEY ("draft_vendor_bill_id") REFERENCES "finance"."vendor_bills"("id");
+
+
+
+ALTER TABLE ONLY "public"."subscription_renewal_events"
+    ADD CONSTRAINT "subscription_renewal_events_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id");
+
+
+
+ALTER TABLE ONLY "public"."subscription_renewal_events"
+    ADD CONSTRAINT "subscription_renewal_events_subscription_id_fkey" FOREIGN KEY ("subscription_id") REFERENCES "public"."subscriptions"("id") ON DELETE CASCADE;
 
 
 
@@ -17120,6 +17961,10 @@ CREATE POLICY "cn_select_org_scoped" ON "finance"."credit_notes" FOR SELECT USIN
 
 
 
+CREATE POLICY "cn_update_org_scoped" ON "finance"."credit_notes" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id"))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
 CREATE POLICY "coa_insert" ON "finance"."chart_of_accounts" FOR INSERT WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."same_org"("organization_id")));
 
 
@@ -17380,6 +18225,36 @@ CREATE POLICY "invoice_lines_select_org" ON "finance"."invoice_lines" FOR SELECT
 
 
 CREATE POLICY "invoice_lines_update_org" ON "finance"."invoice_lines" FOR UPDATE TO "authenticated" USING ("core"."same_org"("organization_id")) WITH CHECK ("core"."same_org"("organization_id"));
+
+
+
+ALTER TABLE "finance"."invoice_milestones" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "invoice_milestones_insert_org_scoped" ON "finance"."invoice_milestones" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+CREATE POLICY "invoice_milestones_select_org_scoped" ON "finance"."invoice_milestones" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+CREATE POLICY "invoice_milestones_update_org_scoped" ON "finance"."invoice_milestones" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id"))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+ALTER TABLE "finance"."invoice_refunds" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "invoice_refunds_insert_org_scoped" ON "finance"."invoice_refunds" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+CREATE POLICY "invoice_refunds_select_org_scoped" ON "finance"."invoice_refunds" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+CREATE POLICY "invoice_refunds_update_org_scoped" ON "finance"."invoice_refunds" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id"))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -18110,6 +18985,10 @@ CREATE POLICY "Service role full access on payroll_runs" ON "public"."payroll_ru
 
 
 
+CREATE POLICY "Service role full access on subscription_renewal_events" ON "public"."subscription_renewal_events" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
 CREATE POLICY "Service role full access on subscriptions" ON "public"."subscriptions" TO "service_role" USING (true) WITH CHECK (true);
 
 
@@ -18528,6 +19407,25 @@ CREATE POLICY "projects_update_org_scoped" ON "public"."projects" FOR UPDATE TO 
 
 
 
+CREATE POLICY "sre_delete_org_scoped" ON "public"."subscription_renewal_events" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."is_finance_head"()));
+
+
+
+CREATE POLICY "sre_insert_org_scoped" ON "public"."subscription_renewal_events" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "sre_select_org_scoped" ON "public"."subscription_renewal_events" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR "core"."has_role"('PROJECT_MANAGER'::"text"))));
+
+
+
+CREATE POLICY "sre_update_org_scoped" ON "public"."subscription_renewal_events" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+ALTER TABLE "public"."subscription_renewal_events" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."subscriptions" ENABLE ROW LEVEL SECURITY;
 
 
@@ -18599,6 +19497,7 @@ GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
 
 
+
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
 GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
 
@@ -18655,6 +19554,8 @@ GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", 
 
 
 
+
+
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
@@ -18673,11 +19574,30 @@ GRANT ALL ON FUNCTION "finance"."approve_tax_reconciliation"("p_recon_id" "uuid"
 
 
 
+REVOKE ALL ON FUNCTION "finance"."auto_match_statement_lines"("p_statement_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."auto_match_statement_lines"("p_statement_id" "uuid") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "finance"."close_period"("p_period_id" "uuid", "p_closed_by" "uuid", "p_status" "text", "p_reason" "text") TO "authenticated";
 
 
 
+REVOKE ALL ON FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason" "text") TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "finance"."bank_statements" TO "authenticated";
+GRANT ALL ON TABLE "finance"."bank_statements" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
 
 
@@ -18719,6 +19639,16 @@ GRANT ALL ON FUNCTION "finance"."mark_paid_invoices"() TO "authenticated";
 
 
 
+GRANT ALL ON TABLE "finance"."fixed_assets" TO "authenticated";
+GRANT ALL ON TABLE "finance"."fixed_assets" TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "finance"."post_existing_journal_entry"("p_journal_id" "uuid", "p_posted_by" "uuid") TO "authenticated";
 
 
@@ -18745,6 +19675,20 @@ GRANT ALL ON FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "
 
 
 GRANT ALL ON FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text") TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "finance"."bank_transfers" TO "authenticated";
+GRANT ALL ON TABLE "finance"."bank_transfers" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "finance"."update_bank_transfer_status"("p_transfer_id" "uuid", "p_status" "text", "p_rejection_reason" "text") TO "authenticated";
 
 
 
@@ -19006,14 +19950,6 @@ GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
 
 
 
-
-
-
-
-
-
-
-
 GRANT SELECT,INSERT ON TABLE "audit"."audit_log" TO "authenticated";
 GRANT ALL ON TABLE "audit"."audit_log" TO "service_role";
 
@@ -19139,11 +20075,6 @@ GRANT ALL ON TABLE "core"."user_roles" TO "service_role";
 
 
 
-
-
-
-
-
 GRANT ALL ON TABLE "finance"."chart_of_accounts" TO "authenticated";
 GRANT ALL ON TABLE "finance"."chart_of_accounts" TO "service_role";
 
@@ -19181,16 +20112,6 @@ GRANT ALL ON TABLE "finance"."attachments" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."attendance_period_snapshots" TO "authenticated";
 GRANT ALL ON TABLE "finance"."attendance_period_snapshots" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "finance"."bank_statements" TO "authenticated";
-GRANT ALL ON TABLE "finance"."bank_statements" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "finance"."bank_transfers" TO "authenticated";
-GRANT ALL ON TABLE "finance"."bank_transfers" TO "service_role";
 
 
 
@@ -19289,13 +20210,18 @@ GRANT ALL ON TABLE "finance"."fiscal_year_summary" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "finance"."fixed_assets" TO "authenticated";
-GRANT ALL ON TABLE "finance"."fixed_assets" TO "service_role";
-
-
-
 GRANT ALL ON TABLE "finance"."invoice_lines" TO "authenticated";
 GRANT ALL ON TABLE "finance"."invoice_lines" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."invoice_milestones" TO "authenticated";
+GRANT ALL ON TABLE "finance"."invoice_milestones" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."invoice_refunds" TO "authenticated";
+GRANT ALL ON TABLE "finance"."invoice_refunds" TO "service_role";
 
 
 
@@ -19519,6 +20445,7 @@ GRANT ALL ON TABLE "public"."contractors" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."credit_notes" TO "anon";
 GRANT ALL ON TABLE "public"."credit_notes" TO "authenticated";
 GRANT ALL ON TABLE "public"."credit_notes" TO "service_role";
 
@@ -19669,6 +20596,12 @@ GRANT ALL ON TABLE "public"."role_permissions" TO "service_role";
 
 GRANT ALL ON TABLE "public"."roles" TO "authenticated";
 GRANT ALL ON TABLE "public"."roles" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."subscription_renewal_events" TO "anon";
+GRANT ALL ON TABLE "public"."subscription_renewal_events" TO "authenticated";
+GRANT ALL ON TABLE "public"."subscription_renewal_events" TO "service_role";
 
 
 
@@ -19859,6 +20792,7 @@ GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_ro
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 
 
+
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "service_role";
 
@@ -19905,3 +20839,4 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
+

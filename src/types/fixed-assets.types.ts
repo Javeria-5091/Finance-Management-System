@@ -57,6 +57,8 @@ export interface FixedAsset {
   linked_asset_account_id?: string;
   linked_depreciation_account_id?: string;
   linked_expense_account_id?: string;
+  financial_account_id?: string;
+  capitalization_journal_id?: string;
   project_id?: string;
   department_id?: string;
   cost_center_id?: string;
@@ -214,4 +216,8 @@ export interface FixedAssetFormInput {
   linked_asset_account_id?: string;
   linked_depreciation_account_id?: string;
   linked_expense_account_id?: string;
+  // BUG-024 FIX: the bank/cash account that funds this purchase. Optional —
+  // if omitted, finance.post_asset_capitalization() credits the Vendor
+  // Payables control account instead (asset bought on vendor credit).
+  financial_account_id?: string;
 }

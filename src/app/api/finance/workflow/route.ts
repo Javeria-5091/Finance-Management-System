@@ -75,6 +75,21 @@ const MODULES: Record<string, {
       reopen:  { from: ['REJECTED'], perm: 'BUDGET_UPDATE' },
     },
   },
+  // BUG-021 FIX: credit_note had no entry here at all, so a credit note
+  // could never leave DRAFT — and credit-notes/[id]/route.ts's POST
+  // (post-to-GL) action requires status APPROVED. finance.credit_notes'
+  // status CHECK only has DRAFT/APPROVED/POSTED/REVERSED/REJECTED (no
+  // SUBMITTED/VERIFIED step), so the lifecycle here is simpler than the
+  // other modules: DRAFT -> APPROVED (or REJECTED) directly.
+  credit_note: {
+    table: 'credit_notes', permPrefix: 'INVOICE_CREDIT_NOTE', amountField: 'amount', creatorField: 'created_by',
+    periodDateField: 'credit_note_date',
+    transitions: {
+      approve: { from: ['DRAFT'], perm: 'APPROVE_INVOICE' },
+      reject:  { from: ['DRAFT'], perm: 'INVOICE_UPDATE' },
+      reopen:  { from: ['REJECTED'], perm: 'INVOICE_UPDATE' },
+    },
+  },
 };
 
 async function assertPeriodOpenForTransition(
@@ -155,7 +170,8 @@ export async function POST(req: NextRequest) {
     }
  
     // H1 FIX: Add organization_id filter to record fetch
-    const recordQuery = ['journal_entry', 'vendor_bill'].includes(module)
+    // BUG-021 FIX: finance.credit_notes lives in the finance schema too.
+    const recordQuery = ['journal_entry', 'vendor_bill', 'credit_note'].includes(module)
       ? supabase.schema('finance').from(config.table)
       : supabase.from(config.table);
     const { data: record, error: fetchErr } = await recordQuery.select('*').eq('id', recordId).eq('organization_id', auth.orgId).single();
@@ -247,7 +263,7 @@ export async function POST(req: NextRequest) {
     }
  
     // FIXED: Add WHERE clause on current status to prevent TOCTOU race condition
-        const updateQuery = ['journal_entry', 'vendor_bill'].includes(module)
+        const updateQuery = ['journal_entry', 'vendor_bill', 'credit_note'].includes(module)
       ? supabase.schema('finance').from(config.table)
       : supabase.from(config.table);
     const isAtomicBusinessReversal = action === 'reverse' && (module === 'expense' || module === 'income');

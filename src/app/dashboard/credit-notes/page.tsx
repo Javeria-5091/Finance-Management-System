@@ -302,38 +302,28 @@ export default function CreditNotesPage() {
     setSaving(true);
 
     try {
-      // 1. Generate CN number BEFORE insert to avoid race condition
-      const timestamp = Date.now();
-      const randomSuffix = Math.floor(Math.random() * 1000)
-        .toString()
-        .padStart(3, "0");
-      const cnNumber = `CN-${String(timestamp).slice(-6)}${randomSuffix}`;
-
-      const currency = selectedInvoice.currency || "PKR";
-      const exchangeRate = 1; // TODO: fetch actual rate in multi-currency setup
-      const baseAmount = amountNum * exchangeRate;
-
-      // 2. Insert Credit Note with pre-generated number
-      const { data: cn, error: cnError } = await financeDB
-        .from("credit_notes")
-        .insert({
-          credit_note_number: cnNumber,
+      // BUG-021 FIX: this used to insert directly into finance.credit_notes
+      // from the browser, bypassing MFA enforcement, the server-side
+      // remaining-creditable-balance check, and audit logging — all of
+      // which /api/finance/credit-notes already does correctly. Route
+      // creation through it instead, the same fix pattern used for
+      // vendor payments.
+      const res = await fetch("/api/finance/credit-notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
           invoice_id: form.invoice_id,
           reason: form.reason.trim(),
-          amount: amountNum,
-          currency: currency,
-          exchange_rate: exchangeRate,
-          base_amount: baseAmount,
-          status: "DRAFT",
-          organization_id: profile?.organization_id,
-        })
-        .select("*")
-        .single();
-
-      if (cnError) throw cnError;
+          total_amount: amountNum,
+          currency: selectedInvoice.currency || "PKR",
+          exchange_rate: 1,
+        }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "Failed to create credit note");
 
       // 3. Success — close modal and refresh
-      alert(`Credit Note ${cnNumber} created successfully!`);
+      alert(`Credit Note ${result.creditNote?.credit_note_number || ""} created successfully!`);
       setShowModal(false);
       fetchCreditNotes();
     } catch (error: unknown) {
@@ -392,6 +382,51 @@ export default function CreditNotesPage() {
     </tr>
   );
 
+  // BUG-021 FIX: there was previously no way to approve or post a credit
+  // note anywhere in the UI at all — the [id] route's post-to-GL action
+  // requires status APPROVED, but nothing could ever set it. Approve now
+  // goes through the generic workflow endpoint (now wired up for
+  // credit_note — see src/app/api/finance/workflow/route.ts), and Post
+  // calls the credit note's own post-to-GL action.
+  const [actioningId, setActioningId] = useState<string | null>(null);
+  const handleApprove = async (cn: CreditNoteRow) => {
+    if (!window.confirm(`Approve credit note ${cn.credit_note_number}?`)) return;
+    setActioningId(cn.id);
+    try {
+      const res = await fetch("/api/finance/workflow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ module: "credit_note", recordId: cn.id, action: "approve" }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "Approval failed");
+      fetchCreditNotes();
+    } catch (err: any) {
+      alert("Approval failed: " + err.message);
+    } finally {
+      setActioningId(null);
+    }
+  };
+  const handlePostToGL = async (cn: CreditNoteRow) => {
+    if (!window.confirm(`Post credit note ${cn.credit_note_number} to the General Ledger? This will reduce the invoice's receivable balance.`)) return;
+    setActioningId(cn.id);
+    try {
+      const res = await fetch(`/api/finance/credit-notes/${cn.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "post_to_gl" }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || "Posting failed");
+      if (result.invoice_relief_warning) alert(result.invoice_relief_warning);
+      fetchCreditNotes();
+    } catch (err: any) {
+      alert("Posting failed: " + err.message);
+    } finally {
+      setActioningId(null);
+    }
+  };
+
   const renderTableRow = (cn: CreditNoteRow) => (
     <tr
       key={cn.id}
@@ -425,13 +460,35 @@ export default function CreditNotesPage() {
         </span>
       </td>
       <td className="px-4 py-3 text-right">
-        <button
-          onClick={() => setViewingNote(cn)}
-          className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded-lg transition-colors"
-          title="View Details"
-        >
-          <Eye size={15} />
-        </button>
+        <div className="flex items-center justify-end gap-1">
+          {cn.status === "DRAFT" && hasPermission("CREDIT_NOTE_UPDATE") && (
+            <button
+              onClick={() => handleApprove(cn)}
+              disabled={actioningId === cn.id}
+              className="px-2 py-1 text-[10px] font-bold bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 rounded hover:bg-blue-200 dark:hover:bg-blue-900/50 transition-colors disabled:opacity-50"
+              title="Approve"
+            >
+              ✓ Approve
+            </button>
+          )}
+          {cn.status === "APPROVED" && hasPermission("CREDIT_NOTE_UPDATE") && (
+            <button
+              onClick={() => handlePostToGL(cn)}
+              disabled={actioningId === cn.id}
+              className="px-2 py-1 text-[10px] font-bold bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 rounded hover:bg-green-200 dark:hover:bg-green-900/50 transition-colors disabled:opacity-50"
+              title="Post to GL"
+            >
+              ⇒ Post
+            </button>
+          )}
+          <button
+            onClick={() => setViewingNote(cn)}
+            className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded-lg transition-colors"
+            title="View Details"
+          >
+            <Eye size={15} />
+          </button>
+        </div>
       </td>
     </tr>
   );

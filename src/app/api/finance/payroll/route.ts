@@ -98,10 +98,10 @@ if(b.action==='post'){
             p_description:`Payroll ${r.payroll_period}`,
             p_transaction_date:r.period_end,
             p_period_id:periodId,
-            p_lines:JSON.stringify([
+            p_lines:[
                 {account_id:expenseAccountId,debit_amount:r.total_gross_pay,credit_amount:0,description:'Payroll gross expense'},
                 {account_id:payableAccountId,debit_amount:0,credit_amount:r.total_gross_pay,description:'Payroll payable'}
-            ]),
+            ],
             p_currency:'PKR',p_exchange_rate:1,
             p_source_type:'PAYROLL_RUN',p_source_id:r.id
         });

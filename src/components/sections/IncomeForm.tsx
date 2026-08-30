@@ -16,7 +16,8 @@ interface IncomeFormProps {
 
 export default function IncomeForm({ initialData, onSubmit, onClose, loading, projects }: IncomeFormProps) {
   const [accounts, setAccounts] = useState<any[]>([]);
-  
+  const [invoices, setInvoices] = useState<any[]>([]);
+
   const [form, setForm] = useState<IncomeFormData>({
     title: initialData?.title || "",
     amount: initialData?.amount || 0,
@@ -27,6 +28,7 @@ export default function IncomeForm({ initialData, onSubmit, onClose, loading, pr
     account_id: initialData?.account_id || null,
     tax_rate: Number(initialData?.tax_rate || 0),
     tax_amount: Number(initialData?.tax_amount || 0),
+    invoice_id: initialData?.invoice_id || null,
   });
 
   useEffect(() => {
@@ -38,7 +40,20 @@ export default function IncomeForm({ initialData, onSubmit, onClose, loading, pr
         .order("code");
       if (data) setAccounts(data);
     }
+    // BUG-032 FIX: let the person creating this income explicitly link it
+    // to the invoice it represents, so post-income can refuse to
+    // double-count revenue that invoice already recognizes.
+    async function fetchInvoices() {
+      const { data } = await supabase
+        .from("invoices")
+        .select("id, invoice_number, client_name, total_amount")
+        .in("status", ["ISSUED", "PARTIALLY_PAID", "PAID"])
+        .order("issue_date", { ascending: false })
+        .limit(200);
+      if (data) setInvoices(data);
+    }
     fetchAccounts();
+    fetchInvoices();
   }, []);
 
   function handleSubmit(e: React.FormEvent) {
@@ -47,7 +62,7 @@ export default function IncomeForm({ initialData, onSubmit, onClose, loading, pr
     const taxAmount = Number(form.amount || 0) * taxRate / 100;
     const taxValidation = incomeTaxSchema.safeParse({ tax_rate: taxRate, tax_amount: taxAmount });
     if (!taxValidation.success) return;
-    onSubmit({ ...form, tax_rate: taxRate, tax_amount: taxAmount });
+    onSubmit({ ...form, tax_rate: taxRate, tax_amount: taxAmount, invoice_id: form.invoice_id || null });
   }
 
   return (
@@ -118,6 +133,24 @@ export default function IncomeForm({ initialData, onSubmit, onClose, loading, pr
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Description</label>
             <textarea value={form.description || ""} onChange={e => setForm({ ...form, description: e.target.value })} rows={3} className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Link to Invoice (recommended for client revenue)
+            </label>
+            <select value={form.invoice_id || ""} onChange={e => setForm({ ...form, invoice_id: e.target.value || null })} className="w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <option value="">Not linked to an invoice</option>
+              {invoices.map(inv => (
+                <option key={inv.id} value={inv.id}>{inv.invoice_number} — {inv.client_name}</option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              If this income is revenue from a client that already has an invoice, link it here.
+              Revenue for that invoice is already recognized when it's posted, so this income
+              can be tracked (e.g. for cash-received records) but won't be posted to the ledger
+              again to avoid double-counting.
+            </p>
           </div>
 
           <div className="flex gap-3 pt-2">

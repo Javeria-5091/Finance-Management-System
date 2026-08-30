@@ -407,3 +407,504 @@ CREATE POLICY "tr_update_restricted" ON "finance"."tax_reconciliations"
         ((core.is_ceo_or_admin() OR core.is_finance_head() OR core.has_role('ACCOUNTANT'::text)) AND core.same_org(organization_id))
         AND status IS DISTINCT FROM 'ACCOUNTANT_APPROVED'
     );
+
+
+-- ############################################################################
+-- BUG-025 / BUG-026 FIXES (Banking: bank transfers + reconciliation)
+-- ############################################################################
+
+CREATE OR REPLACE FUNCTION "finance"."fn_set_dual_approval"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$ DECLARE v_min NUMERIC; v_flag BOOLEAN;
+BEGIN
+    -- BUG-025 FIX: this previously only ever looked at min_dual_approval_amount,
+    -- so an account with requires_dual_approval = TRUE but no configured
+    -- min_dual_approval_amount (NULL, defaulted to a practically-unreachable
+    -- 999999999999 fallback) could NEVER actually trigger dual approval on a
+    -- transfer -- the account-level "always needs dual approval" flag was
+    -- effectively dead. BOOL_OR now also propagates that flag directly: if
+    -- either the source or destination account is flagged, the transfer
+    -- requires dual approval regardless of amount. The existing amount-
+    -- threshold behavior (v_min) is unchanged.
+    SELECT MIN(COALESCE(min_dual_approval_amount, 999999999999)), BOOL_OR(COALESCE(requires_dual_approval, false))
+    INTO v_min, v_flag FROM finance.financial_accounts WHERE id IN (NEW.from_account_id, NEW.to_account_id);
+    IF COALESCE(v_flag, false) OR NEW.from_amount >= v_min THEN NEW.requires_dual_approval := TRUE; END IF;
+    RETURN NEW;
+END;
+ $$;
+
+
+ALTER FUNCTION "finance"."fn_set_dual_approval"() OWNER TO "postgres";
+CREATE OR REPLACE FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+    v_org uuid;
+    v_t RECORD;
+    v_fy_id UUID;
+    v_from_ledger UUID;
+    v_to_ledger UUID;
+    v_fx_gain UUID;
+    v_fx_loss UUID;
+    v_lines JSONB := '[]'::JSONB;
+    v_fx_diff NUMERIC(18,2);
+    v_from_base NUMERIC(18,2);
+    v_to_base NUMERIC(18,2);
+    v_from_rate NUMERIC(18,6);
+    v_to_rate NUMERIC(18,6);
+BEGIN
+    -- BUG-025 FIX (four issues in this one check, all from the same missing
+    -- guard block):
+    -- 1) No organization scoping at all -- any authenticated user of any org
+    --    could post an arbitrary transfer by id (see BUG-026 for the same
+    --    pattern on the reconciliation-matching functions).
+    -- 2) No role/permission check at all.
+    -- 3) 'SUBMITTED' was an accepted status for posting, meaning a transfer
+    --    that was never actually approved could still be posted.
+    -- 4) requires_dual_approval / second_approved_by were never checked, so
+    --    even a transfer correctly left at SUBMITTED pending its second
+    --    approval could be posted by calling this function directly.
+    v_org := core.current_user_org_id();
+    IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
+    IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+        RAISE EXCEPTION 'Access denied';
+    END IF;
+
+    SELECT * INTO v_t FROM finance.bank_transfers
+    WHERE id = p_transfer_id AND organization_id = v_org
+    FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Transfer not found or access denied'; END IF;
+    IF v_t.status <> 'APPROVED' THEN RAISE EXCEPTION 'Must be approved, status: %', v_t.status; END IF;
+    IF v_t.requires_dual_approval AND v_t.second_approved_by IS NULL THEN
+        RAISE EXCEPTION 'This transfer requires a second approval before it can be posted';
+    END IF;
+
+    SELECT fiscal_year_id INTO v_fy_id FROM finance.accounting_periods WHERE id = p_period_id;
+    IF v_fy_id IS NULL THEN RAISE EXCEPTION 'Invalid period'; END IF;
+
+    SELECT linked_ledger_account_id INTO v_from_ledger FROM finance.financial_accounts WHERE id = v_t.from_account_id;
+    SELECT linked_ledger_account_id INTO v_to_ledger FROM finance.financial_accounts WHERE id = v_t.to_account_id;
+
+    --  BUG FIX: 4210 = Exchange Gain (exists), 7121 = Realized FX Loss (exists, was 7210)
+    SELECT id INTO v_fx_gain FROM finance.chart_of_accounts WHERE code = '4210' LIMIT 1;
+    SELECT id INTO v_fx_loss FROM finance.chart_of_accounts WHERE code = '7121' LIMIT 1;
+
+    -- From side to PKR base
+    IF v_t.from_currency = 'PKR' THEN v_from_base := v_t.from_amount; v_from_rate := 1;
+    ELSE
+        --  BUG FIX: rate_date NOT effective_date
+        SELECT rate INTO v_from_rate FROM finance.exchange_rates
+        WHERE from_currency = v_t.from_currency AND to_currency = 'PKR'
+        ORDER BY rate_date DESC LIMIT 1;
+        IF v_from_rate IS NULL THEN v_from_rate := v_t.exchange_rate; END IF;
+        v_from_base := ROUND(v_t.from_amount * v_from_rate, 2);
+    END IF;
+
+    -- To side to PKR base
+    IF v_t.to_currency = 'PKR' THEN v_to_base := v_t.to_amount; v_to_rate := 1;
+    ELSE
+        --  BUG FIX: rate_date NOT effective_date
+        SELECT rate INTO v_to_rate FROM finance.exchange_rates
+        WHERE from_currency = v_t.to_currency AND to_currency = 'PKR'
+        ORDER BY rate_date DESC LIMIT 1;
+        IF v_to_rate IS NULL THEN v_to_rate := 1 / v_t.exchange_rate; END IF;
+        v_to_base := ROUND(v_t.to_amount * v_to_rate, 2);
+    END IF;
+
+    -- Same currency
+    IF v_t.from_currency = v_t.to_currency THEN
+        v_lines := v_lines || jsonb_build_object('account_id', v_to_ledger, 'debit_amount', v_t.to_amount, 'credit_amount', 0, 'description', 'Transfer TO: ' || v_t.transfer_number);
+        v_lines := v_lines || jsonb_build_object('account_id', v_from_ledger, 'debit_amount', 0, 'credit_amount', v_t.from_amount, 'description', 'Transfer FROM: ' || v_t.transfer_number);
+    ELSE
+        v_fx_diff := v_to_base - v_from_base;
+        v_lines := v_lines || jsonb_build_object('account_id', v_to_ledger, 'debit_amount', v_to_base, 'credit_amount', 0, 'description', 'Transfer TO: ' || v_t.transfer_number || ' (' || v_t.to_amount || ' ' || v_t.to_currency || ')');
+        v_lines := v_lines || jsonb_build_object('account_id', v_from_ledger, 'debit_amount', 0, 'credit_amount', v_from_base, 'description', 'Transfer FROM: ' || v_t.transfer_number || ' (' || v_t.from_amount || ' ' || v_t.from_currency || ')');
+        IF v_fx_diff > 0 AND v_fx_gain IS NOT NULL THEN
+            v_lines := v_lines || jsonb_build_object('account_id', v_fx_gain, 'debit_amount', 0, 'credit_amount', v_fx_diff, 'description', 'FX Gain: ' || v_t.transfer_number);
+        ELSIF v_fx_diff < 0 AND v_fx_loss IS NOT NULL THEN
+            v_lines := v_lines || jsonb_build_object('account_id', v_fx_loss, 'debit_amount', ABS(v_fx_diff), 'credit_amount', 0, 'description', 'FX Loss: ' || v_t.transfer_number);
+        END IF;
+    END IF;
+
+    --  CORRECT PARAMETER ORDER
+    RETURN finance.post_journal_entry('Bank Transfer: ' || v_t.transfer_number, p_transaction_date, p_period_id, v_lines, 'PKR', 1.0000, 'BANK_TRANSFER', p_transfer_id, NULL, NULL);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
+-- ============================================================================
+-- BUG-025 FIX (part 2): finance.update_bank_transfer_status did not exist
+-- anywhere in the dump or migrations, so src/services/bank.service.ts's
+-- updateTransferStatus() always failed and every transfer dead-ended at
+-- DRAFT (submit/approve/reject/cancel all broken). This function is called
+-- directly from the browser client (there is no server-side API route in
+-- front of it), so it is the sole enforcement point and does everything
+-- server-side: organization scoping, role checks, and the DRAFT ->
+-- SUBMITTED -> APPROVED state machine including dual approval.
+--
+-- Dual approval itself is recorded using the columns that already exist
+-- (approved_by/approved_at for the first approval, second_approved_by/
+-- second_approved_at for the second) rather than a new status value --
+-- bank_transfers_status_check does not have a "PENDING_SECOND_APPROVAL"
+-- state, so when requires_dual_approval is true, the first APPROVED call
+-- only records approved_by and leaves status at SUBMITTED; status only
+-- becomes APPROVED once both approvals are recorded.
+--
+-- This does NOT duplicate the creator<>approver / first-approver<>second-
+-- approver checks: finance.enforce_maker_checker is already wired to
+-- bank_transfers (BEFORE INSERT OR UPDATE) and enforces exactly that at the
+-- database level on every UPDATE regardless of caller, so those checks
+-- would fire even without this function.
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION "finance"."update_bank_transfer_status"("p_transfer_id" "uuid", "p_status" "text", "p_rejection_reason" "text" DEFAULT NULL::"text")
+RETURNS "finance"."bank_transfers"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_user uuid := auth.uid();
+  v_transfer RECORD;
+  v_result finance.bank_transfers;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Organization context is required';
+  END IF;
+  IF v_user IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+  IF p_status NOT IN ('SUBMITTED', 'APPROVED', 'REJECTED', 'CANCELLED') THEN
+    RAISE EXCEPTION 'Unsupported status transition: %', p_status;
+  END IF;
+
+  SELECT * INTO v_transfer
+  FROM finance.bank_transfers
+  WHERE id = p_transfer_id AND organization_id = v_org
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Bank transfer not found or access denied';
+  END IF;
+
+  IF p_status = 'SUBMITTED' THEN
+    IF v_transfer.status <> 'DRAFT' THEN
+      RAISE EXCEPTION 'Only a DRAFT transfer can be submitted, current: %', v_transfer.status;
+    END IF;
+    IF NOT (core.has_role('ACCOUNTANT') OR core.is_finance_head()) THEN
+      RAISE EXCEPTION 'Access denied';
+    END IF;
+
+    UPDATE finance.bank_transfers SET status = 'SUBMITTED'
+    WHERE id = p_transfer_id RETURNING * INTO v_result;
+
+  ELSIF p_status = 'APPROVED' THEN
+    IF v_transfer.status <> 'SUBMITTED' THEN
+      RAISE EXCEPTION 'Only a SUBMITTED transfer can be approved, current: %', v_transfer.status;
+    END IF;
+    IF NOT core.is_finance_head() THEN
+      RAISE EXCEPTION 'Only CEO or Finance Head may approve a bank transfer';
+    END IF;
+
+    IF v_transfer.approved_by IS NULL THEN
+      -- First approval leg. enforce_maker_checker blocks creator == approver.
+      IF v_transfer.requires_dual_approval THEN
+        UPDATE finance.bank_transfers SET approved_by = v_user, approved_at = now()
+        WHERE id = p_transfer_id RETURNING * INTO v_result; -- status stays SUBMITTED, awaiting second approval
+      ELSE
+        UPDATE finance.bank_transfers SET status = 'APPROVED', approved_by = v_user, approved_at = now()
+        WHERE id = p_transfer_id RETURNING * INTO v_result;
+      END IF;
+    ELSE
+      IF NOT v_transfer.requires_dual_approval THEN
+        RAISE EXCEPTION 'This transfer has already received its required approval';
+      END IF;
+      IF v_transfer.second_approved_by IS NOT NULL THEN
+        RAISE EXCEPTION 'This transfer has already received its second approval';
+      END IF;
+      -- Second approval leg. enforce_maker_checker blocks creator/first-approver == second approver.
+      UPDATE finance.bank_transfers SET status = 'APPROVED', second_approved_by = v_user, second_approved_at = now()
+      WHERE id = p_transfer_id RETURNING * INTO v_result;
+    END IF;
+
+  ELSIF p_status = 'REJECTED' THEN
+    IF v_transfer.status <> 'SUBMITTED' THEN
+      RAISE EXCEPTION 'Only a SUBMITTED transfer can be rejected, current: %', v_transfer.status;
+    END IF;
+    IF NOT core.is_finance_head() THEN
+      RAISE EXCEPTION 'Only CEO or Finance Head may reject a bank transfer';
+    END IF;
+    IF p_rejection_reason IS NULL OR btrim(p_rejection_reason) = '' THEN
+      RAISE EXCEPTION 'Rejection reason is mandatory';
+    END IF;
+
+    UPDATE finance.bank_transfers
+    SET status = 'REJECTED', rejected_by = v_user, rejected_at = now(), rejection_reason = p_rejection_reason
+    WHERE id = p_transfer_id RETURNING * INTO v_result;
+
+  ELSIF p_status = 'CANCELLED' THEN
+    IF v_transfer.status NOT IN ('DRAFT', 'SUBMITTED') THEN
+      RAISE EXCEPTION 'An APPROVED or POSTED transfer cannot be cancelled directly, current: %', v_transfer.status;
+    END IF;
+    IF NOT (v_transfer.created_by = v_user OR core.is_finance_head()) THEN
+      RAISE EXCEPTION 'Access denied';
+    END IF;
+
+    UPDATE finance.bank_transfers
+    SET status = 'CANCELLED', rejection_reason = COALESCE(p_rejection_reason, rejection_reason)
+    WHERE id = p_transfer_id RETURNING * INTO v_result;
+  END IF;
+
+  RETURN v_result;
+END;
+$$;
+
+ALTER FUNCTION "finance"."update_bank_transfer_status"("p_transfer_id" "uuid", "p_status" "text", "p_rejection_reason" "text") OWNER TO "postgres";
+
+GRANT EXECUTE ON FUNCTION "finance"."update_bank_transfer_status"("p_transfer_id" "uuid", "p_status" "text", "p_rejection_reason" "text") TO "authenticated";
+
+CREATE OR REPLACE FUNCTION "finance"."auto_match_statement_lines"("p_statement_id" "uuid") RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+    v_matched INTEGER := 0;
+    v_ledger UUID;
+    v_row_count INTEGER;
+    v_org uuid;
+BEGIN
+    -- BUG-026 FIX: this SECURITY DEFINER function took no organization
+    -- parameter, had no REVOKE (Postgres defaults EXECUTE to PUBLIC on new
+    -- functions), and definer execution bypasses RLS -- so any authenticated
+    -- user of ANY organization could call this with an arbitrary
+    -- p_statement_id and auto-match another tenant's bank statement. The
+    -- organization is now taken from the caller's own session
+    -- (core.current_user_org_id()), matching the pattern used elsewhere in
+    -- this schema (e.g. finance.reverse_journal_entry), and checked against
+    -- the statement's actual organization_id before anything is touched.
+    v_org := core.current_user_org_id();
+    IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
+
+    SELECT fa.linked_ledger_account_id INTO v_ledger
+    FROM finance.bank_statements bs JOIN finance.financial_accounts fa ON fa.id = bs.financial_account_id
+    WHERE bs.id = p_statement_id AND bs.organization_id = v_org;
+    IF v_ledger IS NULL THEN RAISE EXCEPTION 'Statement not found or access denied'; END IF;
+
+    -- Round 1: exact amount + same date
+    UPDATE finance.statement_lines sl SET
+        reconciliation_status = 'MATCHED', matched_journal_line_id = jl.id,
+        matched_at = NOW(), matched_by = auth.uid(), match_method = 'AUTO_AMOUNT_DATE'
+    FROM finance.journal_lines jl JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+    WHERE sl.bank_statement_id = p_statement_id AND sl.reconciliation_status = 'UNRECONCILED'
+      AND jl.account_id = v_ledger AND je.status = 'POSTED'  --  FIXED: uppercase
+      AND jl.id NOT IN (SELECT matched_journal_line_id FROM finance.statement_lines WHERE matched_journal_line_id IS NOT NULL AND reconciliation_status IN ('MATCHED','MANUAL_MATCH'))
+      AND sl.transaction_date = je.transaction_date
+      AND ((sl.amount > 0 AND jl.debit_amount = sl.amount) OR (sl.amount < 0 AND jl.credit_amount = ABS(sl.amount)));
+    GET DIAGNOSTICS v_row_count = ROW_COUNT;
+    v_matched := v_matched + v_row_count;
+
+    -- Round 2: exact amount + reference match (±3 days)
+    UPDATE finance.statement_lines sl SET
+        reconciliation_status = 'MATCHED', matched_journal_line_id = jl.id,
+        matched_at = NOW(), matched_by = auth.uid(), match_method = 'AUTO_AMOUNT_REF'
+    FROM finance.journal_lines jl JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+    WHERE sl.bank_statement_id = p_statement_id AND sl.reconciliation_status = 'UNRECONCILED'
+      AND sl.reference IS NOT NULL AND sl.reference != ''
+      AND jl.account_id = v_ledger AND je.status = 'POSTED'  --  FIXED: uppercase
+      AND jl.id NOT IN (SELECT matched_journal_line_id FROM finance.statement_lines WHERE matched_journal_line_id IS NOT NULL AND reconciliation_status IN ('MATCHED','MANUAL_MATCH'))
+      AND sl.transaction_date BETWEEN je.transaction_date - 3 AND je.transaction_date + 3
+      AND je.description ILIKE '%' || sl.reference || '%'
+      AND ((sl.amount > 0 AND jl.debit_amount = sl.amount) OR (sl.amount < 0 AND jl.credit_amount = ABS(sl.amount)));
+    GET DIAGNOSTICS v_row_count = ROW_COUNT;
+    v_matched := v_matched + v_row_count;
+
+    -- Round 3: exact amount only (±7 days)
+    UPDATE finance.statement_lines sl SET
+        reconciliation_status = 'MATCHED', matched_journal_line_id = jl.id,
+        matched_at = NOW(), matched_by = auth.uid(), match_method = 'AUTO_AMOUNT_DESC'
+    FROM finance.journal_lines jl JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+    WHERE sl.bank_statement_id = p_statement_id AND sl.reconciliation_status = 'UNRECONCILED'
+      AND jl.account_id = v_ledger AND je.status = 'POSTED'  --  FIXED: uppercase
+      AND jl.id NOT IN (SELECT matched_journal_line_id FROM finance.statement_lines WHERE matched_journal_line_id IS NOT NULL AND reconciliation_status IN ('MATCHED','MANUAL_MATCH'))
+      AND sl.transaction_date BETWEEN je.transaction_date - 7 AND je.transaction_date + 7
+      AND ((sl.amount > 0 AND jl.debit_amount = sl.amount) OR (sl.amount < 0 AND jl.credit_amount = ABS(sl.amount)));
+    GET DIAGNOSTICS v_row_count = ROW_COUNT;
+    v_matched := v_matched + v_row_count;
+
+    -- Round 4: by transaction_identifier
+    UPDATE finance.statement_lines sl SET
+        reconciliation_status = 'MATCHED', matched_journal_line_id = jl.id,
+        matched_at = NOW(), matched_by = auth.uid(), match_method = 'AUTO_IDENTIFIER'
+    FROM finance.journal_lines jl JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+    WHERE sl.bank_statement_id = p_statement_id AND sl.reconciliation_status = 'UNRECONCILED'
+      AND sl.transaction_identifier IS NOT NULL AND sl.transaction_identifier != ''
+      AND jl.account_id = v_ledger AND je.status = 'POSTED'  --  FIXED: uppercase
+      AND jl.id NOT IN (SELECT matched_journal_line_id FROM finance.statement_lines WHERE matched_journal_line_id IS NOT NULL AND reconciliation_status IN ('MATCHED','MANUAL_MATCH'))
+      AND je.reference ILIKE '%' || sl.transaction_identifier || '%';
+    GET DIAGNOSTICS v_row_count = ROW_COUNT;
+    v_matched := v_matched + v_row_count;
+
+    RETURN v_matched;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."auto_match_statement_lines"("p_statement_id" "uuid") OWNER TO "postgres";
+CREATE OR REPLACE FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$ DECLARE v_count INT; v_org uuid;
+BEGIN
+    -- BUG-026 FIX: same cross-tenant gap as auto_match_statement_lines -- no
+    -- organization check at all on a SECURITY DEFINER function with no
+    -- REVOKE. Scoped to the caller's own organization before touching
+    -- anything.
+    v_org := core.current_user_org_id();
+    IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM finance.bank_statements WHERE id = p_statement_id AND organization_id = v_org) THEN
+        RAISE EXCEPTION 'Statement not found or access denied';
+    END IF;
+
+    UPDATE finance.statement_lines sl SET reconciliation_status = 'DUPLICATE', exclusion_reason = 'Auto-detected duplicate'
+    WHERE sl.bank_statement_id = p_statement_id AND sl.reconciliation_status = 'UNRECONCILED'
+      AND EXISTS (
+          SELECT 1 FROM finance.statement_lines sl2
+          JOIN finance.bank_statements bs2 ON bs2.id = sl2.bank_statement_id
+          WHERE bs2.financial_account_id = (SELECT financial_account_id FROM finance.bank_statements WHERE id = p_statement_id)
+            AND bs2.organization_id = v_org
+            AND sl2.id != sl.id AND sl2.amount = sl.amount AND sl2.transaction_date = sl.transaction_date
+            AND (sl2.description = sl.description OR SIMILARITY(sl2.description, sl.description) > 0.85)
+            AND sl2.reconciliation_status NOT IN ('DUPLICATE','EXCLUDED')
+      );
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN v_count;
+END;
+ $$;
+
+
+ALTER FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") OWNER TO "postgres";
+CREATE OR REPLACE FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text" DEFAULT NULL::"text") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$ DECLARE v_sl RECORD; v_org uuid;
+BEGIN
+    -- BUG-026 FIX: same cross-tenant gap as auto_match_statement_lines/
+    -- detect_duplicate_statement_lines -- no organization check at all,
+    -- letting any authenticated user of any org unmatch an arbitrary
+    -- statement line by id. Scoped via the line's parent bank_statement.
+    v_org := core.current_user_org_id();
+    IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
+
+    SELECT sl.* INTO v_sl
+    FROM finance.statement_lines sl
+    JOIN finance.bank_statements bs ON bs.id = sl.bank_statement_id
+    WHERE sl.id = p_line_id AND bs.organization_id = v_org;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Line not found or access denied'; END IF;
+    IF v_sl.reconciliation_status NOT IN ('MATCHED','MANUAL_MATCH') THEN RAISE EXCEPTION 'Can only unmatch matched lines'; END IF;
+    UPDATE finance.statement_lines SET reconciliation_status = 'UNRECONCILED', matched_journal_line_id = NULL, matched_at = NULL, matched_by = NULL, match_method = NULL WHERE id = p_line_id;
+END;
+ $$;
+
+
+ALTER FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text") OWNER TO "postgres";
+-- ============================================================================
+-- BUG-026 FIX (part 2): finance.finalize_bank_reconciliation did not exist
+-- anywhere in the dump or migrations, so src/app/api/finance/banking/
+-- reconciliation/route.ts's POST always failed and no statement could ever
+-- be marked as formally reconciliation-approved (spec 12.4: "...unmatched
+-- resolution -> reconciliation approval -> period report").
+--
+-- Note: finance.fn_stmt_recon_status (an existing trigger on statement_lines)
+-- already keeps bank_statements.reconciliation_status mechanically in sync
+-- with line-level matching (COMPLETED once every line is MATCHED/
+-- MANUAL_MATCH/EXCLUDED) -- that part of the workflow already worked. What
+-- was missing is the explicit human "reconciliation approval" act itself:
+-- recording WHO approved the reconciliation and WHEN (reconciled_by/
+-- reconciled_at), which the route.ts already gates behind BANK_RECONCILE
+-- permission + MFA. This function is that approval step. It requires the
+-- mechanical precondition (no lines left UNRECONCILED) to already be true --
+-- it does not resolve lines itself, it only records approval once they are
+-- resolved.
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid" DEFAULT NULL::"uuid")
+RETURNS "finance"."bank_statements"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := COALESCE(p_organization_id, core.current_user_org_id());
+  v_statement RECORD;
+  v_unresolved integer;
+  v_result finance.bank_statements;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Organization context is required';
+  END IF;
+  IF p_user_id IS NULL THEN
+    RAISE EXCEPTION 'Approving user is required';
+  END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+
+  SELECT * INTO v_statement
+  FROM finance.bank_statements
+  WHERE id = p_statement_id AND organization_id = v_org
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Bank statement not found or access denied';
+  END IF;
+
+  IF v_statement.reconciliation_status = 'COMPLETED' AND v_statement.reconciled_by IS NOT NULL THEN
+    RAISE EXCEPTION 'This statement has already been reconciled and approved';
+  END IF;
+
+  SELECT COUNT(*) INTO v_unresolved
+  FROM finance.statement_lines
+  WHERE bank_statement_id = p_statement_id AND reconciliation_status = 'UNRECONCILED';
+
+  IF v_unresolved > 0 THEN
+    RAISE EXCEPTION 'Cannot finalize: % statement line(s) are still unresolved (unmatched, not excluded, not flagged as duplicate)', v_unresolved;
+  END IF;
+
+  UPDATE finance.bank_statements
+  SET reconciliation_status = 'COMPLETED',
+      reconciled_by = p_user_id,
+      reconciled_at = now(),
+      updated_at = now()
+  WHERE id = p_statement_id
+  RETURNING * INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+ALTER FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
+
+GRANT EXECUTE ON FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
+
+-- ============================================================================
+-- BUG-026 FIX (part 3): these four SECURITY DEFINER functions had no
+-- explicit REVOKE, so Postgres' default (EXECUTE granted to PUBLIC on newly
+-- created functions) applied -- combined with definer execution bypassing
+-- RLS, this meant EVERY authenticated user, in ANY organization, could
+-- invoke them directly (e.g. via supabase.rpc(...) from the browser) against
+-- arbitrary IDs, before the org-scoping fixes above even run. The org checks
+-- added above are the real fix; this closes the same hole the way the rest
+-- of this schema already does for other sensitive definer functions (see
+-- e.g. finance.allocate_payment_atomic, finance.post_payment_receipt_atomic).
+-- ============================================================================
+
+REVOKE ALL ON FUNCTION "finance"."auto_match_statement_lines"("p_statement_id" "uuid") FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION "finance"."auto_match_statement_lines"("p_statement_id" "uuid") TO "authenticated";
+
+REVOKE ALL ON FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") TO "authenticated";
+
+REVOKE ALL ON FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text") FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text") TO "authenticated";
+
+REVOKE ALL ON FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") TO "authenticated";

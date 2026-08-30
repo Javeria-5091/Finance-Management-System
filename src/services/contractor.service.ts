@@ -65,7 +65,6 @@ export async function fetchContractors(filters?: {
 }) {
   const orgId = await getCurrentOrganizationId();
   let query = supabase
-    .schema('finance')
     .from('contractors')
     .select('*')
     .eq('organization_id', orgId)
@@ -91,7 +90,6 @@ export async function fetchContractors(filters?: {
 export async function fetchContractorById(id: string) {
   const orgId = await getCurrentOrganizationId();
   const { data, error } = await supabase
-    .schema('finance')
     .from('contractors')
     .select('*')
     .eq('id', id)
@@ -117,7 +115,6 @@ export async function createContractor(contractorData: Record<string, any>) {
   }
 
   const { data, error } = await supabase
-    .schema('finance')
     .from('contractors')
     .insert(cleaned)
     .select('*')
@@ -140,7 +137,6 @@ export async function updateContractor(id: string, updates: Record<string, any>)
   }
 
   const { data, error } = await supabase
-    .schema('finance')
     .from('contractors')
     .update(cleaned)
     .eq('id', id)
@@ -155,7 +151,6 @@ export async function updateContractor(id: string, updates: Record<string, any>)
 export async function deleteContractor(id: string) {
   const orgId = await getCurrentOrganizationId();
   const { error } = await supabase
-    .schema('finance')
     .from('contractors')
     .delete()
     .eq('id', id)
@@ -165,12 +160,14 @@ export async function deleteContractor(id: string) {
 
 // ─── Fetch expiring contracts (from view) ───
 export async function fetchExpiringContracts() {
-  const orgId = await getCurrentOrganizationId();
+  // BUG-028 FIX: v_contractor_expirations lives in public (not reporting,
+  // fixed above) and exposes no organization_id column -- it reads
+  // public.contractors directly, which is already org-scoped by RLS
+  // (security_invoker view). Filtering on a non-existent column raised
+  // 42703 on every call.
   const { data, error } = await supabase
-    .schema('reporting')
     .from('v_contractor_expirations')
     .select('*')
-    .eq('organization_id', orgId)
     .order('contract_end', { ascending: true });
   if (error) throw new Error(error.message);
   return (data as ContractorExpirationRow[]) || [];
@@ -178,24 +175,22 @@ export async function fetchExpiringContracts() {
 
 // ─── Fetch cost summary by role (from view) ───
 export async function fetchCostByRole() {
-  const orgId = await getCurrentOrganizationId();
+  // BUG-028 FIX: v_contractor_costs has no organization_id column (see
+  // fetchExpiringContracts above).
   const { data, error } = await supabase
-    .schema('reporting')
     .from('v_contractor_costs')
-    .select('*')
-    .eq('organization_id', orgId);
+    .select('*');
   if (error) throw new Error(error.message);
   return (data as ContractorCostRow[]) || [];
 }
 
 // ─── Fetch cost summary by project (from view) ───
 export async function fetchCostByProject() {
-  const orgId = await getCurrentOrganizationId();
+  // BUG-028 FIX: v_contractor_project_costs has no organization_id column
+  // (see fetchExpiringContracts above).
   const { data, error } = await supabase
-    .schema('reporting')
     .from('v_contractor_project_costs')
-    .select('*')
-    .eq('organization_id', orgId);
+    .select('*');
   if (error) throw new Error(error.message);
   return (data as ContractorProjectCostRow[]) || [];
 }
@@ -205,16 +200,15 @@ export async function fetchContractorStats(): Promise<ContractorStats> {
   const orgId = await getCurrentOrganizationId();
   const [activeRes, expirationsRes] = await Promise.all([
     supabase
-      .schema('finance')
       .from('contractors')
       .select('id, rate, rate_type, currency')
       .eq('status', 'ACTIVE')
       .eq('organization_id', orgId),
+    // BUG-028 FIX: v_contractor_expirations has no organization_id column
+    // (see fetchExpiringContracts above).
     supabase
-      .schema('reporting')
       .from('v_contractor_expirations')
-      .select('id, expiry_bucket')
-      .eq('organization_id', orgId),
+      .select('id, expiry_bucket'),
   ]);
 
   const active = activeRes.data || [];

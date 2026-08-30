@@ -38,6 +38,28 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Only APPROVED incomes can be posted. Current: ' + income.status }, { status: 400 });
     }
 
+    // BUG-032 FIX: "Income vs invoice double counting is unguarded" —
+    // this income already represents revenue that was (or will be)
+    // recognized when its linked invoice is posted. Posting a *second*
+    // DR Receivable / CR Revenue entry here for the same money would
+    // double-count both revenue and AR. Refuse it outright rather than
+    // silently letting it through; the correct way to record cash
+    // actually received against an invoice is a payment receipt
+    // allocation (DR Bank, CR Receivable), not another income posting.
+    if (income.invoice_id) {
+      const linkedInvoice = getData(await supabase
+        .from('invoices')
+        .select('id, invoice_number, status')
+        .eq('id', income.invoice_id)
+        .eq('organization_id', auth.orgId)
+        .maybeSingle());
+      return NextResponse.json({
+        error: linkedInvoice
+          ? `This income is linked to invoice ${linkedInvoice.invoice_number} (status: ${linkedInvoice.status}). That invoice already recognizes this revenue when it is posted/issued — posting this income too would double-count it. Record the cash received as a payment receipt against the invoice instead.`
+          : `This income is linked to invoice ${income.invoice_id}, which already recognizes this revenue — posting this income too would double-count it.`,
+      }, { status: 409 });
+    }
+
     // BUG-008 FIX: validate exchange rate for non-PKR currencies
     const rateError = validateExchangeRate(income.currency, income.exchange_rate);
     if (rateError) {
@@ -126,7 +148,7 @@ export async function POST(req: NextRequest) {
       p_description: `Income: ${income.title}${income.project_id ? ' (Project)' : ''}`,
       p_transaction_date: income.income_date,
       p_period_id: period.id,
-      p_lines: JSON.stringify(journalLines),
+      p_lines: journalLines,
       p_currency: income.currency || 'PKR',
       p_exchange_rate: income.exchange_rate || 1,
       p_source_type: 'INCOME',
