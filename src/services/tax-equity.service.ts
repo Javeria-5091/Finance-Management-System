@@ -417,9 +417,17 @@ export const updateProfitDistribution = async (id: string, payload: any) => {
   return { data: data as ProfitDistribution, error };
 };
 
+// BUG-016 FIX (defect d): finance.distribution_lines has no
+// organization_id column (org isolation for this table is enforced via
+// its RLS policies joining out to finance.profit_distributions.organization_id
+// instead — see supabase/migrations/P1/P1_062_organization_isolation_batch2.sql).
+// Injecting organization_id into each row made every upsert fail with a
+// "column does not exist" error, so a distribution's lines could never be
+// saved in the first place — nothing further downstream (WHT calc,
+// posting) could ever run. `orgId` is accepted here only so this
+// function's call signature didn't need to change everywhere it's used.
 export const saveDistributionLines = async (orgId: string, lines: any[]) => {
-  const withOrg = lines.map(l => ({ ...l, organization_id: orgId }));
-  const { data, error } = await db.from('distribution_lines').upsert(withOrg, { onConflict: 'id' }).select();
+  const { data, error } = await db.from('distribution_lines').upsert(lines, { onConflict: 'id' }).select();
   return { data, error };
 };
 

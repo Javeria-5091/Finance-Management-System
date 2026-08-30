@@ -35,8 +35,48 @@ if(error)
 if(b.action==='post'){
     if(r.status!=='APPROVED')
         throw new Error('Only APPROVED payroll runs can be posted');
-    if(!b.period_id||!b.salary_expense_account_id||!b.payroll_payable_account_id)
-        throw new Error('period_id and payroll accounts are required');
+
+    // BUG-011 FIX: the UI has no account-picker for payroll posting, and
+    // requiring the caller to know internal account UUIDs made this
+    // action effectively unreachable from the page. Auto-resolve sane
+    // defaults the same way src/app/api/finance/post-vendor-bill/route.ts
+    // resolves its control accounts, and only fall back to requiring an
+    // explicit id if the org hasn't got a matching account configured.
+    let periodId = b.period_id;
+    if (!periodId) {
+        const { data: period } = await supabase
+            .schema('finance').from('accounting_periods')
+            .select('id')
+            .eq('organization_id', auth.orgId)
+            .eq('status', 'OPEN')
+            .lte('start_date', r.period_end)
+            .gte('end_date', r.period_end)
+            .maybeSingle();
+        periodId = period?.id;
+    }
+    if (!periodId) throw new Error('No OPEN accounting period covers this payroll run\'s period_end. Open the period or pass period_id explicitly.');
+
+    let payableAccountId = b.payroll_payable_account_id;
+    if (!payableAccountId) {
+        // Seeded control account: 2310 "Salary Payable".
+        const { data: acct } = await supabase
+            .schema('finance').from('chart_of_accounts')
+            .select('id').eq('code', '2310').eq('organization_id', auth.orgId).eq('is_active', true).maybeSingle();
+        payableAccountId = acct?.id;
+    }
+    if (!payableAccountId) throw new Error('Salary Payable control account (code 2310) not found or inactive. Configure it in Chart of Accounts or pass payroll_payable_account_id explicitly.');
+
+    let expenseAccountId = b.salary_expense_account_id;
+    if (!expenseAccountId) {
+        const { data: named } = await supabase
+            .schema('finance').from('chart_of_accounts')
+            .select('id').eq('account_type', 'OPERATING_EXPENSE').eq('is_active', true).eq('organization_id', auth.orgId)
+            .or('name.ilike.%salary%,name.ilike.%payroll%,name.ilike.%wage%')
+            .order('code').limit(1).maybeSingle();
+        expenseAccountId = named?.id;
+    }
+    if (!expenseAccountId) throw new Error('No active Salary/Payroll expense account found in Chart of Accounts. Create one (OPERATING_EXPENSE) or pass salary_expense_account_id explicitly.');
+
     // Idempotency guard: a retry must reuse the existing payroll journal,
     // never create a second GL posting for the same payroll run.
     const { data: existingJournal, error: existingJournalError } = await supabase
@@ -57,10 +97,10 @@ if(b.action==='post'){
         const {data:createdJournalId,error:jerr}=await supabase.schema('finance').rpc('post_journal_entry',{
             p_description:`Payroll ${r.payroll_period}`,
             p_transaction_date:r.period_end,
-            p_period_id:b.period_id,
+            p_period_id:periodId,
             p_lines:JSON.stringify([
-                {account_id:b.salary_expense_account_id,debit_amount:r.total_gross_pay,credit_amount:0,description:'Payroll gross expense'},
-                {account_id:b.payroll_payable_account_id,debit_amount:0,credit_amount:r.total_gross_pay,description:'Payroll payable'}
+                {account_id:expenseAccountId,debit_amount:r.total_gross_pay,credit_amount:0,description:'Payroll gross expense'},
+                {account_id:payableAccountId,debit_amount:0,credit_amount:r.total_gross_pay,description:'Payroll payable'}
             ]),
             p_currency:'PKR',p_exchange_rate:1,
             p_source_type:'PAYROLL_RUN',p_source_id:r.id

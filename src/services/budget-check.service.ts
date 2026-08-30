@@ -284,10 +284,17 @@ export async function checkBudgetForTransaction(
 
   // ── 2. Check category/department budgets ──
   if (category || department) {
-    // BUG-009 FIX: Changed supabase.schema('finance').from('budgets') to
-    // supabase.schema('finance').from('budgets').
+    // BUG-013 FIX: `budgets` lives in the `public` schema (see
+    // supabase/migrations/P0/phase_0/.sql: `CREATE TABLE IF NOT EXISTS
+    // budgets (...)`, no schema prefix) — same table the project-budget
+    // and direct-budget checks above already query correctly with plain
+    // `supabase.from('budgets')`. This branch alone still called
+    // `.schema('finance').from('budgets')`, which doesn't exist, so any
+    // expense with a category or department (i.e. almost every expense)
+    // made this query throw and post-expense fail closed with a 500 for
+    // every single expense, even ones with no category/department budget
+    // configured at all.
     let query = supabase
-      .schema('finance')
       .from('budgets')
       .select('*')
       .eq('status', 'APPROVED')

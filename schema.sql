@@ -1227,6 +1227,101 @@ ALTER FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid")
 COMMENT ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") IS 'P1_060 SECURITY FIX (ISS-02, Critical): added organization-match check (this function already had the correct Finance Head/Accountant role check from migration 029; only the organization-scoping was missing). Completes the maker-checker approval + posting step for a MANUAL journal left in DRAFT by finance.post_journal_entry(). Enforces creator <> approver via trg_maker_checker.';
 
 
+SET default_tablespace = '';
+
+SET default_table_access_method = "heap";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."tax_reconciliations" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "tax_year" "text" NOT NULL,
+    "fiscal_year_id" "uuid" NOT NULL,
+    "accounting_profit_before_tax" numeric(18,2) DEFAULT 0 NOT NULL,
+    "taxable_income" numeric(18,2) DEFAULT 0 NOT NULL,
+    "gross_tax_liability" numeric(18,2) DEFAULT 0 NOT NULL,
+    "withholding_credits" numeric(18,2) DEFAULT 0 NOT NULL,
+    "advance_tax_credits" numeric(18,2) DEFAULT 0 NOT NULL,
+    "other_tax_credits" numeric(18,2) DEFAULT 0 NOT NULL,
+    "net_tax_payable" numeric(18,2) DEFAULT 0 NOT NULL,
+    "profit_after_tax" numeric(18,2) DEFAULT 0 NOT NULL,
+    "effective_tax_rate" numeric(5,2) DEFAULT 0 NOT NULL,
+    "tax_rule_set_id" "uuid" NOT NULL,
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "filing_date" "date",
+    "filing_reference" "text",
+    "filed_values" "jsonb",
+    "payment_reference" "text",
+    "payment_date" "date",
+    "accountant_approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "rejection_reason" "text",
+    "notes" "text",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    "organization_id" "uuid",
+    CONSTRAINT "tax_reconciliations_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
+    CONSTRAINT "tax_reconciliations_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'CALCULATED'::"text", 'UNDER_REVIEW'::"text", 'ACCOUNTANT_APPROVED'::"text", 'FILED'::"text", 'PAYMENT_PENDING'::"text", 'PAID'::"text", 'REFUND_PENDING'::"text", 'AMENDED'::"text", 'CLOSED'::"text"])))
+);
+
+
+ALTER TABLE "finance"."tax_reconciliations" OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."approve_tax_reconciliation"("p_recon_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS "finance"."tax_reconciliations"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_recon RECORD;
+  v_org uuid := COALESCE(p_organization_id, core.current_user_org_id());
+  v_result finance.tax_reconciliations;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Organization context is required';
+  END IF;
+
+  IF p_user_id IS NULL THEN
+    RAISE EXCEPTION 'Approving user is required';
+  END IF;
+
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Only CEO or Finance Head may approve a tax reconciliation';
+  END IF;
+
+  SELECT * INTO v_recon
+  FROM finance.tax_reconciliations
+  WHERE id = p_recon_id AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Tax reconciliation not found or access denied';
+  END IF;
+
+  IF v_recon.status NOT IN ('CALCULATED', 'UNDER_REVIEW') THEN
+    RAISE EXCEPTION 'Tax reconciliation must be CALCULATED or UNDER_REVIEW to approve, current: %', v_recon.status;
+  END IF;
+
+  IF v_recon.created_by IS NOT NULL AND v_recon.created_by = p_user_id THEN
+    RAISE EXCEPTION 'Maker-checker: the user who created this reconciliation cannot also approve it';
+  END IF;
+
+  UPDATE finance.tax_reconciliations
+  SET status = 'ACCOUNTANT_APPROVED',
+      accountant_approved_by = p_user_id,
+      approved_at = now(),
+      rejection_reason = NULL,
+      updated_at = now()
+  WHERE id = p_recon_id
+  RETURNING * INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."approve_tax_reconciliation"("p_recon_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
+
 
 CREATE OR REPLACE FUNCTION "finance"."auto_match_statement_lines"("p_statement_id" "uuid") RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
@@ -1521,6 +1616,7 @@ CREATE OR REPLACE FUNCTION "finance"."compute_platform_fee"("p_platform_id" "uui
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
+  v_org_id UUID;
   v_fee NUMERIC(18,4) := 0;
   v_rule RECORD;
   v_tiers RECORD;
@@ -1528,15 +1624,24 @@ DECLARE
   v_tier_min NUMERIC(18,4);
   v_tier_max NUMERIC(18,4);
 BEGIN
-  -- Get the highest-priority active rule for this platform
+  -- BUG-019 FIX: derive the owning org from the platform itself, both to
+  -- scope the rule lookup deterministically and to satisfy
+  -- fee_computation_log's NOT NULL organization_id.
+  SELECT organization_id INTO v_org_id FROM finance.platforms WHERE id = p_platform_id;
+  IF v_org_id IS NULL THEN
+    RAISE EXCEPTION 'Platform % not found or has no organization', p_platform_id;
+  END IF;
+
+  -- Get the highest-priority active rule for this platform (org-scoped).
   SELECT * INTO v_rule
   FROM finance.fee_rules
   WHERE platform_id = p_platform_id
+    AND organization_id = v_org_id
     AND is_active = true
     AND (applies_to = 'ALL' OR applies_to = p_source_type)
     AND (effective_from IS NULL OR effective_from <= CURRENT_DATE)
     AND (effective_to IS NULL OR effective_to >= CURRENT_DATE)
-  ORDER BY priority DESC
+  ORDER BY priority DESC, effective_from DESC
   LIMIT 1;
 
   IF NOT FOUND THEN
@@ -1557,15 +1662,15 @@ BEGIN
   ELSIF v_rule.fee_type = 'TIERED' THEN
     v_remaining := p_amount;
     FOR v_tiers IN (
-      SELECT * FROM finance.fee_tiers 
-      WHERE fee_rule_id = v_rule.id 
+      SELECT * FROM finance.fee_tiers
+      WHERE fee_rule_id = v_rule.id
       ORDER BY tier_from ASC
     ) LOOP
       v_tier_min := v_tiers.tier_from;
       v_tier_max := CASE WHEN v_tiers.tier_to = 0 THEN p_amount ELSE LEAST(v_tiers.tier_to, p_amount) END;
-      
+
       IF v_remaining <= 0 THEN EXIT; END IF;
-      
+
       DECLARE
         v_tierable NUMERIC(18,4);
       BEGIN
@@ -1588,11 +1693,14 @@ BEGIN
     LIMIT 1;
   END IF;
 
-  -- Log the computation
+  -- BUG-019 FIX: organization_id is required by
+  -- fee_computation_log_org_required_going_forward — omitting it made
+  -- this INSERT (and therefore the whole function) fail every time a
+  -- rule matched.
   INSERT INTO finance.fee_computation_log (
-    source_type, platform_id, fee_rule_id, base_amount, fee_amount
+    source_type, platform_id, fee_rule_id, base_amount, fee_amount, organization_id
   ) VALUES (
-    p_source_type, p_platform_id, v_rule.id, p_amount, COALESCE(v_fee, 0)
+    p_source_type, p_platform_id, v_rule.id, p_amount, COALESCE(v_fee, 0), v_org_id
   );
 
   RETURN COALESCE(v_fee, 0);
@@ -1605,7 +1713,7 @@ ALTER FUNCTION "finance"."compute_platform_fee"("p_platform_id" "uuid", "p_amoun
 
 CREATE OR REPLACE FUNCTION "finance"."compute_tax_liability"("p_tax_recon_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
 DECLARE
     v_recon RECORD;
@@ -1618,8 +1726,12 @@ DECLARE
     v_slab RECORD;
     v_rule_status TEXT;
 BEGIN
-    SELECT * INTO v_recon FROM finance.tax_reconciliations WHERE id = p_tax_recon_id;
-    IF NOT FOUND THEN RAISE EXCEPTION 'Tax reconciliation not found'; END IF;
+    -- BUG-014 defense-in-depth: scope to the caller's organization at the database
+    -- level too, not only in the API route, matching the pattern used elsewhere
+    -- (e.g. finance.reverse_journal_entry) for server-side-enforced controls.
+    SELECT * INTO v_recon FROM finance.tax_reconciliations
+    WHERE id = p_tax_recon_id AND organization_id = core.current_user_org_id();
+    IF NOT FOUND THEN RAISE EXCEPTION 'Tax reconciliation not found or access denied'; END IF;
 
     SELECT status INTO v_rule_status FROM finance.tax_rule_sets WHERE id = v_recon.tax_rule_set_id;
     IF v_rule_status IS NULL THEN RAISE EXCEPTION 'Tax rule set not found'; END IF;
@@ -1627,15 +1739,20 @@ BEGIN
         RAISE EXCEPTION 'Tax rule set must be APPROVED or LOCKED, current: %', v_rule_status;
     END IF;
 
-    --  FIXED: PBT = Revenue Net - Expense Net
+    -- BUG-015 FIX: PBT must be consolidated PKR (spec 5.12: PKR is the ledger and
+    -- fiscal-statement currency), so this uses base_credit/base_debit (the PKR-converted
+    -- amounts stored on every posted line) instead of credit_amount/debit_amount (the
+    -- original transaction-currency amounts). Mixing transaction-currency numerals
+    -- directly into PBT corrupted every downstream figure for any non-PKR activity.
+    -- PBT = Revenue Net - Expense Net (in base currency)
     -- Revenue Net = credit - debit (revenue increases on credit side)
     -- Expense Net = debit - credit (expenses increase on debit side)
     SELECT
         COALESCE(SUM(CASE WHEN coa.account_type IN ('REVENUE','OTHER_INCOME')
-                          THEN jl.credit_amount - jl.debit_amount ELSE 0 END), 0)
+                          THEN jl.base_credit - jl.base_debit ELSE 0 END), 0)
         -
         COALESCE(SUM(CASE WHEN coa.account_type IN ('OTHER_EXPENSE','OPERATING_EXPENSE','COST_OF_SALES')
-                          THEN jl.debit_amount - jl.credit_amount ELSE 0 END), 0)
+                          THEN jl.base_debit - jl.base_credit ELSE 0 END), 0)
     INTO v_pbt
     FROM finance.journal_lines jl
     JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
@@ -1850,13 +1967,17 @@ ALTER FUNCTION "finance"."enforce_invoice_line_org"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."enforce_maker_checker"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
     AS $$
 DECLARE
   v_creator_id UUID;
   v_approver_id UUID;
+  v_second_approver_id UUID;
   v_table TEXT;
+  v_schema TEXT;
 BEGIN
   v_table := TG_TABLE_NAME;
+  v_schema := TG_TABLE_SCHEMA;
 
   IF v_table IN ('expenses', 'incomes', 'invoices') THEN
     v_creator_id := COALESCE(OLD.user_id, NEW.user_id);
@@ -1864,10 +1985,17 @@ BEGIN
   ELSIF v_table IN ('vendor_bills', 'journal_entries') THEN
     v_creator_id := COALESCE(OLD.created_by, NEW.created_by);
     v_approver_id := NEW.approved_by;
-  -- BUG-010 FIX: finance.vendor_payments uses created_by / approved_by,
-  -- same shape as vendor_bills/journal_entries.
-  ELSIF v_table = 'vendor_payments' THEN
+  ELSIF v_table = 'bank_transfers' THEN
     v_creator_id := COALESCE(OLD.created_by, NEW.created_by);
+    v_approver_id := NEW.approved_by;
+    v_second_approver_id := NEW.second_approved_by;
+  ELSIF v_table = 'profit_distributions' THEN
+    v_creator_id := COALESCE(OLD.declared_by, NEW.declared_by);
+    v_approver_id := NEW.approved_by;
+  ELSIF v_table = 'exchange_rates' THEN
+    -- BUG-017 FIX: the person who entered a manual FX rate must not be
+    -- the same person who approves/locks it (spec 5.12).
+    v_creator_id := COALESCE(OLD.entered_by, NEW.entered_by);
     v_approver_id := NEW.approved_by;
   ELSE
     RETURN NEW;
@@ -1878,6 +2006,15 @@ BEGIN
       v_creator_id, v_table;
   END IF;
 
+  IF v_table = 'bank_transfers' AND v_second_approver_id IS NOT NULL THEN
+    IF v_creator_id IS NOT NULL AND v_second_approver_id = v_creator_id THEN
+      RAISE EXCEPTION 'MAKER_CHECKER_VIOLATION: Creator (user %) cannot be the second approver on a bank transfer', v_creator_id;
+    END IF;
+    IF v_approver_id IS NOT NULL AND v_second_approver_id = v_approver_id THEN
+      RAISE EXCEPTION 'MAKER_CHECKER_VIOLATION: The first and second approver on a bank transfer must be different users (user %)', v_approver_id;
+    END IF;
+  END IF;
+
   RETURN NEW;
 END;
 $$;
@@ -1886,7 +2023,7 @@ $$;
 ALTER FUNCTION "finance"."enforce_maker_checker"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "finance"."enforce_maker_checker"() IS 'P1_060 SECURITY FIX (ISS-09, Medium): extended to cover finance.bank_transfers (including dual/second-approver distinctness) and finance.profit_distributions, both spec-flagged (5.8, 5.13) as requiring maker-checker/dual approval and previously not wired to this trigger at all. Original expenses/incomes/invoices/vendor_bills/journal_entries behavior is unchanged.';
+COMMENT ON FUNCTION "finance"."enforce_maker_checker"() IS 'BUG-017 FIX: extended to cover finance.exchange_rates (entered_by <> approved_by), completing the FX approval workflow required by spec 5.12. Original expenses/incomes/invoices/vendor_bills/journal_entries/bank_transfers/profit_distributions behavior is unchanged.';
 
 
 
@@ -2062,6 +2199,126 @@ $$;
 
 
 ALTER FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+DECLARE
+  v_batch RECORD;
+  v_bank_account UUID;
+  v_fee_expense_account UUID;
+  v_wht_account UUID;
+  v_withdrawal_account UUID;
+  v_receivable_account UUID;
+  v_period_id UUID;
+  v_journal_id UUID;
+  v_lines JSONB;
+BEGIN
+  SELECT * INTO v_batch
+  FROM finance.settlement_batches
+  WHERE id = p_batch_id AND organization_id = p_organization_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Settlement batch not found';
+  END IF;
+
+  IF v_batch.status = 'POSTED' THEN
+    -- Idempotent: return the journal that's already there instead of
+    -- erroring, so a client retry after a network blip is harmless.
+    SELECT id INTO v_journal_id FROM finance.journal_entries
+    WHERE source_type = 'PLATFORM_SETTLEMENT' AND source_id = p_batch_id AND organization_id = p_organization_id
+    LIMIT 1;
+    IF v_journal_id IS NOT NULL THEN
+      RETURN v_journal_id;
+    END IF;
+    RAISE EXCEPTION 'Settlement batch is already POSTED but no journal entry was found — contact an administrator';
+  END IF;
+
+  IF v_batch.status <> 'DRAFT' THEN
+    RAISE EXCEPTION 'Only DRAFT settlement batches can be finalized (current status: %)', v_batch.status;
+  END IF;
+
+  IF v_batch.created_by IS NOT NULL AND v_batch.created_by = p_user_id THEN
+    RAISE EXCEPTION 'MAKER_CHECKER_VIOLATION: the batch creator cannot finalize/reconcile their own settlement';
+  END IF;
+
+  IF v_batch.financial_account_id IS NULL THEN
+    RAISE EXCEPTION 'Settlement batch has no destination financial account configured';
+  END IF;
+
+  SELECT linked_ledger_account_id INTO v_bank_account
+  FROM finance.financial_accounts
+  WHERE id = v_batch.financial_account_id AND organization_id = p_organization_id;
+  IF v_bank_account IS NULL THEN
+    RAISE EXCEPTION 'Destination financial account not found or has no linked ledger account';
+  END IF;
+
+  SELECT id INTO v_fee_expense_account FROM finance.chart_of_accounts WHERE organization_id = p_organization_id AND code = '5200' AND is_active = true;
+  SELECT id INTO v_wht_account FROM finance.chart_of_accounts WHERE organization_id = p_organization_id AND code = '1410' AND is_active = true;
+  SELECT id INTO v_withdrawal_account FROM finance.chart_of_accounts WHERE organization_id = p_organization_id AND code = '6320' AND is_active = true;
+  SELECT id INTO v_receivable_account FROM finance.chart_of_accounts WHERE organization_id = p_organization_id AND code = '1420' AND is_active = true;
+
+  IF v_fee_expense_account IS NULL THEN RAISE EXCEPTION 'Platform Fees expense account (code 5200) not configured for this organization'; END IF;
+  IF v_receivable_account IS NULL THEN RAISE EXCEPTION 'Platform Settlement Receivable account (code 1420) not configured for this organization'; END IF;
+
+  SELECT id INTO v_period_id
+  FROM finance.accounting_periods
+  WHERE organization_id = p_organization_id
+    AND status = 'OPEN'
+    AND start_date <= v_batch.settlement_date
+    AND end_date >= v_batch.settlement_date
+  LIMIT 1;
+  IF v_period_id IS NULL THEN
+    RAISE EXCEPTION 'No OPEN accounting period covers this settlement date (%)', v_batch.settlement_date;
+  END IF;
+
+  v_lines := jsonb_build_array(
+    jsonb_build_object('account_id', v_bank_account, 'debit_amount', v_batch.net_amount, 'credit_amount', 0, 'description', 'Net platform settlement received'),
+    jsonb_build_object('account_id', v_fee_expense_account, 'debit_amount', v_batch.actual_fee_amount, 'credit_amount', 0, 'description', 'Platform fee (actual)')
+  );
+
+  IF v_batch.withholding_amount > 0 THEN
+    IF v_wht_account IS NULL THEN RAISE EXCEPTION 'Withholding Tax Receivable account (code 1410) not configured for this organization'; END IF;
+    v_lines := v_lines || jsonb_build_array(jsonb_build_object('account_id', v_wht_account, 'debit_amount', v_batch.withholding_amount, 'credit_amount', 0, 'description', 'Withholding tax deducted by platform'));
+  END IF;
+
+  IF v_batch.withdrawal_fee_amount > 0 THEN
+    IF v_withdrawal_account IS NULL THEN RAISE EXCEPTION 'Withdrawal Fees account (code 6320) not configured for this organization'; END IF;
+    v_lines := v_lines || jsonb_build_array(jsonb_build_object('account_id', v_withdrawal_account, 'debit_amount', v_batch.withdrawal_fee_amount, 'credit_amount', 0, 'description', 'Withdrawal/transfer fee'));
+  END IF;
+
+  v_lines := v_lines || jsonb_build_array(
+    jsonb_build_object('account_id', v_receivable_account, 'debit_amount', 0, 'credit_amount', v_batch.gross_amount, 'description', 'Platform settlement receivable cleared')
+  );
+
+  v_journal_id := finance.post_journal_entry(
+    p_description => 'Platform settlement ' || v_batch.settlement_reference,
+    p_transaction_date => v_batch.settlement_date,
+    p_period_id => v_period_id,
+    p_lines => v_lines,
+    p_currency => v_batch.currency,
+    p_exchange_rate => COALESCE(v_batch.exchange_rate, 1),
+    p_source_type => 'PLATFORM_SETTLEMENT',
+    p_source_id => p_batch_id
+  );
+
+  UPDATE finance.settlement_batches
+  SET status = 'POSTED',
+      approved_by = p_user_id,
+      approved_at = now(),
+      posted_at = now(),
+      updated_at = now()
+  WHERE id = p_batch_id AND organization_id = p_organization_id;
+
+  RETURN v_journal_id;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."fn_add_accumulated_depreciation"("p_asset_id" "uuid", "p_amount" numeric) RETURNS "void"
@@ -4500,6 +4757,209 @@ COMMENT ON FUNCTION "public"."balance_sheet"() IS 'Org-scoped Balance Sheet as-o
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."payroll_runs" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "payroll_period" character varying(20) NOT NULL,
+    "period_start" "date" NOT NULL,
+    "period_end" "date" NOT NULL,
+    "status" character varying(20) DEFAULT 'DRAFT'::character varying NOT NULL,
+    "total_gross_pay" numeric(16,2) DEFAULT 0 NOT NULL,
+    "total_deductions" numeric(16,2) DEFAULT 0 NOT NULL,
+    "total_net_pay" numeric(16,2) DEFAULT 0 NOT NULL,
+    "total_employer_cost" numeric(16,2) DEFAULT 0 NOT NULL,
+    "total_employees" integer DEFAULT 0 NOT NULL,
+    "calculated_by" "uuid",
+    "calculated_at" timestamp with time zone,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "posted_by" "uuid",
+    "posted_at" timestamp with time zone,
+    "notes" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
+    "paid_by" "uuid",
+    "paid_at" timestamp with time zone,
+    CONSTRAINT "payroll_runs_amounts_nonnegative_check" CHECK ((("total_gross_pay" >= (0)::numeric) AND ("total_deductions" >= (0)::numeric) AND ("total_net_pay" >= (0)::numeric) AND ("total_employer_cost" >= (0)::numeric))),
+    CONSTRAINT "payroll_runs_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
+    CONSTRAINT "payroll_runs_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'CALCULATED'::character varying, 'UNDER_REVIEW'::character varying, 'APPROVED'::character varying, 'POSTED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "public"."payroll_runs" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."payroll_runs" IS 'A payroll run is a batch calculation for a specific period. Once APPROVED the inputs are snapshotted.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") RETURNS "public"."payroll_runs"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  v_run public.payroll_runs;
+  v_emp RECORD;
+  v_comp RECORD;
+  v_basic NUMERIC(14,2);
+  v_commission NUMERIC(14,2);
+  v_tax NUMERIC(14,2);
+  v_pf NUMERIC(14,2);
+  v_eobi NUMERIC(14,2);
+  v_advance NUMERIC(14,2);
+  v_other_ded NUMERIC(14,2);
+  v_ded RECORD;
+  v_gross NUMERIC(14,2);
+  v_total_ded NUMERIC(14,2);
+  v_net NUMERIC(14,2);
+  v_ded_snapshot JSONB;
+  v_lines_written INT := 0;
+BEGIN
+  SELECT * INTO v_run FROM public.payroll_runs WHERE id = p_run_id AND organization_id = p_org_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Payroll run not found';
+  END IF;
+  IF v_run.status <> 'DRAFT' THEN
+    RAISE EXCEPTION 'Only DRAFT payroll runs can be calculated (current status: %)', v_run.status;
+  END IF;
+
+  -- Idempotent: wipe any partial lines from a previous failed attempt.
+  DELETE FROM public.payroll_lines WHERE payroll_run_id = p_run_id;
+
+  FOR v_emp IN
+    SELECT * FROM public.payroll_employees
+    WHERE organization_id = p_org_id AND status = 'ACTIVE'
+  LOOP
+    -- Most recent compensation record active on/covering the run's period end.
+    SELECT * INTO v_comp
+    FROM public.payroll_compensation
+    WHERE employee_id = v_emp.id
+      AND is_active = true
+      AND effective_from <= v_run.period_end
+      AND (effective_to IS NULL OR effective_to >= v_run.period_start)
+    ORDER BY effective_from DESC
+    LIMIT 1;
+
+    IF NOT FOUND THEN
+      -- No active compensation on record — cannot pay this employee.
+      -- Skip rather than fabricate a salary; spec 5.9 requires an
+      -- explicit compensation record for every paid employee.
+      CONTINUE;
+    END IF;
+
+    -- NOTE: this system does not (yet) track hourly/daily attendance, so
+    -- HOURLY_RATE / DAILY_RATE / PROJECT_BASED / COMMISSION_ONLY /
+    -- FIXED_CONTRACT compensation types are all treated as the flat
+    -- per-period amount, same as MONTHLY_SALARY. Time-based proration is
+    -- a separate feature, not part of this bug fix.
+    v_basic := COALESCE(v_comp.amount, 0);
+
+    -- Approved commissions earned for this specific payroll period.
+    SELECT COALESCE(SUM(commission_amount), 0) INTO v_commission
+    FROM public.payroll_commissions
+    WHERE employee_id = v_emp.id
+      AND organization_id = p_org_id
+      AND status = 'APPROVED'
+      AND period_month = v_run.payroll_period;
+
+    v_gross := v_basic + v_commission;
+
+    -- Recurring deduction rules active for this period.
+    v_tax := 0; v_pf := 0; v_eobi := 0; v_other_ded := 0;
+    v_ded_snapshot := '[]'::JSONB;
+    FOR v_ded IN
+      SELECT * FROM public.payroll_deductions
+      WHERE employee_id = v_emp.id
+        AND is_active = true
+        AND effective_from <= v_run.period_end
+        AND (effective_to IS NULL OR effective_to >= v_run.period_start)
+    LOOP
+      DECLARE
+        v_amt NUMERIC(14,2);
+      BEGIN
+        v_amt := COALESCE(v_ded.amount, 0) + COALESCE(v_ded.percentage, 0) / 100.0 * v_gross;
+        IF v_ded.deduction_type = 'TAX' THEN v_tax := v_tax + v_amt;
+        ELSIF v_ded.deduction_type = 'PROVIDENT_FUND' THEN v_pf := v_pf + v_amt;
+        ELSIF v_ded.deduction_type = 'EOBI' THEN v_eobi := v_eobi + v_amt;
+        ELSE v_other_ded := v_other_ded + v_amt;
+        END IF;
+        v_ded_snapshot := v_ded_snapshot || jsonb_build_object(
+          'deduction_type', v_ded.deduction_type, 'amount', v_amt
+        );
+      END;
+    END LOOP;
+
+    -- Outstanding salary advances due for recovery this period. This is a
+    -- preview only (payroll_advances.remaining_balance is NOT decremented
+    -- here) — balances are adjusted when the run is POSTED, so a run can
+    -- be recalculated freely while still in DRAFT/CALCULATED without
+    -- double-deducting.
+    SELECT COALESCE(SUM(LEAST(COALESCE(monthly_deduction, remaining_balance), remaining_balance)), 0)
+    INTO v_advance
+    FROM public.payroll_advances
+    WHERE employee_id = v_emp.id
+      AND organization_id = p_org_id
+      AND approval_status IN ('APPROVED', 'PARTIALLY_RECOVERED')
+      AND remaining_balance > 0
+      AND (start_deduction_month IS NULL OR start_deduction_month <= v_run.payroll_period);
+
+    v_total_ded := v_tax + v_pf + v_eobi + v_advance + v_other_ded;
+    -- Safety clamp: never let deductions exceed gross pay (would violate
+    -- the payroll_lines_nonnegative_check constraint on net_pay).
+    IF v_total_ded > v_gross THEN
+      v_total_ded := v_gross;
+    END IF;
+    v_net := v_gross - v_total_ded;
+
+    INSERT INTO public.payroll_lines (
+      payroll_run_id, employee_id, organization_id,
+      basic_salary, housing_allow, medical_allow, conveyance_allow, other_allowances,
+      overtime_pay, commission_pay, bonus_pay,
+      gross_pay, tax_deduction, provident_fund, eobi, advance_deduction, other_deductions,
+      total_deductions, net_pay, employer_cost,
+      payment_status, bank_name, bank_account,
+      employee_name, employee_code, designation, department,
+      compensation_snapshot, deduction_snapshot
+    ) VALUES (
+      p_run_id, v_emp.id, p_org_id,
+      v_basic, 0, 0, 0, 0,
+      0, v_commission, 0,
+      v_gross, v_tax, v_pf, v_eobi, v_advance, v_other_ded,
+      v_total_ded, v_net, v_gross,
+      'PENDING', v_emp.bank_name, v_emp.bank_account,
+      v_emp.name, v_emp.employee_code, v_emp.designation, v_emp.department,
+      to_jsonb(v_comp), v_ded_snapshot
+    );
+
+    v_lines_written := v_lines_written + 1;
+  END LOOP;
+
+  IF v_lines_written = 0 THEN
+    RAISE EXCEPTION 'No ACTIVE employees with active compensation found for period % — cannot calculate payroll. Set compensation for at least one employee first.', v_run.payroll_period;
+  END IF;
+
+  UPDATE public.payroll_runs
+  SET status = 'CALCULATED',
+      total_gross_pay = (SELECT COALESCE(SUM(gross_pay), 0) FROM public.payroll_lines WHERE payroll_run_id = p_run_id),
+      total_deductions = (SELECT COALESCE(SUM(total_deductions), 0) FROM public.payroll_lines WHERE payroll_run_id = p_run_id),
+      total_net_pay = (SELECT COALESCE(SUM(net_pay), 0) FROM public.payroll_lines WHERE payroll_run_id = p_run_id),
+      total_employer_cost = (SELECT COALESCE(SUM(employer_cost), 0) FROM public.payroll_lines WHERE payroll_run_id = p_run_id),
+      total_employees = v_lines_written,
+      calculated_by = p_actor,
+      calculated_at = now(),
+      updated_at = now()
+  WHERE id = p_run_id AND organization_id = p_org_id
+  RETURNING * INTO v_run;
+
+  RETURN v_run;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."cash_flow"("p_start" "date" DEFAULT NULL::"date", "p_end" "date" DEFAULT NULL::"date") RETURNS json
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'public', 'finance', 'core'
@@ -5288,6 +5748,95 @@ $$;
 
 
 ALTER FUNCTION "public"."rls_auto_enable"() OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."payroll_compensation" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "employee_id" "uuid" NOT NULL,
+    "compensation_type" character varying(30) DEFAULT 'MONTHLY_SALARY'::character varying NOT NULL,
+    "amount" numeric(14,2) NOT NULL,
+    "currency" character varying(3) DEFAULT 'PKR'::character varying NOT NULL,
+    "effective_from" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "effective_to" "date",
+    "is_active" boolean DEFAULT true NOT NULL,
+    "project_id" "uuid",
+    "notes" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
+    CONSTRAINT "payroll_compensation_amount_check" CHECK (("amount" >= (0)::numeric)),
+    CONSTRAINT "payroll_compensation_compensation_type_check" CHECK ((("compensation_type")::"text" = ANY ((ARRAY['MONTHLY_SALARY'::character varying, 'HOURLY_RATE'::character varying, 'DAILY_RATE'::character varying, 'PROJECT_BASED'::character varying, 'COMMISSION_ONLY'::character varying, 'FIXED_CONTRACT'::character varying])::"text"[]))),
+    CONSTRAINT "payroll_compensation_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
+);
+
+
+ALTER TABLE "public"."payroll_compensation" OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") RETURNS "public"."payroll_compensation"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  v_org_id UUID;
+  v_effective_from DATE;
+  v_row public.payroll_compensation;
+BEGIN
+  SELECT organization_id INTO v_org_id
+  FROM public.payroll_employees
+  WHERE id = p_employee_id;
+
+  IF v_org_id IS NULL THEN
+    RAISE EXCEPTION 'Employee % not found', p_employee_id;
+  END IF;
+
+  -- Org isolation: caller must belong to the same org as the employee.
+  IF v_org_id IS DISTINCT FROM (
+    SELECT organization_id FROM public.profiles WHERE user_id = auth.uid()
+  ) THEN
+    RAISE EXCEPTION 'Not authorized to set compensation for this employee';
+  END IF;
+
+  v_effective_from := COALESCE((p_compensation->>'effective_from')::DATE, CURRENT_DATE);
+
+  IF COALESCE((p_compensation->>'amount')::NUMERIC, -1) < 0 THEN
+    RAISE EXCEPTION 'Compensation amount must be zero or greater';
+  END IF;
+
+  -- Close out any currently-active compensation the day before the new
+  -- record starts, so payroll calculation always finds at most one
+  -- active row per employee for a given date.
+  UPDATE public.payroll_compensation
+  SET is_active = false,
+      effective_to = LEAST(COALESCE(effective_to, v_effective_from - 1), v_effective_from - 1),
+      updated_at = now()
+  WHERE employee_id = p_employee_id
+    AND is_active = true;
+
+  INSERT INTO public.payroll_compensation (
+    employee_id, organization_id, compensation_type, amount, currency,
+    effective_from, effective_to, is_active, project_id, notes, created_by
+  ) VALUES (
+    p_employee_id, v_org_id,
+    COALESCE(p_compensation->>'compensation_type', 'MONTHLY_SALARY'),
+    (p_compensation->>'amount')::NUMERIC,
+    COALESCE(p_compensation->>'currency', 'PKR'),
+    v_effective_from,
+    (p_compensation->>'effective_to')::DATE,
+    true,
+    (p_compensation->>'project_id')::UUID,
+    p_compensation->>'notes',
+    COALESCE((p_compensation->>'created_by')::UUID, auth.uid())
+  )
+  RETURNING * INTO v_row;
+
+  RETURN v_row;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."sync_invoice_client_name"() RETURNS "trigger"
@@ -6408,10 +6957,6 @@ END;
 
 ALTER FUNCTION "reporting"."unreconciled_summary"() OWNER TO "postgres";
 
-SET default_tablespace = '';
-
-SET default_table_access_method = "heap";
-
 
 CREATE TABLE IF NOT EXISTS "ai"."ai_conversations" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
@@ -6910,6 +7455,33 @@ ALTER TABLE "core"."delegations" OWNER TO "postgres";
 
 
 COMMENT ON TABLE "core"."delegations" IS 'Time-limited delegation of specific permissions from one user to another with mandatory reason (spec 10.1, 7.2).';
+
+
+
+CREATE TABLE IF NOT EXISTS "core"."distribution_tax_config" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "enabled" boolean DEFAULT true NOT NULL,
+    "rate" numeric(5,2) DEFAULT 15 NOT NULL,
+    "minimum_threshold" numeric(18,2) DEFAULT 0 NOT NULL,
+    "maximum_cap" numeric(18,2) DEFAULT 0 NOT NULL,
+    "withholding_tax_account_id" "uuid",
+    "withholding_payable_account_id" "uuid",
+    "effective_from" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "tax_reference" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_dtc_cap" CHECK (("maximum_cap" >= (0)::numeric)),
+    CONSTRAINT "chk_dtc_min" CHECK (("minimum_threshold" >= (0)::numeric)),
+    CONSTRAINT "chk_dtc_rate" CHECK ((("rate" >= (0)::numeric) AND ("rate" <= (100)::numeric)))
+);
+
+
+ALTER TABLE "core"."distribution_tax_config" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "core"."distribution_tax_config" IS 'Per-organization dividend/profit-distribution withholding tax configuration. Referenced by src/services/distribution-wht.service.ts. Added by BUG-016 fix — table never existed, so WHT config always silently fell back to an unusable hardcoded default.';
 
 
 
@@ -7551,10 +8123,12 @@ CREATE TABLE IF NOT EXISTS "finance"."capital_transactions" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
     "organization_id" "uuid",
+    "equity_account_id" "uuid",
     CONSTRAINT "capital_transactions_amount_check" CHECK (("amount" > (0)::numeric)),
     CONSTRAINT "capital_transactions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "capital_transactions_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'CANCELLED'::"text"]))),
-    CONSTRAINT "capital_transactions_type_check" CHECK (("transaction_type" = ANY (ARRAY['CAPITAL_CONTRIBUTION'::"text", 'OWNER_LOAN_ADVANCE'::"text", 'OWNER_LOAN_REPAYMENT'::"text", 'DRAWING'::"text"])))
+    CONSTRAINT "capital_transactions_type_check" CHECK (("transaction_type" = ANY (ARRAY['CAPITAL_CONTRIBUTION'::"text", 'OWNER_LOAN_ADVANCE'::"text", 'OWNER_LOAN_REPAYMENT'::"text", 'DRAWING'::"text"]))),
+    CONSTRAINT "capital_txn_ready_to_leave_draft" CHECK ((("status" <> ALL (ARRAY['APPROVED'::"text", 'POSTED'::"text"])) OR (("financial_account_id" IS NOT NULL) AND ("equity_account_id" IS NOT NULL))))
 );
 
 
@@ -7562,6 +8136,14 @@ ALTER TABLE "finance"."capital_transactions" OWNER TO "postgres";
 
 
 COMMENT ON TABLE "finance"."capital_transactions" IS 'Owner capital contributions, loan advances/repayments, and drawings. Spec Section 5.13/2.1. journal_entry_id links to the authoritative GL posting once posted -- this table is the structured entry point, not a parallel balance. See Migration 024.';
+
+
+
+COMMENT ON COLUMN "finance"."capital_transactions"."equity_account_id" IS 'BUG-018 FIX: the owner-capital / owner-loan-payable / drawings GL account for this transaction. Paired with financial_account_id (the bank/cash leg) to form the two-line journal entry at posting time; transaction_type determines which side is debited vs credited.';
+
+
+
+COMMENT ON CONSTRAINT "capital_txn_ready_to_leave_draft" ON "finance"."capital_transactions" IS 'BUG-018 FIX: a capital transaction cannot be approved or posted without both the bank/cash leg (financial_account_id) and the equity/loan leg (equity_account_id) set.';
 
 
 
@@ -7753,11 +8335,20 @@ CREATE TABLE IF NOT EXISTS "finance"."distribution_lines" (
     "payment_account_id" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
+    "withholding_rate" numeric(5,2) DEFAULT 0 NOT NULL,
+    "withholding_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "net_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "withholding_exempt" boolean DEFAULT false NOT NULL,
+    "withholding_exempt_reason" "text",
     CONSTRAINT "distribution_lines_payment_status_check" CHECK (("payment_status" = ANY (ARRAY['PENDING'::"text", 'PAID'::"text", 'CANCELLED'::"text"])))
 );
 
 
 ALTER TABLE "finance"."distribution_lines" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "finance"."distribution_lines"."withholding_amount" IS 'BUG-016 fix: column did not exist; profit-distribution/route.ts silently failed to persist the per-owner WHT split computed by calculateWithholdingTax().';
+
 
 
 CREATE TABLE IF NOT EXISTS "finance"."exchange_rates" (
@@ -7777,6 +8368,8 @@ CREATE TABLE IF NOT EXISTS "finance"."exchange_rates" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
     "organization_id" "uuid" NOT NULL,
+    "evidence_reference" "text" NOT NULL,
+    CONSTRAINT "exchange_rates_evidence_reference_not_blank" CHECK (("length"(TRIM(BOTH FROM "evidence_reference")) > 0)),
     CONSTRAINT "exchange_rates_rate_positive_check" CHECK (("rate" > (0)::numeric)),
     CONSTRAINT "exchange_rates_rate_type_check" CHECK (("rate_type" = ANY (ARRAY['PLATFORM'::"text", 'BANK'::"text", 'MANUAL'::"text", 'PAYMENT_CHANNEL'::"text"])))
 );
@@ -7786,6 +8379,10 @@ ALTER TABLE "finance"."exchange_rates" OWNER TO "postgres";
 
 
 COMMENT ON COLUMN "finance"."exchange_rates"."organization_id" IS 'Migration 040: now NOT NULL. Every manual exchange rate must belong to exactly one organization; a NULL value previously made the row invisible to the tenant boundary entirely (it satisfied neither side of core.same_org(), which fails closed, but also was never actually checked by the old fx_select/fx_insert policies).';
+
+
+
+COMMENT ON COLUMN "finance"."exchange_rates"."evidence_reference" IS 'BUG-017 FIX: required citation for a manually entered rate (bank/platform screenshot reference, invoice number, source URL, etc.). Spec 5.12: rates are never assumed or auto-refreshed, only entered against evidence.';
 
 
 
@@ -7884,7 +8481,7 @@ CREATE TABLE IF NOT EXISTS "finance"."fee_rules" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
-    CONSTRAINT "fee_rules_applies_to_check" CHECK ((("applies_to")::"text" = ANY ((ARRAY['EXPENSE'::character varying, 'INVOICE'::character varying, 'VENDOR_BILL'::character varying, 'PAYMENT_RECEIPT'::character varying, 'ALL'::character varying])::"text"[]))),
+    CONSTRAINT "fee_rules_applies_to_check" CHECK ((("applies_to")::"text" = ANY (ARRAY['EXPENSE'::"text", 'INVOICE'::"text", 'VENDOR_BILL'::"text", 'PAYMENT_RECEIPT'::"text", 'SETTLEMENT'::"text", 'ALL'::"text"]))),
     CONSTRAINT "fee_rules_fee_type_check" CHECK ((("fee_type")::"text" = ANY ((ARRAY['PERCENTAGE'::character varying, 'FIXED'::character varying, 'TIERED'::character varying, 'SLAB'::character varying])::"text"[]))),
     CONSTRAINT "fee_rules_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
@@ -8723,42 +9320,6 @@ CREATE TABLE IF NOT EXISTS "finance"."tax_payments_and_refunds" (
 
 
 ALTER TABLE "finance"."tax_payments_and_refunds" OWNER TO "postgres";
-
-
-CREATE TABLE IF NOT EXISTS "finance"."tax_reconciliations" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "tax_year" "text" NOT NULL,
-    "fiscal_year_id" "uuid" NOT NULL,
-    "accounting_profit_before_tax" numeric(18,2) DEFAULT 0 NOT NULL,
-    "taxable_income" numeric(18,2) DEFAULT 0 NOT NULL,
-    "gross_tax_liability" numeric(18,2) DEFAULT 0 NOT NULL,
-    "withholding_credits" numeric(18,2) DEFAULT 0 NOT NULL,
-    "advance_tax_credits" numeric(18,2) DEFAULT 0 NOT NULL,
-    "other_tax_credits" numeric(18,2) DEFAULT 0 NOT NULL,
-    "net_tax_payable" numeric(18,2) DEFAULT 0 NOT NULL,
-    "profit_after_tax" numeric(18,2) DEFAULT 0 NOT NULL,
-    "effective_tax_rate" numeric(5,2) DEFAULT 0 NOT NULL,
-    "tax_rule_set_id" "uuid" NOT NULL,
-    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
-    "filing_date" "date",
-    "filing_reference" "text",
-    "filed_values" "jsonb",
-    "payment_reference" "text",
-    "payment_date" "date",
-    "accountant_approved_by" "uuid",
-    "approved_at" timestamp with time zone,
-    "rejection_reason" "text",
-    "notes" "text",
-    "created_at" timestamp with time zone DEFAULT "now"(),
-    "updated_at" timestamp with time zone DEFAULT "now"(),
-    "created_by" "uuid",
-    "organization_id" "uuid",
-    CONSTRAINT "tax_reconciliations_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
-    CONSTRAINT "tax_reconciliations_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'CALCULATED'::"text", 'UNDER_REVIEW'::"text", 'ACCOUNTANT_APPROVED'::"text", 'FILED'::"text", 'PAYMENT_PENDING'::"text", 'PAID'::"text", 'REFUND_PENDING'::"text", 'AMENDED'::"text", 'CLOSED'::"text"])))
-);
-
-
-ALTER TABLE "finance"."tax_reconciliations" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "finance"."tax_returns" (
@@ -9914,30 +10475,6 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_commissions" (
 ALTER TABLE "public"."payroll_commissions" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."payroll_compensation" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "employee_id" "uuid" NOT NULL,
-    "compensation_type" character varying(30) DEFAULT 'MONTHLY_SALARY'::character varying NOT NULL,
-    "amount" numeric(14,2) NOT NULL,
-    "currency" character varying(3) DEFAULT 'PKR'::character varying NOT NULL,
-    "effective_from" "date" DEFAULT CURRENT_DATE NOT NULL,
-    "effective_to" "date",
-    "is_active" boolean DEFAULT true NOT NULL,
-    "project_id" "uuid",
-    "notes" "text",
-    "created_by" "uuid",
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "organization_id" "uuid",
-    CONSTRAINT "payroll_compensation_amount_check" CHECK (("amount" >= (0)::numeric)),
-    CONSTRAINT "payroll_compensation_compensation_type_check" CHECK ((("compensation_type")::"text" = ANY ((ARRAY['MONTHLY_SALARY'::character varying, 'HOURLY_RATE'::character varying, 'DAILY_RATE'::character varying, 'PROJECT_BASED'::character varying, 'COMMISSION_ONLY'::character varying, 'FIXED_CONTRACT'::character varying])::"text"[]))),
-    CONSTRAINT "payroll_compensation_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
-);
-
-
-ALTER TABLE "public"."payroll_compensation" OWNER TO "postgres";
-
-
 CREATE TABLE IF NOT EXISTS "public"."payroll_deductions" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "employee_id" "uuid" NOT NULL,
@@ -10083,43 +10620,6 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_reimbursements" (
 
 
 ALTER TABLE "public"."payroll_reimbursements" OWNER TO "postgres";
-
-
-CREATE TABLE IF NOT EXISTS "public"."payroll_runs" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "payroll_period" character varying(20) NOT NULL,
-    "period_start" "date" NOT NULL,
-    "period_end" "date" NOT NULL,
-    "status" character varying(20) DEFAULT 'DRAFT'::character varying NOT NULL,
-    "total_gross_pay" numeric(16,2) DEFAULT 0 NOT NULL,
-    "total_deductions" numeric(16,2) DEFAULT 0 NOT NULL,
-    "total_net_pay" numeric(16,2) DEFAULT 0 NOT NULL,
-    "total_employer_cost" numeric(16,2) DEFAULT 0 NOT NULL,
-    "total_employees" integer DEFAULT 0 NOT NULL,
-    "calculated_by" "uuid",
-    "calculated_at" timestamp with time zone,
-    "approved_by" "uuid",
-    "approved_at" timestamp with time zone,
-    "posted_by" "uuid",
-    "posted_at" timestamp with time zone,
-    "notes" "text",
-    "created_by" "uuid",
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "organization_id" "uuid",
-    "paid_by" "uuid",
-    "paid_at" timestamp with time zone,
-    CONSTRAINT "payroll_runs_amounts_nonnegative_check" CHECK ((("total_gross_pay" >= (0)::numeric) AND ("total_deductions" >= (0)::numeric) AND ("total_net_pay" >= (0)::numeric) AND ("total_employer_cost" >= (0)::numeric))),
-    CONSTRAINT "payroll_runs_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
-    CONSTRAINT "payroll_runs_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'CALCULATED'::character varying, 'UNDER_REVIEW'::character varying, 'APPROVED'::character varying, 'POSTED'::character varying, 'REJECTED'::character varying, 'CANCELLED'::character varying])::"text"[])))
-);
-
-
-ALTER TABLE "public"."payroll_runs" OWNER TO "postgres";
-
-
-COMMENT ON TABLE "public"."payroll_runs" IS 'A payroll run is a batch calculation for a specific period. Once APPROVED the inputs are snapshotted.';
-
 
 
 CREATE OR REPLACE VIEW "public"."permissions" WITH ("security_invoker"='true') AS
@@ -11476,6 +11976,11 @@ ALTER TABLE ONLY "core"."delegations"
 
 
 
+ALTER TABLE ONLY "core"."distribution_tax_config"
+    ADD CONSTRAINT "distribution_tax_config_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "core"."employee_links"
     ADD CONSTRAINT "employee_links_pkey" PRIMARY KEY ("id");
 
@@ -12423,6 +12928,10 @@ CREATE INDEX "idx_delegations_from" ON "core"."delegations" USING "btree" ("from
 
 
 CREATE INDEX "idx_delegations_to" ON "core"."delegations" USING "btree" ("to_user_id", "status");
+
+
+
+CREATE INDEX "idx_distribution_tax_config_org_enabled" ON "core"."distribution_tax_config" USING "btree" ("organization_id", "enabled", "effective_from" DESC);
 
 
 
@@ -13789,6 +14298,10 @@ CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "financ
 
 
 
+CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "finance"."exchange_rates" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "finance"."journal_entries" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
 
 
@@ -14345,6 +14858,26 @@ ALTER TABLE ONLY "core"."delegations"
 
 
 
+ALTER TABLE ONLY "core"."distribution_tax_config"
+    ADD CONSTRAINT "distribution_tax_config_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "core"."distribution_tax_config"
+    ADD CONSTRAINT "distribution_tax_config_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "core"."distribution_tax_config"
+    ADD CONSTRAINT "distribution_tax_config_withholding_payable_account_id_fkey" FOREIGN KEY ("withholding_payable_account_id") REFERENCES "finance"."chart_of_accounts"("id");
+
+
+
+ALTER TABLE ONLY "core"."distribution_tax_config"
+    ADD CONSTRAINT "distribution_tax_config_withholding_tax_account_id_fkey" FOREIGN KEY ("withholding_tax_account_id") REFERENCES "finance"."chart_of_accounts"("id");
+
+
+
 ALTER TABLE ONLY "core"."employee_links"
     ADD CONSTRAINT "employee_links_shared_person_id_fkey" FOREIGN KEY ("shared_person_id") REFERENCES "core"."shared_people"("id") ON DELETE CASCADE;
 
@@ -14587,6 +15120,11 @@ ALTER TABLE ONLY "finance"."budget_lines"
 
 ALTER TABLE ONLY "finance"."budget_revisions"
     ADD CONSTRAINT "budget_revisions_budget_id_fkey" FOREIGN KEY ("budget_id") REFERENCES "public"."budgets"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."capital_transactions"
+    ADD CONSTRAINT "capital_transactions_equity_account_id_fkey" FOREIGN KEY ("equity_account_id") REFERENCES "finance"."chart_of_accounts"("id");
 
 
 
@@ -16175,6 +16713,17 @@ CREATE POLICY "delegations_select_own" ON "core"."delegations" FOR SELECT USING 
 
 
 
+ALTER TABLE "core"."distribution_tax_config" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "distribution_tax_config_select" ON "core"."distribution_tax_config" FOR SELECT USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+CREATE POLICY "distribution_tax_config_write" ON "core"."distribution_tax_config" USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
+
+
+
 ALTER TABLE "core"."employee_links" ENABLE ROW LEVEL SECURITY;
 
 
@@ -16779,6 +17328,14 @@ CREATE POLICY "fixed_assets_update_org_scoped" ON "finance"."fixed_assets" FOR U
 
 
 
+CREATE POLICY "fx_approve" ON "finance"."exchange_rates" FOR UPDATE USING (("core"."is_finance_head"() AND "core"."same_org"("organization_id"))) WITH CHECK (("core"."is_finance_head"() AND "core"."same_org"("organization_id")));
+
+
+
+COMMENT ON POLICY "fx_approve" ON "finance"."exchange_rates" IS 'BUG-017 FIX: Finance Head/CEO may approve/lock a manually entered rate. trg_maker_checker separately blocks the same user who entered the rate from approving it, so approval is never self-service.';
+
+
+
 CREATE POLICY "fx_insert" ON "finance"."exchange_rates" FOR INSERT WITH CHECK ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id")));
 
 
@@ -17268,7 +17825,7 @@ CREATE POLICY "tr_select_org_scoped" ON "finance"."tax_reconciliations" FOR SELE
 
 
 
-CREATE POLICY "tr_update_restricted" ON "finance"."tax_reconciliations" FOR UPDATE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id"))) WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id")));
+CREATE POLICY "tr_update_restricted" ON "finance"."tax_reconciliations" FOR UPDATE USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id"))) WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id") AND ("status" IS DISTINCT FROM 'ACCOUNTANT_APPROVED'::"text")));
 
 
 
@@ -18107,11 +18664,24 @@ GRANT ALL ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" 
 
 
 
+GRANT ALL ON TABLE "finance"."tax_reconciliations" TO "authenticated";
+GRANT ALL ON TABLE "finance"."tax_reconciliations" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "finance"."approve_tax_reconciliation"("p_recon_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "finance"."close_period"("p_period_id" "uuid", "p_closed_by" "uuid", "p_status" "text", "p_reason" "text") TO "authenticated";
 
 
 
 GRANT ALL ON FUNCTION "finance"."exclude_statement_line"("p_line_id" "uuid", "p_reason" "text") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
 
 
@@ -18193,6 +18763,17 @@ GRANT ALL ON FUNCTION "ops"."record_monitoring_event"("p_service" "text", "p_eve
 REVOKE ALL ON FUNCTION "public"."balance_sheet"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."balance_sheet"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."balance_sheet"() TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."payroll_runs" TO "authenticated";
+GRANT ALL ON TABLE "public"."payroll_runs" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") TO "service_role";
 
 
 
@@ -18295,6 +18876,17 @@ GRANT ALL ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date
 
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."payroll_compensation" TO "authenticated";
+GRANT ALL ON TABLE "public"."payroll_compensation" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") TO "service_role";
 
 
 
@@ -18414,6 +19006,14 @@ GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
 
 
 
+
+
+
+
+
+
+
+
 GRANT SELECT,INSERT ON TABLE "audit"."audit_log" TO "authenticated";
 GRANT ALL ON TABLE "audit"."audit_log" TO "service_role";
 
@@ -18465,6 +19065,11 @@ GRANT ALL ON TABLE "core"."budget_policies" TO "service_role";
 
 GRANT ALL ON TABLE "core"."delegations" TO "authenticated";
 GRANT ALL ON TABLE "core"."delegations" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "core"."distribution_tax_config" TO "authenticated";
+GRANT ALL ON TABLE "core"."distribution_tax_config" TO "service_role";
 
 
 
@@ -18530,6 +19135,11 @@ GRANT ALL ON TABLE "core"."user_permission_overrides" TO "service_role";
 
 GRANT ALL ON TABLE "core"."user_roles" TO "authenticated";
 GRANT ALL ON TABLE "core"."user_roles" TO "service_role";
+
+
+
+
+
 
 
 
@@ -18804,11 +19414,6 @@ GRANT ALL ON TABLE "finance"."tax_payments_and_refunds" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "finance"."tax_reconciliations" TO "authenticated";
-GRANT ALL ON TABLE "finance"."tax_reconciliations" TO "service_role";
-
-
-
 GRANT ALL ON TABLE "finance"."tax_returns" TO "authenticated";
 GRANT ALL ON TABLE "finance"."tax_returns" TO "service_role";
 
@@ -19005,11 +19610,6 @@ GRANT ALL ON TABLE "public"."payroll_commissions" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."payroll_compensation" TO "authenticated";
-GRANT ALL ON TABLE "public"."payroll_compensation" TO "service_role";
-
-
-
 GRANT ALL ON TABLE "public"."payroll_deductions" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_deductions" TO "service_role";
 
@@ -19033,11 +19633,6 @@ GRANT ALL ON TABLE "public"."payroll_lines" TO "service_role";
 
 GRANT ALL ON TABLE "public"."payroll_reimbursements" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_reimbursements" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "public"."payroll_runs" TO "authenticated";
-GRANT ALL ON TABLE "public"."payroll_runs" TO "service_role";
 
 
 
@@ -19262,7 +19857,6 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
-
 
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";

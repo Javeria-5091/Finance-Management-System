@@ -1,19 +1,11 @@
 import { supabase as browserSupabase } from '@/lib/supabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-// BUG-007 FIX: This service previously imported the browser supabase client
-// directly. When called from an API route, the browser client has no
-// authenticated session, causing RLS to reject queries or return wrong data.
-//
-// Each function below now accepts an optional `supabaseClient` parameter.
-// API routes pass their server-side authenticated client (from getAuthSupabase());
-// frontend code omits it and the browser client is used (with its valid session).
 type SClient = SupabaseClient<any, any, any>;
 function resolveClient(override?: SClient | null): SClient {
   return override || (browserSupabase as unknown as SClient);
 }
-// Backward-compat alias: existing function bodies
-// continue to reference `supabase` directly.
+
 const supabase = browserSupabase;
 import { getCurrentOrganizationId } from '@/lib/organization';
 import type {
@@ -31,83 +23,186 @@ import type {
 const reportingDb = () => supabase.schema('reporting');
 const auditDb = () => supabase.schema('audit');
 const financeDb = () => supabase.schema('finance');
+const coreDb = () => supabase.schema('core');
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Financial Statements
-// ═══════════════════════════════════════════════════════════════════════════
+
+const PL_SECTION_KEYS = ['revenue', 'cost_of_sales', 'operating_expenses', 'other_income', 'other_expenses'] as const;
 
 export const getProfitAndLoss = async (start?: string, end?: string) => {
   const organization_id = await getCurrentOrganizationId();
-  // FIX: Function is reporting.get_profit_and_loss with params p_start_date/p_end_date
   const { data, error } = await reportingDb().rpc('get_profit_and_loss', {
     p_start_date: start || null,
     p_end_date: end || null,
     p_organization_id: organization_id,
   });
   if (error) throw new Error(error.message);
-  return data as PLData;
+
+  const result: PLData = { revenue: [], cost_of_sales: [], operating_expenses: [], other_income: [], other_expenses: [] };
+  for (const row of (data || []) as any[]) {
+    const key = PL_SECTION_KEYS[(row.section_order || 6) - 1];
+    if (!key) continue; // section_order 6 (unmapped account_type) — nothing to bucket into
+    result[key].push({
+      code: row.code,
+      account_name: row.account_name,
+      total: Number(row.net_amount ?? 0),
+      debit_total: Number(row.debit_total ?? 0),
+      credit_total: Number(row.credit_total ?? 0),
+    });
+  }
+  return result;
 };
+
+// BUG-006 FIX: reporting.get_balance_sheet returns FLAT rows
+// {section_order, section, code, account_name, net_amount} but the page reads
+// a GROUPED BSData object {assets:[...], liabilities:[...], equity:[...]}.
+// section_order is 1=ASSET, 2=LIABILITY, 3=EQUITY per the RPC's CASE expression.
+const BS_SECTION_KEYS = ['assets', 'liabilities', 'equity'] as const;
 
 export const getBalanceSheet = async (asOfDate?: string) => {
   const organization_id = await getCurrentOrganizationId();
-  // FIX: Function is reporting.get_balance_sheet with param p_as_of_date
   const { data, error } = await reportingDb().rpc('get_balance_sheet', {
     p_as_of_date: asOfDate || null,
     p_organization_id: organization_id,
   });
   if (error) throw new Error(error.message);
-  return data as BSData;
+
+  const result: BSData = { assets: [], liabilities: [], equity: [] };
+  for (const row of (data || []) as any[]) {
+    const key = BS_SECTION_KEYS[(row.section_order || 0) - 1];
+    if (!key) continue;
+    result[key].push({
+      code: row.code,
+      account_name: row.account_name,
+      account_type: key === 'assets' ? 'ASSET' : key === 'liabilities' ? 'LIABILITY' : 'EQUITY',
+      total: Number(row.net_amount ?? 0),
+    });
+  }
+  return result;
 };
 
 export const getCashFlow = async (start?: string, end?: string) => {
   const organization_id = await getCurrentOrganizationId();
-  // FIX: Function is reporting.get_cash_flow with params p_start_date/p_end_date
   const { data, error } = await reportingDb().rpc('get_cash_flow', {
     p_start_date: start || null,
     p_end_date: end || null,
-    p_organization_id: organization_id
+    p_organization_id: organization_id,
   });
   if (error) throw new Error(error.message);
-  return data as CFData;
+
+  const result: CFData = { operating: [], investing: [], financing: [], cash_balance: 0 };
+  const sectionMap: Record<string, keyof Omit<CFData, 'cash_balance'>> = {
+    OPERATING: 'operating', INVESTING: 'investing', FINANCING: 'financing',
+  };
+  for (const row of (data || []) as any[]) {
+    const key = sectionMap[row.section];
+    if (!key) continue;
+    result[key].push({ account_name: row.account_name, total: Number(row.amount ?? 0) });
+  }
+
+  // Cash balance as of end date: opening_balance + posted movement on each active
+  // financial account's linked ledger account, up to and including end date.
+  const { data: accounts } = await financeDb()
+    .from('financial_accounts')
+    .select('opening_balance, linked_ledger_account_id')
+    .eq('organization_id', organization_id)
+    .eq('is_active', true);
+
+  const linkedIds = [...new Set((accounts || []).map((a: any) => a.linked_ledger_account_id).filter(Boolean))];
+  let movementByAccount = new Map<string, number>();
+  if (linkedIds.length) {
+    let lineQuery = financeDb()
+      .from('journal_lines')
+      .select('account_id, base_debit, base_credit, journal_entry_id')
+      .in('account_id', linkedIds);
+    const { data: lines } = await lineQuery;
+    const entryIds = [...new Set((lines || []).map((l: any) => l.journal_entry_id).filter(Boolean))];
+    let postedIds = new Set<string>();
+    if (entryIds.length) {
+      let postedQuery = financeDb().from('journal_entries').select('id').in('id', entryIds).eq('status', 'POSTED');
+      if (end) postedQuery = postedQuery.lte('transaction_date', end);
+      const { data: posted } = await postedQuery;
+      postedIds = new Set((posted || []).map((e: any) => e.id));
+    }
+    for (const l of lines || []) {
+      if (!l.journal_entry_id || !postedIds.has(l.journal_entry_id)) continue;
+      movementByAccount.set(l.account_id, (movementByAccount.get(l.account_id) || 0) + Number(l.base_debit ?? 0) - Number(l.base_credit ?? 0));
+    }
+  }
+  result.cash_balance = (accounts || []).reduce(
+    (sum: number, a: any) => sum + Number(a.opening_balance ?? 0) + (movementByAccount.get(a.linked_ledger_account_id) || 0),
+    0
+  );
+
+  return result;
 };
 
 export const getStatementOfChangesInEquity = async (start?: string, end?: string) => {
   const organization_id = await getCurrentOrganizationId();
-  // FIX: Function is reporting.get_statement_of_changes_in_equity with params p_period_start/p_period_end
   const { data, error } = await reportingDb().rpc('get_statement_of_changes_in_equity', {
     p_period_start: start || null,
     p_period_end: end || null,
     p_organization_id: organization_id,
   });
   if (error) throw new Error(error.message);
-  return data as SOCEData;
+
+  const items = ((data || []) as any[]).map((row) => {
+    const movement = Number(row.period_movement ?? 0);
+    return {
+      account_name: row.account_name,
+      opening_balance: Number(row.opening_balance ?? 0),
+      additions: movement > 0 ? movement : 0,
+      deductions: movement < 0 ? -movement : 0,
+      transfers: 0,
+      closing_balance: Number(row.closing_balance ?? 0),
+    };
+  });
+
+  const result: SOCEData = {
+    items,
+    total_opening: items.reduce((s, i) => s + i.opening_balance, 0),
+    total_additions: items.reduce((s, i) => s + i.additions, 0),
+    total_deductions: items.reduce((s, i) => s + i.deductions, 0),
+    total_closing: items.reduce((s, i) => s + i.closing_balance, 0),
+  };
+  return result;
 };
 
-// ═══════════════════════════════════════════════════════════════════════════
-// AR/AP Aging
-// ═══════════════════════════════════════════════════════════════════════════
-
 export const getAgingReport = async () => {
-  const organization_id = await getCurrentOrganizationId();
-  // FIX: No function named aging_report exists. Views reporting.receivable_aging and
-  // reporting.payable_aging exist. Query both views and combine the results.
   const { data: receivable, error: arErr } = await reportingDb()
     .from('receivable_aging')
-    .select('*')
-    .eq('organization_id', organization_id);
+    .select('*');
   if (arErr) throw new Error(arErr.message);
 
   const { data: payable, error: apErr } = await reportingDb()
     .from('payable_aging')
-    .select('*')
-    .eq('organization_id', organization_id);
+    .select('*');
   if (apErr) throw new Error(apErr.message);
 
-  const combined = [
-    ...(receivable || []).map((r: any) => ({ ...r, aging_type: 'receivable' })),
-    ...(payable || []).map((p: any) => ({ ...p, aging_type: 'payable' })),
-  ];
-  return combined as unknown as AgingData;
+  const result: AgingData = {
+    receivable: ((receivable || []) as any[]).map((r) => ({
+      client_name: r.client_name,
+      invoice_number: r.invoice_number,
+      due_date: r.due_date,
+      total: Number(r.outstanding_base_amount ?? r.outstanding_amount ?? 0),
+      current_amount: Number(r.current_amount ?? 0),
+      overdue_1_30: Number(r.overdue_1_30_days ?? 0),
+      overdue_31_60: Number(r.overdue_31_60_days ?? 0),
+      overdue_61_90: Number(r.overdue_61_90_days ?? 0),
+      overdue_over_90: Number(r.overdue_over_90_days ?? 0),
+    })),
+    payable: ((payable || []) as any[]).map((p) => ({
+      vendor_name: p.vendor_name,
+      bill_number: p.bill_number,
+      due_date: p.due_date,
+      total: Number(p.outstanding_amount ?? 0),
+      current_amount: Number(p.current_amount ?? 0),
+      overdue_1_30: Number(p.overdue_1_30_days ?? 0),
+      overdue_31_60: Number(p.overdue_31_60_days ?? 0),
+      overdue_61_90: Number(p.overdue_61_90_days ?? 0),
+      overdue_over_90: Number(p.overdue_over_90_days ?? 0),
+    })),
+  };
+  return result;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -115,13 +210,46 @@ export const getAgingReport = async () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getProjectProfitability = async (start?: string, end?: string) => {
-  // FIX: Function is reporting.get_project_profitability with params p_start_date/p_end_date
   const { data, error } = await reportingDb().rpc('get_project_profitability', {
     p_start_date: start || null,
     p_end_date: end || null,
   });
   if (error) throw new Error(error.message);
-  return (data || []) as ProjectProfitRow[];
+  const rows = (data || []) as any[];
+
+  const projectIds = [...new Set(rows.map((r) => r.project_id).filter(Boolean))];
+  const clientByProject = new Map<string, { client_name: string; status: string }>();
+  if (projectIds.length) {
+    // public.projects stores client_name directly (no separate clients table FK)
+    const { data: projects } = await supabase
+      .from('projects')
+      .select('id, status, client_name')
+      .in('id', projectIds);
+    for (const p of projects || []) {
+      clientByProject.set(p.id, { client_name: p.client_name || 'Unassigned', status: p.status || 'Active' });
+    }
+  }
+
+  return rows.map((r) => {
+    const meta = clientByProject.get(r.project_id) || { client_name: 'Unassigned', status: 'ACTIVE' };
+    const totalCosts = Number(r.total_costs ?? 0);
+    const grossProfit = Number(r.gross_profit ?? 0);
+    return {
+      project_id: r.project_id,
+      project_name: r.project_name,
+      client_name: meta.client_name,
+      status: meta.status,
+      revenue: Number(r.total_revenue ?? 0),
+      direct_costs: totalCosts,
+      platform_fees: 0,
+      allocated_overhead: 0,
+      total_costs: totalCosts,
+      gross_profit: grossProfit,
+      net_profit: grossProfit,
+      revenue_entries: 0,
+      cost_entries: 0,
+    };
+  }) as ProjectProfitRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -155,7 +283,7 @@ export const getGeneralLedger = async (params: {
   search?: string;
   organization_id?: string;
 }) => {
-  // BUG-037 FIX: Query reporting.general_ledger view instead of non-existent RPC
+
   const page = params.page || 1;
   const pageSize = params.pageSize || 50;
   const from = (page - 1) * pageSize;
@@ -165,13 +293,12 @@ export const getGeneralLedger = async (params: {
     .from('general_ledger')
     .select('*', { count: 'exact' });
 
-  if (params.organization_id) query = query.eq('organization_id', params.organization_id);
   if (params.accountId) query = query.eq('account_id', params.accountId);
   if (params.startDate) query = query.gte('transaction_date', params.startDate);
   if (params.endDate) query = query.lte('transaction_date', params.endDate);
   if (params.search) {
     const escaped = params.search.replace(/[%_]/g, '\\$&');
-    query = query.or(`description.ilike.%${escaped}%,reference.ilike.%${escaped}%`);
+    query = query.or(`line_description.ilike.%${escaped}%,journal_description.ilike.%${escaped}%,journal_reference.ilike.%${escaped}%`);
   }
 
   const { data, error, count } = await query
@@ -179,7 +306,22 @@ export const getGeneralLedger = async (params: {
     .range(from, to);
 
   if (error) throw new Error(error.message);
-  return { rows: (data || []) as GLEntry[], total_count: count || 0 };
+
+  const rows: GLEntry[] = ((data || []) as any[]).map((r) => ({
+    id: r.line_id,
+    date: r.transaction_date,
+    ref: r.journal_reference,
+    journal_number: r.journal_reference,
+    description: r.line_description || r.journal_description,
+    debit: Number(r.base_debit ?? r.debit_amount ?? 0),
+    credit: Number(r.base_credit ?? r.credit_amount ?? 0),
+    running_balance: Number(r.running_balance ?? 0),
+    account_code: r.account_code,
+    account_name: r.account_name,
+    source_type: r.source_type,
+  }));
+
+  return { rows, total_count: count || 0 };
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -221,7 +363,19 @@ export const getTrialBalance = async (params: {
     p_organization_id: organization_id,
   });
   if (error) throw new Error(error.message);
-  return (data || []) as TBEntry[];
+
+  // BUG-006 FIX: the RPC returns {code, name, total_debit, total_credit, net_balance}
+  // but trial-balance/page.tsx reads {code, account_name, debit, credit, net}. The RPC
+  // also has no concept of a prior-period comparison, so prior_debit/prior_credit/prior_net
+  // are intentionally left undefined (the page already guards with `e.prior_net !== undefined`)
+  // rather than fabricated as zero, which would misleadingly render as "no change".
+  return ((data || []) as any[]).map((row) => ({
+    code: row.code,
+    account_name: row.name,
+    debit: Number(row.total_debit ?? 0),
+    credit: Number(row.total_credit ?? 0),
+    net: Number(row.net_balance ?? 0),
+  })) as TBEntry[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -229,173 +383,216 @@ export const getTrialBalance = async (params: {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getAccountBalances = async (organization_id?: string) => {
-  // BUG-037 FIX: Query finance.chart_of_accounts + aggregate from finance.journal_lines
-  // Fetch accounts first (no nested join — avoid TS error with Supabase generated types)
-  let query = financeDb()
-    .from('chart_of_accounts')
-    .select('id, code, name, account_type, is_active, currency, organization_id')
-    .eq('is_active', true);
+  const orgId = organization_id || (await getCurrentOrganizationId());
 
-  if (organization_id) query = query.eq('organization_id', organization_id);
+  const { data: org } = await coreDb().from('organizations').select('base_currency').eq('id', orgId).maybeSingle();
+  const baseCurrency = org?.base_currency || 'PKR';
 
-  const { data: accounts, error } = await query.order('code', { ascending: true });
+  const { data: accounts, error } = await financeDb()
+    .from('financial_accounts')
+    .select('id, account_name, account_type, currency, opening_balance, linked_ledger_account_id')
+    .eq('organization_id', orgId)
+    .eq('is_active', true)
+    .order('account_name', { ascending: true });
   if (error) throw new Error(error.message);
 
-  // Fetch journal lines separately and aggregate by account_id
-  const accountIds = (accounts || []).map((a: any) => a.id);
-  let lineQuery = financeDb()
-    .from('journal_lines')
-    .select('account_id, debit_amount, credit_amount, base_debit, base_credit, journal_entry_id');
-  if (accountIds.length > 0) {
-    lineQuery = lineQuery.in('account_id', accountIds);
-  }
-  const { data: allLines } = await lineQuery;
-  const postedEntryIds = new Set<string>();
-  if (allLines?.length) {
-    const ids = [...new Set(allLines.map((l: any) => l.journal_entry_id).filter(Boolean))];
-    if (ids.length) {
-      const { data: postedEntries } = await financeDb()
-        .from('journal_entries')
-        .select('id')
-        .in('id', ids)
-        .eq('status', 'POSTED');
-      for (const e of postedEntries || []) postedEntryIds.add(e.id);
+  const linkedIds = [...new Set((accounts || []).map((a: any) => a.linked_ledger_account_id).filter(Boolean))];
+  const movementByAccount = new Map<string, number>();
+  if (linkedIds.length) {
+    const { data: lines } = await financeDb()
+      .from('journal_lines')
+      .select('account_id, base_debit, base_credit, journal_entry_id')
+      .in('account_id', linkedIds);
+    const entryIds = [...new Set((lines || []).map((l: any) => l.journal_entry_id).filter(Boolean))];
+    let postedIds = new Set<string>();
+    if (entryIds.length) {
+      const { data: posted } = await financeDb().from('journal_entries').select('id').in('id', entryIds).eq('status', 'POSTED');
+      postedIds = new Set((posted || []).map((e: any) => e.id));
+    }
+    for (const l of lines || []) {
+      if (!l.journal_entry_id || !postedIds.has(l.journal_entry_id)) continue;
+      movementByAccount.set(l.account_id, (movementByAccount.get(l.account_id) || 0) + Number(l.base_debit ?? 0) - Number(l.base_credit ?? 0));
     }
   }
 
-  // Build a map: account_id → { totalDebit, totalCredit }
-  const lineMap = new Map<string, { totalDebit: number; totalCredit: number }>();
-  for (const l of allLines || []) {
-    if (l.journal_entry_id && !postedEntryIds.has(l.journal_entry_id)) continue;
-    const entry = lineMap.get(l.account_id) || { totalDebit: 0, totalCredit: 0 };
-    entry.totalDebit += Number(l.base_debit ?? 0);
-    entry.totalCredit += Number(l.base_credit ?? 0);
-    lineMap.set(l.account_id, entry);
+  // Most recent bank_statement per financial account, for reconciliation status
+  const accountIds = (accounts || []).map((a: any) => a.id);
+  const latestStatement = new Map<string, { status: string; reconciled_at?: string }>();
+  if (accountIds.length) {
+    const { data: statements } = await financeDb()
+      .from('bank_statements')
+      .select('financial_account_id, reconciliation_status, reconciled_at, statement_date')
+      .in('financial_account_id', accountIds)
+      .order('statement_date', { ascending: false });
+    for (const s of statements || []) {
+      if (!latestStatement.has(s.financial_account_id)) {
+        latestStatement.set(s.financial_account_id, { status: s.reconciliation_status, reconciled_at: s.reconciled_at });
+      }
+    }
   }
 
-  // Aggregate debit/credit totals per account
-  const rows = (accounts || []).map((account: any) => {
-    const aggregated = lineMap.get(account.id) || { totalDebit: 0, totalCredit: 0 };
-    const totalDebit = aggregated.totalDebit;
-    const totalCredit = aggregated.totalCredit;
-    const balance = totalDebit - totalCredit;
-    return {
-      account_id: account.id,
-      account_code: account.code,
-      account_name: account.name,
-      account_type: account.account_type,
-      currency: account.currency,
-      total_debit: totalDebit,
-      total_credit: totalCredit,
-      balance,
-    };
-  });
+  // Latest manual exchange rate per foreign currency -> base currency, if any exists
+  const foreignCurrencies = [...new Set((accounts || []).map((a: any) => a.currency).filter((c: string) => c && c !== baseCurrency))];
+  const rateByCurrency = new Map<string, number>();
+  if (foreignCurrencies.length) {
+    const { data: rates } = await financeDb()
+      .from('exchange_rates')
+      .select('from_currency, to_currency, rate, rate_date')
+      .in('from_currency', foreignCurrencies)
+      .eq('to_currency', baseCurrency)
+      .order('rate_date', { ascending: false });
+    for (const r of rates || []) {
+      if (!rateByCurrency.has(r.from_currency)) rateByCurrency.set(r.from_currency, Number(r.rate));
+    }
+  }
 
-  return rows as unknown as AccountBalanceRow[];
+  return (accounts || []).map((a: any) => {
+    const balance = Number(a.opening_balance ?? 0) + (movementByAccount.get(a.linked_ledger_account_id) || 0);
+    const stmt = latestStatement.get(a.id);
+    const reconciliation_status: AccountBalanceRow['reconciliation_status'] =
+      stmt?.status === 'COMPLETED' ? 'reconciled' : stmt?.status === 'PARTIAL' || stmt?.status === 'IN_PROGRESS' ? 'pending' : 'unreconciled';
+    const rate = a.currency === baseCurrency ? 1 : rateByCurrency.get(a.currency);
+    return {
+      account_id: a.id,
+      account_name: a.account_name,
+      account_type: a.account_type,
+      currency: a.currency,
+      balance,
+      pkr_equivalent: rate !== undefined ? balance * rate : balance,
+      reconciliation_status,
+      last_reconciled_date: stmt?.reconciled_at,
+    };
+  }) as AccountBalanceRow[];
 };
 
+// BUG-006 FIX: cash-bank/page.tsx ("Transfers & Fees" tab) reads BankTransferRow
+// {date, from_account, to_account, amount, currency, platform_fee, net_amount, status}
+// but this previously queried finance.journal_entries directly (raw header rows with
+// no from/to account, fee, or net_amount fields at all). finance.bank_transfers is the
+// actual dedicated table for this workflow (spec 5.8) and already has from_account_id/
+// to_account_id/from_amount/to_amount. Fee is only meaningful when both legs are the
+// same currency (a same-currency difference is a transfer/wire charge); when
+// currencies differ the difference is FX conversion, not a fee.
 export const getBankTransfers = async (start?: string, end?: string, organization_id?: string) => {
-  // BUG-037 FIX: Query finance.journal_entries where source_type='BANK_TRANSFER'
+  const orgId = organization_id || (await getCurrentOrganizationId());
+
   let query = financeDb()
-    .from('journal_entries')
-    .select('*')
-    .eq('source_type', 'BANK_TRANSFER');
+    .from('bank_transfers')
+    .select('id, transfer_date, from_account_id, to_account_id, from_amount, to_amount, from_currency, to_currency, status')
+    .eq('organization_id', orgId);
 
-  if (organization_id) query = query.eq('organization_id', organization_id);
-  if (start) query = query.gte('transaction_date', start);
-  if (end) query = query.lte('transaction_date', end);
+  if (start) query = query.gte('transfer_date', start);
+  if (end) query = query.lte('transfer_date', end);
 
-  const { data, error } = await query.order('transaction_date', { ascending: false });
+  const { data, error } = await query.order('transfer_date', { ascending: false });
   if (error) throw new Error(error.message);
-  return (data || []) as unknown as BankTransferRow[];
+  const rows = (data || []) as any[];
+
+  const accountIds = [...new Set([...rows.map((r) => r.from_account_id), ...rows.map((r) => r.to_account_id)].filter(Boolean))];
+  const nameById = new Map<string, string>();
+  if (accountIds.length) {
+    const { data: accounts } = await financeDb().from('financial_accounts').select('id, account_name').in('id', accountIds);
+    for (const a of accounts || []) nameById.set(a.id, a.account_name);
+  }
+
+  return rows.map((r) => {
+    const sameCurrency = r.from_currency === r.to_currency;
+    const fee = sameCurrency ? Number(r.from_amount ?? 0) - Number(r.to_amount ?? 0) : 0;
+    return {
+      id: r.id,
+      date: r.transfer_date,
+      from_account: nameById.get(r.from_account_id) || 'Unknown',
+      to_account: nameById.get(r.to_account_id) || 'Unknown',
+      amount: Number(r.from_amount ?? 0),
+      currency: r.from_currency,
+      status: r.status,
+      platform_fee: fee,
+      net_amount: Number(r.to_amount ?? 0),
+    };
+  }) as BankTransferRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Budget Variance
 // ═══════════════════════════════════════════════════════════════════════════
 
+
 export const getBudgetVariance = async (fiscalYearId?: string, organization_id?: string) => {
-  // BUG-037 FIX: Query finance.budgets with left join on budget_lines for actual data
-  // Fetch budgets with their lines (single-level nested select only)
-  let query = financeDb()
+  const orgId = organization_id || (await getCurrentOrganizationId());
+
+  let budgetQuery = supabase
     .from('budgets')
-    .select(`
-      id,
-      name,
-      fiscal_year_id,
-      total_amount,
-      budget_lines(
-        id,
-        account_id,
-        budgeted_amount
-      )
-    `);
-
-  if (organization_id) query = query.eq('organization_id', organization_id);
-  if (fiscalYearId) query = query.eq('fiscal_year_id', fiscalYearId);
-
-  const { data: budgets, error } = await query;
+    .select('id, name, category, total_amount, fiscal_year_id')
+    .eq('organization_id', orgId);
+  if (fiscalYearId) budgetQuery = budgetQuery.eq('fiscal_year_id', fiscalYearId);
+  const { data: budgets, error } = await budgetQuery;
   if (error) throw new Error(error.message);
 
-  // Collect all account_ids from budget lines to fetch actuals in one query
-  const allAccountIds: string[] = [];
-  for (const budget of budgets || []) {
-    for (const line of budget.budget_lines || []) {
-      if (line.account_id) allAccountIds.push(line.account_id);
-    }
+  const budgetIds = (budgets || []).map((b: any) => b.id);
+  if (!budgetIds.length) return [] as BudgetVarianceRow[];
+
+  const { data: lines } = await financeDb()
+    .from('budget_lines')
+    .select('id, budget_id, account_id, budgeted_amount, committed_amount')
+    .in('budget_id', budgetIds);
+
+  const { data: revisions } = await financeDb()
+    .from('budget_revisions')
+    .select('budget_id, revised_amount, status, created_at')
+    .in('budget_id', budgetIds)
+    .eq('status', 'APPROVED')
+    .order('created_at', { ascending: false });
+  const latestRevisionByBudget = new Map<string, number>();
+  for (const r of revisions || []) {
+    if (!latestRevisionByBudget.has(r.budget_id)) latestRevisionByBudget.set(r.budget_id, Number(r.revised_amount));
   }
 
-  // Fetch journal lines for all referenced accounts in a single query
-  let actualsQuery = financeDb()
-    .from('journal_lines')
-    .select('account_id, base_debit, base_credit, journal_entry_id');
-  if (allAccountIds.length > 0) {
-    actualsQuery = actualsQuery.in('account_id', allAccountIds);
-  }
-  const { data: allActualLines } = await actualsQuery;
-
-  // Build account_id → actual amount map
+  const accountIds = [...new Set((lines || []).map((l: any) => l.account_id).filter(Boolean))];
   const actualsMap = new Map<string, number>();
-  const actualIds = [...new Set((allActualLines || []).map((l: any) => l.journal_entry_id).filter(Boolean))];
-  const posted = actualIds.length ? await financeDb().from('journal_entries').select('id').in('id', actualIds).eq('status', 'POSTED') : { data: [] as any[] };
-  const postedSet = new Set((posted.data || []).map((e: any) => e.id));
-  for (const l of allActualLines || []) {
-    if (l.journal_entry_id && !postedSet.has(l.journal_entry_id)) continue;
-    const current = actualsMap.get(l.account_id) || 0;
-    actualsMap.set(l.account_id, current + Number(l.base_debit ?? 0) - Number(l.base_credit ?? 0));
-  }
-
-  // Fetch account names for display
-  const accountNamesMap = new Map<string, string>();
-  if (allAccountIds.length > 0) {
-    const { data: acctData } = await financeDb()
-      .from('chart_of_accounts')
-      .select('id, name')
-      .in('id', allAccountIds);
-    for (const a of acctData || []) {
-      accountNamesMap.set(a.id, a.name);
+  if (accountIds.length) {
+    const { data: actualLines } = await financeDb()
+      .from('journal_lines')
+      .select('account_id, base_debit, base_credit, journal_entry_id')
+      .in('account_id', accountIds);
+    const entryIds = [...new Set((actualLines || []).map((l: any) => l.journal_entry_id).filter(Boolean))];
+    let postedSet = new Set<string>();
+    if (entryIds.length) {
+      const { data: posted } = await financeDb().from('journal_entries').select('id').in('id', entryIds).eq('status', 'POSTED');
+      postedSet = new Set((posted || []).map((e: any) => e.id));
+    }
+    for (const l of actualLines || []) {
+      if (l.journal_entry_id && !postedSet.has(l.journal_entry_id)) continue;
+      actualsMap.set(l.account_id, (actualsMap.get(l.account_id) || 0) + Number(l.base_debit ?? 0) - Number(l.base_credit ?? 0));
     }
   }
 
-  // Flatten budget lines with computed variance
-  const rows: any[] = [];
-  for (const budget of budgets || []) {
-    for (const line of budget.budget_lines || []) {
-      const actual = Math.abs(actualsMap.get(line.account_id) || 0);
-      const budgeted = Number(line.budgeted_amount || 0);
-      rows.push({
-        budget_id: budget.id,
-        budget_name: budget.name,
-        account_id: line.account_id,
-        account_name: accountNamesMap.get(line.account_id) || 'Unknown',
-        budgeted_amount: budgeted,
-        actual_amount: actual,
-        variance: budgeted - actual,
-      });
-    }
+  const linesByBudget = new Map<string, any[]>();
+  for (const l of lines || []) {
+    const arr = linesByBudget.get(l.budget_id) || [];
+    arr.push(l);
+    linesByBudget.set(l.budget_id, arr);
   }
 
-  return rows as unknown as BudgetVarianceRow[];
+  return (budgets || []).map((budget: any) => {
+    const budgetLines = linesByBudget.get(budget.id) || [];
+    const committed = budgetLines.reduce((s, l) => s + Number(l.committed_amount ?? 0), 0);
+    const actual = budgetLines.reduce((s, l) => s + Math.abs(actualsMap.get(l.account_id) || 0), 0);
+    const originalBudget = Number(budget.total_amount ?? 0);
+    const revisedBudget = latestRevisionByBudget.get(budget.id) ?? originalBudget;
+    const forecast = actual + committed;
+    const variance = actual - revisedBudget;
+    return {
+      category_id: budget.id,
+      category_name: budget.category || budget.name,
+      original_budget: originalBudget,
+      revised_budget: revisedBudget,
+      committed,
+      actual,
+      forecast,
+      variance,
+      variance_pct: revisedBudget !== 0 ? (variance / revisedBudget) * 100 : 0,
+    };
+  }) as BudgetVarianceRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -403,25 +600,102 @@ export const getBudgetVariance = async (fiscalYearId?: string, organization_id?:
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getOwnershipEquity = async (organization_id?: string) => {
-  // BUG-037 FIX: Query finance.profit_distributions and finance.distribution_lines
-  let query = financeDb()
-    .from('profit_distributions')
-    .select(`
-      id,
-      distribution_date,
-      total_amount,
-      status,
-      distribution_lines(
-        id,
-        shareholder_id
-      )
-    `);
+  const orgId = organization_id || (await getCurrentOrganizationId());
 
-  if (organization_id) query = query.eq('organization_id', organization_id);
-
-  const { data, error } = await query.order('distribution_date', { ascending: false });
+  const { data: owners, error } = await financeDb()
+    .from('owners')
+    .select('id, name')
+    .eq('organization_id', orgId)
+    .eq('status', 'ACTIVE');
   if (error) throw new Error(error.message);
-  return (data || []) as unknown as OwnershipRow[];
+  if (!owners?.length) return [] as OwnershipRow[];
+  const ownerIds = owners.map((o: any) => o.id);
+
+  const { data: history } = await financeDb()
+    .from('ownership_history')
+    .select('owner_id, ownership_percentage, effective_to')
+    .in('owner_id', ownerIds)
+    .is('effective_to', null);
+  const pctByOwner = new Map<string, number>();
+  for (const h of history || []) pctByOwner.set(h.owner_id, Number(h.ownership_percentage));
+
+  const { data: capTx } = await financeDb()
+    .from('capital_transactions')
+    .select('owner_id, transaction_type, amount, base_amount')
+    .in('owner_id', ownerIds)
+    .eq('status', 'POSTED');
+  const capitalByOwner = new Map<string, number>();
+  const loansByOwner = new Map<string, number>();
+  for (const t of capTx || []) {
+    const amt = Number(t.base_amount ?? t.amount ?? 0);
+    if (t.transaction_type === 'CAPITAL_CONTRIBUTION') capitalByOwner.set(t.owner_id, (capitalByOwner.get(t.owner_id) || 0) + amt);
+    if (t.transaction_type === 'OWNER_LOAN_ADVANCE') loansByOwner.set(t.owner_id, (loansByOwner.get(t.owner_id) || 0) + amt);
+    if (t.transaction_type === 'OWNER_LOAN_REPAYMENT') loansByOwner.set(t.owner_id, (loansByOwner.get(t.owner_id) || 0) - amt);
+  }
+
+  const { data: distLines } = await financeDb()
+    .from('distribution_lines')
+    .select('owner_id, final_amount, paid_amount, payment_status')
+    .in('owner_id', ownerIds);
+  const declaredByOwner = new Map<string, number>();
+  const paidByOwner = new Map<string, number>();
+  const statusByOwner = new Map<string, string>();
+  for (const d of distLines || []) {
+    declaredByOwner.set(d.owner_id, (declaredByOwner.get(d.owner_id) || 0) + Number(d.final_amount ?? 0));
+    paidByOwner.set(d.owner_id, (paidByOwner.get(d.owner_id) || 0) + Number(d.paid_amount ?? 0));
+    statusByOwner.set(d.owner_id, d.payment_status);
+  }
+
+  const { data: distributions } = await financeDb()
+    .from('profit_distributions')
+    .select('reserve_amount, status')
+    .eq('organization_id', orgId)
+    .in('status', ['POSTED', 'PAID']);
+  const totalReserve = (distributions || []).reduce((s, d: any) => s + Number(d.reserve_amount ?? 0), 0);
+
+  // No dedicated report_mapping value for "retained earnings" is established anywhere
+  // else in this schema, so this identifies the account(s) by name — the same way an
+  // accountant would recognize a "Retained Earnings" line in the chart of accounts.
+  const { data: retainedAccounts } = await financeDb()
+    .from('chart_of_accounts')
+    .select('id')
+    .eq('organization_id', orgId)
+    .eq('account_type', 'EQUITY')
+    .ilike('name', '%retained earnings%');
+  const retainedIds = (retainedAccounts || []).map((a: any) => a.id);
+  let totalRetained = 0;
+  if (retainedIds.length) {
+    const { data: lines } = await financeDb().from('journal_lines').select('account_id, base_debit, base_credit, journal_entry_id').in('account_id', retainedIds);
+    const entryIds = [...new Set((lines || []).map((l: any) => l.journal_entry_id).filter(Boolean))];
+    let postedSet = new Set<string>();
+    if (entryIds.length) {
+      const { data: posted } = await financeDb().from('journal_entries').select('id').in('id', entryIds).eq('status', 'POSTED');
+      postedSet = new Set((posted || []).map((e: any) => e.id));
+    }
+    for (const l of lines || []) {
+      if (l.journal_entry_id && !postedSet.has(l.journal_entry_id)) continue;
+      totalRetained += Number(l.base_credit ?? 0) - Number(l.base_debit ?? 0);
+    }
+  }
+
+  return owners.map((o: any) => {
+    const pct = (pctByOwner.get(o.id) || 0) / 100;
+    const capital = capitalByOwner.get(o.id) || 0;
+    const owner_loans = loansByOwner.get(o.id) || 0;
+    const configurable_reserve = totalReserve * pct;
+    const retained_earnings = totalRetained * pct;
+    return {
+      shareholder_name: o.name,
+      capital,
+      owner_loans,
+      configurable_reserve,
+      retained_earnings,
+      total: capital + owner_loans + configurable_reserve + retained_earnings,
+      distributions_declared: declaredByOwner.get(o.id) || 0,
+      distributions_paid: paidByOwner.get(o.id) || 0,
+      payment_status: statusByOwner.get(o.id) || 'pending',
+    };
+  }) as OwnershipRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -429,53 +703,139 @@ export const getOwnershipEquity = async (organization_id?: string) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export const getPlatformSettlements = async (start?: string, end?: string, organization_id?: string) => {
-  // BUG-037 FIX: Query finance.journal_entries where source_type in ('PLATFORM_FEE','COMMISSION')
+  const orgId = organization_id || (await getCurrentOrganizationId());
+
   let query = financeDb()
-    .from('journal_entries')
-    .select('*')
-    .in('source_type', ['PLATFORM_FEE', 'COMMISSION']);
+    .from('settlement_batches')
+    .select('id, platform_id, financial_account_id, settlement_date, currency, gross_amount, expected_fee_amount, actual_fee_amount, withholding_amount, withdrawal_fee_amount, net_amount, status')
+    .eq('organization_id', orgId);
 
-  if (organization_id) query = query.eq('organization_id', organization_id);
-  if (start) query = query.gte('transaction_date', start);
-  if (end) query = query.lte('transaction_date', end);
+  if (start) query = query.gte('settlement_date', start);
+  if (end) query = query.lte('settlement_date', end);
 
-  const { data, error } = await query.order('transaction_date', { ascending: false });
+  const { data, error } = await query.order('settlement_date', { ascending: false });
   if (error) throw new Error(error.message);
-  return (data || []) as unknown as PlatformSettlementRow[];
+  const rows = (data || []) as any[];
+  if (!rows.length) return [] as PlatformSettlementRow[];
+
+  const platformIds = [...new Set(rows.map((r) => r.platform_id).filter(Boolean))];
+  const accountIds = [...new Set(rows.map((r) => r.financial_account_id).filter(Boolean))];
+  const batchIds = rows.map((r) => r.id);
+
+  const [{ data: platforms }, { data: accounts }, { data: lines }] = await Promise.all([
+    platformIds.length ? financeDb().from('platforms').select('id, name').in('id', platformIds) : Promise.resolve({ data: [] as any[] }),
+    accountIds.length ? financeDb().from('financial_accounts').select('id, account_name').in('id', accountIds) : Promise.resolve({ data: [] as any[] }),
+    financeDb().from('settlement_lines').select('settlement_batch_id, client_id, project_id').in('settlement_batch_id', batchIds),
+  ]);
+  const platformNameById = new Map((platforms || []).map((p: any) => [p.id, p.name]));
+  const accountNameById = new Map((accounts || []).map((a: any) => [a.id, a.account_name]));
+
+  const clientIds = [...new Set((lines || []).map((l: any) => l.client_id).filter(Boolean))];
+  const projectIds = [...new Set((lines || []).map((l: any) => l.project_id).filter(Boolean))];
+  const [{ data: clients }, { data: projects }] = await Promise.all([
+    clientIds.length ? supabase.from('clients').select('id, name').in('id', clientIds) : Promise.resolve({ data: [] as any[] }),
+    projectIds.length ? supabase.from('projects').select('id, name').in('id', projectIds) : Promise.resolve({ data: [] as any[] }),
+  ]);
+  const clientNameById = new Map((clients || []).map((c: any) => [c.id, c.name]));
+  const projectNameById = new Map((projects || []).map((p: any) => [p.id, p.name]));
+  const firstLineByBatch = new Map<string, { client_id?: string; project_id?: string }>();
+  for (const l of lines || []) {
+    if (!firstLineByBatch.has(l.settlement_batch_id)) firstLineByBatch.set(l.settlement_batch_id, l);
+  }
+
+  const statusMap: Record<string, string> = {
+    RECONCILED: 'reconciled', POSTED: 'pending', APPROVED: 'pending', VERIFIED: 'pending',
+    SUBMITTED: 'pending', DRAFT: 'pending', REJECTED: 'unreconciled', REVERSED: 'unreconciled',
+  };
+
+  return rows.map((r) => {
+    const gross = Number(r.gross_amount ?? 0);
+    const actualFee = Number(r.actual_fee_amount ?? 0);
+    const expectedFee = Number(r.expected_fee_amount ?? 0);
+    const line = firstLineByBatch.get(r.id);
+    return {
+      platform_name: platformNameById.get(r.platform_id) || 'Unknown',
+      account_name: accountNameById.get(r.financial_account_id) || 'Unknown',
+      client_name: (line?.client_id && clientNameById.get(line.client_id)) || 'N/A',
+      project_name: (line?.project_id && projectNameById.get(line.project_id)) || undefined,
+      currency: r.currency,
+      gross_settlement: gross,
+      expected_fee: expectedFee,
+      actual_fee: actualFee,
+      effective_rate: gross !== 0 ? (actualFee / gross) * 100 : 0,
+      deductions: actualFee + Number(r.withholding_amount ?? 0) + Number(r.withdrawal_fee_amount ?? 0),
+      net_payout: Number(r.net_amount ?? 0),
+      reconciliation_status: statusMap[r.status] || 'unreconciled',
+      fee_variance: actualFee - expectedFee,
+    };
+  }) as PlatformSettlementRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Fiscal Calendar & Close
 // ═══════════════════════════════════════════════════════════════════════════
 
+
 export const getFiscalCloseStatus = async (fiscalYearId?: string) => {
-  // FIX: No function exists. Query finance.fiscal_years and finance.accounting_periods directly.
   if (!fiscalYearId) return [] as FiscalPeriodRow[];
 
-  const [fyRes, periodsRes] = await Promise.all([
-    financeDb().from('fiscal_years').select('id, name, status, start_date, end_date').eq('id', fiscalYearId).single(),
-    financeDb().from('accounting_periods').select('id, period_number, period_name, status, start_date, end_date, closed_by, closed_at').eq('fiscal_year_id', fiscalYearId).order('period_number', { ascending: true }),
-  ]);
+  const { data: periods, error } = await financeDb()
+    .from('accounting_periods')
+    .select('id, name, status, start_date, end_date, closed_by')
+    .eq('fiscal_year_id', fiscalYearId)
+    .order('start_date', { ascending: true });
+  if (error) throw new Error(error.message);
+  if (!periods?.length) return [] as FiscalPeriodRow[];
 
-  if (fyRes.error) throw new Error(fyRes.error.message);
-  if (periodsRes.error) throw new Error(periodsRes.error.message);
+  const periodIds = periods.map((p: any) => p.id);
+  const { data: entries } = await financeDb()
+    .from('journal_entries')
+    .select('id, period_id, source_type')
+    .in('period_id', periodIds)
+    .eq('status', 'POSTED');
+  const entryIds = (entries || []).map((e: any) => e.id);
 
-  const fy = fyRes.data;
-  const periods = periodsRes.data || [];
+  const totalsByPeriod = new Map<string, { journalCount: number; debit: number; credit: number; adjustments: number }>();
+  for (const e of entries || []) {
+    const t = totalsByPeriod.get(e.period_id) || { journalCount: 0, debit: 0, credit: 0, adjustments: 0 };
+    t.journalCount += 1;
+    if (e.source_type === 'REVERSAL') t.adjustments += 1;
+    totalsByPeriod.set(e.period_id, t);
+  }
 
-  return periods.map((p: any) => ({
-    fiscal_year_id: fy.id,
-    fiscal_year_name: fy.name,
-    fiscal_year_status: fy.status,
-    period_id: p.id,
-    period_number: p.period_number,
-    period_name: p.period_name,
-    status: p.status,
-    start_date: p.start_date,
-    end_date: p.end_date,
-    closed_by: p.closed_by,
-    closed_at: p.closed_at,
-  })) as unknown as FiscalPeriodRow[];
+  if (entryIds.length) {
+    const { data: lines } = await financeDb()
+      .from('journal_lines')
+      .select('journal_entry_id, base_debit, base_credit')
+      .in('journal_entry_id', entryIds);
+    const periodByEntry = new Map<string, string>((entries || []).map((e: any) => [e.id, e.period_id]));
+    for (const l of lines || []) {
+      const periodId = periodByEntry.get(l.journal_entry_id);
+      if (!periodId) continue;
+      const t = totalsByPeriod.get(periodId)!;
+      t.debit += Number(l.base_debit ?? 0);
+      t.credit += Number(l.base_credit ?? 0);
+    }
+  }
+
+  const statusMap: Record<string, FiscalPeriodRow['status']> = {
+    PENDING: 'future', OPEN: 'open', SOFT_CLOSED: 'adjusting', HARD_CLOSED: 'closed',
+  };
+
+  return periods.map((p: any) => {
+    const t = totalsByPeriod.get(p.id) || { journalCount: 0, debit: 0, credit: 0, adjustments: 0 };
+    return {
+      period_name: p.name,
+      period_start: p.start_date,
+      period_end: p.end_date,
+      status: statusMap[p.status] || 'open',
+      journal_count: t.journalCount,
+      debit_total: t.debit,
+      credit_total: t.credit,
+      adjustment_count: t.adjustments,
+      close_checklist_complete: p.status === 'HARD_CLOSED' && !!p.closed_by,
+    };
+  }) as FiscalPeriodRow[];
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -187,3 +187,223 @@ END;
 
 
 ALTER FUNCTION "reporting"."ceo_dashboard_kpis"() OWNER TO "postgres";
+
+
+-- ============================================================================
+-- BUG-014 FIX (part 1 of 2)
+-- finance.compute_tax_liability gets a defense-in-depth organization check
+-- (was previously fetching the reconciliation by id alone, with no org scope
+-- inside the function itself — the route.ts caller already checks org
+-- ownership before invoking, but the DB function should not rely solely on
+-- that, matching the pattern used elsewhere e.g. finance.reverse_journal_entry).
+--
+-- BUG-015 FIX
+-- PBT was computed from jl.credit_amount/jl.debit_amount (original transaction-
+-- currency numerals) instead of jl.base_credit/jl.base_debit (the PKR-consolidated
+-- amounts already stored on every posted line). Any USD/EUR invoice or expense
+-- therefore mixed foreign-currency numbers directly into what is supposed to be
+-- a PKR Profit Before Tax, corrupting taxable income, gross tax, net payable and
+-- profit-after-tax for any organization with non-PKR activity (spec 5.12: PKR is
+-- the ledger and fiscal-statement currency).
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION "finance"."compute_tax_liability"("p_tax_recon_id" "uuid") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+    v_recon RECORD;
+    v_pbt NUMERIC(18,2) := 0;
+    v_total_adj NUMERIC(18,2) := 0;
+    v_taxable_income NUMERIC(18,2);
+    v_gross_tax NUMERIC(18,2) := 0;
+    v_remaining_income NUMERIC(18,2);
+    v_slab_income NUMERIC(18,2);
+    v_slab RECORD;
+    v_rule_status TEXT;
+BEGIN
+    -- BUG-014 defense-in-depth: scope to the caller's organization at the database
+    -- level too, not only in the API route, matching the pattern used elsewhere
+    -- (e.g. finance.reverse_journal_entry) for server-side-enforced controls.
+    SELECT * INTO v_recon FROM finance.tax_reconciliations
+    WHERE id = p_tax_recon_id AND organization_id = core.current_user_org_id();
+    IF NOT FOUND THEN RAISE EXCEPTION 'Tax reconciliation not found or access denied'; END IF;
+
+    SELECT status INTO v_rule_status FROM finance.tax_rule_sets WHERE id = v_recon.tax_rule_set_id;
+    IF v_rule_status IS NULL THEN RAISE EXCEPTION 'Tax rule set not found'; END IF;
+    IF v_rule_status NOT IN ('APPROVED', 'LOCKED') THEN
+        RAISE EXCEPTION 'Tax rule set must be APPROVED or LOCKED, current: %', v_rule_status;
+    END IF;
+
+    -- BUG-015 FIX: PBT must be consolidated PKR (spec 5.12: PKR is the ledger and
+    -- fiscal-statement currency), so this uses base_credit/base_debit (the PKR-converted
+    -- amounts stored on every posted line) instead of credit_amount/debit_amount (the
+    -- original transaction-currency amounts). Mixing transaction-currency numerals
+    -- directly into PBT corrupted every downstream figure for any non-PKR activity.
+    -- PBT = Revenue Net - Expense Net (in base currency)
+    -- Revenue Net = credit - debit (revenue increases on credit side)
+    -- Expense Net = debit - credit (expenses increase on debit side)
+    SELECT
+        COALESCE(SUM(CASE WHEN coa.account_type IN ('REVENUE','OTHER_INCOME')
+                          THEN jl.base_credit - jl.base_debit ELSE 0 END), 0)
+        -
+        COALESCE(SUM(CASE WHEN coa.account_type IN ('OTHER_EXPENSE','OPERATING_EXPENSE','COST_OF_SALES')
+                          THEN jl.base_debit - jl.base_credit ELSE 0 END), 0)
+    INTO v_pbt
+    FROM finance.journal_lines jl
+    JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+    JOIN finance.chart_of_accounts coa ON coa.id = jl.account_id
+    JOIN finance.accounting_periods ap ON ap.id = je.period_id
+    WHERE ap.fiscal_year_id = v_recon.fiscal_year_id
+      AND je.status = 'POSTED'
+      AND coa.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE','OTHER_INCOME','OTHER_EXPENSE');
+
+    -- Sum adjustments
+    SELECT COALESCE(SUM(amount), 0) INTO v_total_adj
+    FROM finance.tax_adjustments
+    WHERE tax_reconciliation_id = p_tax_recon_id;
+
+    v_taxable_income := v_pbt + v_total_adj;
+
+    -- Apply Tax Slabs progressively
+    v_remaining_income := v_taxable_income;
+
+    FOR v_slab IN
+        SELECT * FROM finance.tax_slabs
+        WHERE tax_rule_set_id = v_recon.tax_rule_set_id
+        ORDER BY sort_order ASC, income_from ASC
+    LOOP
+        IF v_remaining_income <= 0 THEN EXIT; END IF;
+
+        v_slab_income := LEAST(
+            v_remaining_income,
+            COALESCE(v_slab.income_to, 999999999999) - v_slab.income_from + 1
+        );
+        v_slab_income := GREATEST(v_slab_income, 0);
+
+        v_gross_tax := v_gross_tax + (v_slab_income * v_slab.tax_rate / 100.0) + v_slab.fixed_amount;
+        v_remaining_income := v_remaining_income - v_slab_income;
+    END LOOP;
+
+    UPDATE finance.tax_reconciliations SET
+         accounting_profit_before_tax = v_pbt,
+        taxable_income = v_taxable_income,
+        gross_tax_liability = v_gross_tax,
+        net_tax_payable = GREATEST(v_gross_tax - v_recon.withholding_credits - v_recon.advance_tax_credits - v_recon.other_tax_credits, 0),
+        profit_after_tax = v_pbt - GREATEST(v_gross_tax - v_recon.withholding_credits - v_recon.advance_tax_credits - v_recon.other_tax_credits, 0),
+        effective_tax_rate = CASE 
+            WHEN v_pbt > 0 
+            THEN ROUND(GREATEST(v_gross_tax - v_recon.withholding_credits - v_recon.advance_tax_credits - v_recon.other_tax_credits, 0) / v_pbt * 100, 2) 
+            ELSE 0 
+        END,
+        status = 'CALCULATED',
+        updated_at = NOW()
+    WHERE id = p_tax_recon_id;
+END;
+ $$;
+
+
+ALTER FUNCTION "finance"."compute_tax_liability"("p_tax_recon_id" "uuid") OWNER TO "postgres";
+
+-- ============================================================================
+-- BUG-014 FIX (part 2 of 2) — see approve_tax_reconciliation below.
+-- ============================================================================
+
+-- ============================================================================
+-- BUG-014 FIX (part 2 of 2): finance.approve_tax_reconciliation did not exist
+-- anywhere in the dump or migrations, so every PATCH {"action":"approve"} call
+-- from src/app/api/finance/tax/reconciliation/route.ts failed. This creates it,
+-- enforcing server-side exactly what spec 12.5.1 step 7 and Appendix A require:
+-- only CEO/Finance Head may approve (Accountant's row in Appendix A is "Config",
+-- not full approval authority), the reconciliation must actually be calculated
+-- and reviewed first (CALCULATED/UNDER_REVIEW), and the accountant who created
+-- it cannot also be the one who approves it (spec 7.1 Accountant: "Cannot
+-- normally approve own entries" — maker-checker).
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION "finance"."approve_tax_reconciliation"("p_recon_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid" DEFAULT NULL::"uuid")
+RETURNS "finance"."tax_reconciliations"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_recon RECORD;
+  v_org uuid := COALESCE(p_organization_id, core.current_user_org_id());
+  v_result finance.tax_reconciliations;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Organization context is required';
+  END IF;
+
+  IF p_user_id IS NULL THEN
+    RAISE EXCEPTION 'Approving user is required';
+  END IF;
+
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Only CEO or Finance Head may approve a tax reconciliation';
+  END IF;
+
+  SELECT * INTO v_recon
+  FROM finance.tax_reconciliations
+  WHERE id = p_recon_id AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Tax reconciliation not found or access denied';
+  END IF;
+
+  IF v_recon.status NOT IN ('CALCULATED', 'UNDER_REVIEW') THEN
+    RAISE EXCEPTION 'Tax reconciliation must be CALCULATED or UNDER_REVIEW to approve, current: %', v_recon.status;
+  END IF;
+
+  IF v_recon.created_by IS NOT NULL AND v_recon.created_by = p_user_id THEN
+    RAISE EXCEPTION 'Maker-checker: the user who created this reconciliation cannot also approve it';
+  END IF;
+
+  UPDATE finance.tax_reconciliations
+  SET status = 'ACCOUNTANT_APPROVED',
+      accountant_approved_by = p_user_id,
+      approved_at = now(),
+      rejection_reason = NULL,
+      updated_at = now()
+  WHERE id = p_recon_id
+  RETURNING * INTO v_result;
+
+  RETURN v_result;
+END;
+$$;
+
+ALTER FUNCTION "finance"."approve_tax_reconciliation"("p_recon_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
+
+GRANT EXECUTE ON FUNCTION "finance"."approve_tax_reconciliation"("p_recon_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
+
+
+-- ============================================================================
+-- BUG-014 FIX (part 3 of 3 — the actual "unguarded direct UPDATE" hole)
+-- The evidence line "ACCOUNTANT_APPROVED reachable only through an unguarded
+-- direct UPDATE from the UI" traces to finance.tax_reconciliations' own RLS
+-- UPDATE policy (tr_update_restricted): it allows ANY of CEO/admin, Finance
+-- Head, OR a plain ACCOUNTANT to UPDATE the row with no restriction on which
+-- status it can be moved to. That let an accountant set
+-- status='ACCOUNTANT_APPROVED' directly via a normal PostgREST UPDATE, self-
+-- approving their own reconciliation — exactly the maker-checker bypass spec
+-- 7.1 ("Accountant... Cannot normally approve own entries") forbids.
+--
+-- This narrows the policy to block status='ACCOUNTANT_APPROVED' from ANY
+-- direct client UPDATE, regardless of role. finance.approve_tax_reconciliation()
+-- (added above) is SECURITY DEFINER and runs as the table owner, which bypasses
+-- RLS entirely, so it is unaffected by this restriction — it remains the only
+-- path into ACCOUNTANT_APPROVED. No other status value or column is touched,
+-- so any other existing direct-update workflow (e.g. recording a filing) is
+-- left exactly as permissive as before.
+-- ============================================================================
+
+DROP POLICY IF EXISTS "tr_update_restricted" ON "finance"."tax_reconciliations";
+
+CREATE POLICY "tr_update_restricted" ON "finance"."tax_reconciliations"
+    FOR UPDATE
+    USING (((core.is_ceo_or_admin() OR core.is_finance_head() OR core.has_role('ACCOUNTANT'::text)) AND core.same_org(organization_id)))
+    WITH CHECK (
+        ((core.is_ceo_or_admin() OR core.is_finance_head() OR core.has_role('ACCOUNTANT'::text)) AND core.same_org(organization_id))
+        AND status IS DISTINCT FROM 'ACCOUNTANT_APPROVED'
+    );

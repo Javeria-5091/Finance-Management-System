@@ -78,7 +78,16 @@ export interface PostDistributionWithWHTInput {
 
 // ─── Default Withholding Tax Config (Pakistan dividend withholding) ──────────
 // Spec: "All organization defaults are seed/configuration data, not hardcoded constants"
-// This default is used only when no org-specific config exists in core.distribution_tax_config
+// This default is used only when no org-specific config exists in core.distribution_tax_config.
+//
+// BUG-016 FIX: core.distribution_tax_config did not exist anywhere in the
+// schema, so every organization silently fell back to this default with
+// empty account IDs, and postDistributionWithWHT() always returned 400
+// "no withholding tax account configured". The table now exists (see
+// supabase/migrations/P2/P2_006_bug016_profit_distribution.sql), which
+// also backfills a working default row per existing organization — this
+// constant remains only as the last-resort fallback for an org that
+// somehow still has no config row (e.g. deleted its only row).
 
 const DEFAULT_WHT_CONFIG: WithholdingTaxConfig = {
   enabled: true,
@@ -290,13 +299,19 @@ export async function postDistributionWithWHT(
   }
 
   // 5. Find required accounts
+  // BUG-016 FIX: both lookups below were missing an organization_id
+  // filter — in a multi-tenant deployment this could resolve another
+  // organization's GL account and post a distribution's retained
+  // earnings / dividend payable into the wrong org's books entirely.
   const retainedEarningsAccount = getData(
     await supabase
       .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'EQUITY')
       .eq('is_active', true)
+      .eq('organization_id', organization_id)
       .ilike('name', '%retained%')
+      .order('code', { ascending: true })
       .limit(1)
       .maybeSingle()
   );
@@ -305,18 +320,41 @@ export async function postDistributionWithWHT(
     return { error: 'Retained Earnings (EQUITY) account not found in Chart of Accounts.', status: 400 };
   }
 
-  const dividendPayableAccount = getData(
+  // BUG-016 FIX: this seeded liability account is named "Profit
+  // Distribution Payable" (code 2410), not "Dividend Payable" — the old
+  // `.ilike('name', '%dividend%')` filter could never match it, so this
+  // lookup always failed and posting was unreachable even once the WHT
+  // config existed. Match the known control-account code first
+  // (deterministic), falling back to a name search that covers both
+  // naming conventions for orgs with a differently-named account.
+  let dividendPayableAccount = getData(
     await supabase
       .schema('finance').from('chart_of_accounts')
       .select('id, code, name')
       .eq('account_type', 'LIABILITY')
       .eq('is_active', true)
-      .ilike('name', '%dividend%')
+      .eq('organization_id', organization_id)
+      .eq('code', '2410')
       .maybeSingle()
   );
 
   if (!dividendPayableAccount) {
-    return { error: 'Dividend Payable (LIABILITY) account not found in Chart of Accounts.', status: 400 };
+    dividendPayableAccount = getData(
+      await supabase
+        .schema('finance').from('chart_of_accounts')
+        .select('id, code, name')
+        .eq('account_type', 'LIABILITY')
+        .eq('is_active', true)
+        .eq('organization_id', organization_id)
+        .or('name.ilike.%dividend%,name.ilike.%distribution%payable%,name.ilike.%profit%distribution%')
+        .order('code', { ascending: true })
+        .limit(1)
+        .maybeSingle()
+    );
+  }
+
+  if (!dividendPayableAccount) {
+    return { error: 'Dividend/Profit Distribution Payable (LIABILITY) account not found in Chart of Accounts.', status: 400 };
   }
 
   // 6. Generate reference number

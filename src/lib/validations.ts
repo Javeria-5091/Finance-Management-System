@@ -298,17 +298,33 @@ export const numberingPostSchema = z.discriminatedUnion('action', [
 
 // ─── Platform Fee Management ──────────────────────────────────────────────
 const feeType = z.enum(['PERCENTAGE', 'FIXED', 'TIERED', 'SLAB']);
-const appliesTo = z.enum(['EXPENSE', 'INVOICE', 'VENDOR_BILL', 'PAYMENT_RECEIPT', 'ALL']);
+const appliesTo = z.enum(['EXPENSE', 'INVOICE', 'VENDOR_BILL', 'PAYMENT_RECEIPT', 'SETTLEMENT', 'ALL']);
 const feeNumber = z.number().finite().min(0).max(9999999999999999.99);
+// BUG-019 FIX: this endpoint now targets finance.fee_rules (+ optional
+// finance.fee_tiers rows for TIERED/SLAB), not the orphaned
+// core.platform_fee_directory table it used to write to — see
+// src/app/api/admin/platform-fees/route.ts. `min_amount`/`max_amount`
+// map to fee_rules' `min_fee`/`max_fee` (a floor/cap on the *computed
+// fee*, not the transaction amount — that's the only min/max concept
+// finance.compute_platform_fee() actually implements).
+const feeTierSchema = z.object({
+  tier_from: feeNumber,
+  tier_to: feeNumber, // 0 = unlimited
+  fee_percent: feeNumber,
+  fee_fixed: feeNumber,
+});
 const platformFeeFields = {
-  platform: z.string().trim().min(1).max(200),
+  platform: z.string().trim().min(1).max(200), // finance.platforms.code or .name
   fee_type: feeType,
+  applies_to: appliesTo.optional(),
+  priority: z.number().int().min(0).max(1000).optional(),
   fee_rate: feeNumber.nullable().optional(),
   fee_fixed_amount: feeNumber.nullable().optional(),
   description: z.string().max(2000).nullable().optional(),
   currency: currencyCode.optional(),
   min_amount: feeNumber.nullable().optional(),
   max_amount: feeNumber.nullable().optional(),
+  tiers: z.array(feeTierSchema).max(20).optional(),
 };
 export const platformFeeCreateSchema = z.object({ action: z.literal('create'), ...platformFeeFields }).strict();
 export const platformFeeUpdateSchema = z.object({
@@ -319,6 +335,7 @@ export const platformFeeUpdateSchema = z.object({
   description: z.string().max(2000).nullable().optional(),
   min_amount: feeNumber.nullable().optional(),
   max_amount: feeNumber.nullable().optional(),
+  priority: z.number().int().min(0).max(1000).optional(),
 }).strict();
 export const platformFeeToggleSchema = z.object({ action: z.literal('toggle'), id: uuidSchema }).strict();
 export const platformFeePostSchema = z.discriminatedUnion('action', [

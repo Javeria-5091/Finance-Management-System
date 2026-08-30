@@ -136,6 +136,15 @@ export async function POST(req: NextRequest) {
     }
  
     // 4. Calculate WHT and prepare journal data
+    // FIX: the request body's `withholding_override` is a plain numeric
+    // override rate (validated by the zod schema above as
+    // z.number()...), but PostDistributionWithWHTInput.withholding_override
+    // expects the richer { rate?, exempt_owner_ids?, exempt_reason? }
+    // shape used internally by calculateWithholdingTax(). These two were
+    // never reconciled, which is what TypeScript is catching here (a
+    // `number | null | undefined` isn't assignable to that object type).
+    // Map the numeric override into the object shape, and normalize
+    // null -> undefined since the service type has no `| null` member.
     const input: PostDistributionWithWHTInput = {
       distribution_id,
       organization_id: orgId,
@@ -143,7 +152,8 @@ export async function POST(req: NextRequest) {
       declared_by: auth.userId,
       description: description || undefined,
       distribution_date: distribution_date || new Date().toISOString().split('T')[0],
-      withholding_override,
+      withholding_override:
+        withholding_override != null ? { rate: withholding_override } : undefined,
       // BUG-007 FIX: pass server-side authenticated supabase client.
       supabaseClient: supabase,
     };
@@ -175,11 +185,19 @@ export async function POST(req: NextRequest) {
  
     // 6. BUG-001 FIX: Single atomic RPC call with CORRECT signature
     //    (replaces: manual header insert + manual lines insert + wrong RPC)
+    // BUG-016 FIX (defect b): the p_lines param is `jsonb` in the SQL
+    // function signature. Passing JSON.stringify(rpcLines) sends a JSON
+    // *string* value for that key, so PostgREST binds p_lines as a jsonb
+    // scalar string (the array's text, quoted) rather than a jsonb array
+    // — jsonb_array_length(p_lines) inside the function then fails
+    // because a scalar has no array length. Pass the array/object
+    // directly and let the client's own JSON body encoding handle it, the
+    // same way the already-correct finance/post-vendor-bill route does.
     const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
       p_description: description || `Profit Distribution: ${distribution_id.slice(0, 8)}`,
       p_transaction_date: distribution_date || new Date().toISOString().split('T')[0],
       p_period_id: period.id,
-      p_lines: JSON.stringify(rpcLines),
+      p_lines: rpcLines,
       p_currency: distribution.currency || 'PKR',
       p_exchange_rate: distribution.exchange_rate || 1,
       p_source_type: 'PROFIT_DISTRIBUTION',
@@ -205,17 +223,32 @@ export async function POST(req: NextRequest) {
     const reference = journal.reference || `JE-PD-${journalId}`;
  
     // 8. Update distribution lines with WHT amounts
+    // BUG-016 FIX (defect c): finance.distribution_lines' real FK column
+    // is `profit_distribution_id`, not `distribution_id` — filtering on a
+    // non-existent column matched zero rows. The four WHT columns being
+    // written now exist too (added by
+    // supabase/migrations/P2/P2_006_bug016_profit_distribution.sql). Also
+    // now checking/collecting the per-line error instead of firing the
+    // update and ignoring the result, so a failure here is visible in the
+    // response rather than silently leaving lines without their WHT
+    // breakdown after the journal has already posted.
+    let lineUpdateFailures = 0;
     for (const line of whtCalculation.lines) {
-      await supabase
+      const { error: lineUpdateError } = await supabase
         .schema('finance').from('distribution_lines')
         .update({
           withholding_amount: line.withholding_amount,
           withholding_rate: line.withholding_rate,
           net_amount: line.net_amount,
           withholding_exempt: line.withholding_exempt,
+          withholding_exempt_reason: line.withholding_exempt_reason || null,
         })
-        .eq('distribution_id', distribution_id)
+        .eq('profit_distribution_id', distribution_id)
         .eq('owner_id', line.owner_id);
+      if (lineUpdateError) {
+        console.error('Failed to update distribution line WHT breakdown:', lineUpdateError, { distribution_id, owner_id: line.owner_id });
+        lineUpdateFailures++;
+      }
     }
  
     // 9. Record WHT for tax compliance (Spec 2.10 — tax_credits_and_withholding)
@@ -266,6 +299,7 @@ export async function POST(req: NextRequest) {
       success: true,
       journalId,
       audit_log_warning: auditLogFailed ? 'Posting succeeded but the audit log entry failed to write. Please notify an administrator.' : undefined,
+      line_update_warning: lineUpdateFailures > 0 ? `Posting succeeded but ${lineUpdateFailures} distribution line(s) failed to record their withholding breakdown. Please notify an administrator.` : undefined,
       reference,
       totalDebit: journal?.total_debit,
       totalCredit: journal?.total_credit,
