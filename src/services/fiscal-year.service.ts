@@ -135,11 +135,16 @@ export async function hardCloseFiscalYear(fyId: string, reason: string): Promise
 
   // Call YEAR-END CLOSE API (calculates P&L, transfers to Retained Earnings)
   // FIX: Corrected URL from /api/finance/year-end-close to /api/year-end-close
+  // P0-03 FIX: yearEndCloseSchema (src/lib/validations.ts) requires snake_case
+  // { fiscal_year_id, description? } — it does not have a `confirm` field at
+  // all. The old camelCase { fiscalYearId, confirm:true } payload was
+  // rejected by Zod with 400 "fiscal_year_id: Required", making year-end
+  // close unreachable from the UI (Spec §12.10 step 5).
   const res = await fetch('/api/year-end-close', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ fiscalYearId: fyId, confirm: true }),
+    body: JSON.stringify({ fiscal_year_id: fyId, description: reason }),
   });
 
   if (!res.ok) {

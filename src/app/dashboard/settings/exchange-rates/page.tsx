@@ -16,7 +16,13 @@ export default function ExchangeRatesPage() {
     rate: "",
     rate_date: new Date().toISOString().split("T")[0],
     rate_type: "MANUAL",
-    source_platform: ""
+    source_platform: "",
+    // P0-09 FIX: finance.exchange_rates.evidence_reference is TEXT NOT NULL
+    // with a CHECK that it isn't blank (schema.sql ~9017) — every manual rate
+    // must cite the evidence it was entered against (Spec §5.12). The old
+    // form never captured this, so every insert failed with a Postgres
+    // not-null violation.
+    evidence_reference: ""
   });
 
   const fetchRates = async () => {
@@ -34,6 +40,10 @@ export default function ExchangeRatesPage() {
 
   const handleAddRate = async () => {
   if (!form.rate || !form.rate_date) return alert("Fill required fields");
+  // P0-09 FIX: evidence_reference is required (NOT NULL + non-blank CHECK
+  // constraint) — validate before hitting the DB so the user gets a clear
+  // message instead of a raw Postgres constraint-violation error.
+  if (!form.evidence_reference.trim()) return alert("Evidence reference is required (e.g. bank/platform screenshot reference, source URL, or invoice number)");
   setSaving(true);
   
   // Pehle user ki ID nikalte hain
@@ -49,7 +59,7 @@ export default function ExchangeRatesPage() {
 
   if (!error) {
     setShowModal(false);
-    setForm({ from_currency: "USD", to_currency: "PKR", rate: "", rate_date: new Date().toISOString().split("T")[0], rate_type: "MANUAL", source_platform: "" });
+    setForm({ from_currency: "USD", to_currency: "PKR", rate: "", rate_date: new Date().toISOString().split("T")[0], rate_type: "MANUAL", source_platform: "", evidence_reference: "" });
     fetchRates();
   } else {
     alert(error.message);
@@ -131,6 +141,11 @@ export default function ExchangeRatesPage() {
               <div className="col-span-2">
                 <label className="block text-xs font-medium text-gray-500 mb-1">Effective Date</label>
                 <input type="date" value={form.rate_date} onChange={(e) => setForm({...form, rate_date: e.target.value})} className="w-full p-2 border dark:border-gray-600 rounded-md bg-transparent dark:bg-gray-700 text-gray-900 dark:text-white text-sm" />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs font-medium text-gray-500 mb-1">Evidence Reference (required)</label>
+                <input type="text" value={form.evidence_reference} onChange={(e) => setForm({...form, evidence_reference: e.target.value})} className="w-full p-2 border dark:border-gray-600 rounded-md bg-transparent dark:bg-gray-700 text-gray-900 dark:text-white text-sm" placeholder="e.g. Bank statement ref #, screenshot URL, JazzCash receipt no." />
+                <p className="text-xs text-gray-400 mt-1">Cite the source this rate is based on — Spec §5.12 requires every manual rate to be traceable to evidence.</p>
               </div>
             </div>
             <div className="flex justify-end gap-3 mt-6 pt-4 border-t dark:border-gray-700">

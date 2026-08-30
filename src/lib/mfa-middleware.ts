@@ -16,7 +16,12 @@ import { NextResponse } from 'next/server';
 import type { AuthResult } from './api-auth';
  
 // Roles that require MFA
-const MFA_REQUIRED_ROLES = ['CEO', 'FINANCE_HEAD', 'ACCOUNTANT', 'HOD', 'PROJECT_MANAGER', 'TECHNICAL_ADMIN'];
+// P1-02 FIX (Spec §7.4: "Mandatory multi-factor authentication for CEO,
+// finance roles, technical administrators, and any user with approval or
+// export rights"): AUDITOR was missing even though auditors have export
+// rights (Spec §7.1 Auditor row), letting them be socially engineered into
+// an AAL1-only session with real access to exported financial data.
+const MFA_REQUIRED_ROLES = ['CEO', 'FINANCE_HEAD', 'ACCOUNTANT', 'HOD', 'PROJECT_MANAGER', 'TECHNICAL_ADMIN', 'AUDITOR'];
  
 /**
  * Check if a user has MFA enabled and verified.

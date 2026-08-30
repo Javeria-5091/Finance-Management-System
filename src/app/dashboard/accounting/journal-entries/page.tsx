@@ -94,23 +94,41 @@ export default function JournalEntriesPage() {
 
     setSaving(true);
     try {
-      // Get open period
+      // Get open period.
+      // P0-04 FIX: also select fiscal_year_id and organization_id — the
+      // journal header insert below needs both (finance.journal_entries has
+      // them as NOT NULL with no DEFAULT) and RLS ("ap_select_org_scoped")
+      // already restricts this SELECT to periods in the caller's own org,
+      // so it's safe to reuse the period's organization_id here rather than
+      // doing a second round-trip.
       const { data: period } = await supabase
         .schema('finance').from('accounting_periods')
-        .select('id')
+        .select('id, fiscal_year_id, organization_id')
         .eq('status', 'OPEN')
         .order('start_date', { ascending: false })
         .limit(1)
         .single();
       if (!period) { toast.error('No OPEN accounting period found.'); setSaving(false); return; }
+      if (!user?.id) { toast.error('You must be signed in to create a journal.'); setSaving(false); return; }
 
       // Insert header
+      // P0-04 FIX: finance.journal_entries requires transaction_date,
+      // fiscal_year_id, created_by and organization_id (all NOT NULL, no
+      // DEFAULT). The previous insert only sent entry_date (a nullable,
+      // legacy display column) and omitted the other three entirely, so
+      // every save failed with "null value in column transaction_date
+      // violates not-null constraint". entry_date is still set too, since
+      // the table column in the list below reads j.entry_date.
       const { data: journal, error: jErr } = await supabase.schema('finance').from('journal_entries').insert({
         reference: formRef,
         description: formDesc,
         status: 'DRAFT',
         entry_date: formDate,
+        transaction_date: formDate,
         period_id: period.id,
+        fiscal_year_id: period.fiscal_year_id,
+        created_by: user.id,
+        organization_id: period.organization_id,
         project_id: formProjectId,
         total_debit: totalDebit,
         total_credit: totalCredit,
@@ -118,8 +136,13 @@ export default function JournalEntriesPage() {
       if (jErr) throw jErr;
 
       // Insert lines
-      const lines = validLines.map(l => ({
+      // Bonus fix (same root cause as P0-04): finance.journal_lines.line_number
+      // is NOT NULL with no DEFAULT and a "line_number > 0" CHECK constraint,
+      // but it was never being sent — insert would still 500 even after the
+      // header fix above. Number lines sequentially starting at 1.
+      const lines = validLines.map((l, idx) => ({
         journal_entry_id: journal.id,
+        line_number: idx + 1,
         account_id: l.account_id,
         debit_amount: parseFloat(String(l.debit_amount)) || 0,
         credit_amount: parseFloat(String(l.credit_amount)) || 0,
@@ -187,12 +210,20 @@ export default function JournalEntriesPage() {
     if (!selectedJournal || !reason.trim()) return;
     try {
       if (pendingAction === 'reverse') {
-        // Reverse still uses RPC for proper accounting
-        const { error } = await supabase.rpc('finance.reverse_journal_entry', {
-          p_journal_id: selectedJournal.id,
-          p_reason: reason,
-          p_reversed_by: user?.id,
-        });
+        // Reverse still uses RPC for proper accounting.
+        // P0-05 FIX: must call via .schema('finance') — PostgREST looks in the
+        // default (public) schema otherwise and returns a function-not-found
+        // error. The DB function is finance.reverse_journal_entry(p_journal_id,
+        // p_reversal_date, p_reason) — it does NOT take a p_reversed_by param
+        // (it uses auth.uid() internally via SECURITY DEFINER), so p_reversal_date
+        // is required and p_reversed_by must not be sent.
+        const { error } = await supabase
+          .schema('finance')
+          .rpc('reverse_journal_entry', {
+            p_journal_id: selectedJournal.id,
+            p_reversal_date: new Date().toISOString().split('T')[0],
+            p_reason: reason,
+          });
         if (error) throw error;
       } else {
         const result = await callWorkflow('journal_entry', selectedJournal.id, pendingAction as any, reason);

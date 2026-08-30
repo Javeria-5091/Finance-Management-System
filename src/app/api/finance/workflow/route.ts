@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser, getAuthSupabase, checkApprovalLimitAsync } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
 import { workflowActionSchema, validateBody } from '@/lib/validations';
  
 const MODULES: Record<string, {
@@ -139,7 +140,17 @@ export async function POST(req: NextRequest) {
   const { supabase } = await getAuthSupabase(req);
   const auth = await getAuthUser();
   if (auth instanceof NextResponse) return auth;
- 
+  // P1-01 FIX (Spec §7.4: "Mandatory multi-factor authentication for CEO,
+  // finance roles, technical administrators, and any user with approval or
+  // export rights"): this route drives every workflow transition — submit,
+  // verify, approve, reject, reverse, reopen — across all financial and
+  // admin-adjacent modules (expense/income/invoice/vendor_bill/journal_entry/
+  // budget/credit_note). It previously never called enforceMFA at all, so an
+  // AAL1-only session for a CEO/Finance Head/Accountant/etc. could approve or
+  // reverse financial transactions without ever completing an MFA challenge.
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
+
   try {
     // P0 FIX: Zod input validation
     const rawBody = await req.json();

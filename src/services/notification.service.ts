@@ -1,6 +1,11 @@
-// FIX 8.4: notification service now uses correct schema.
-// The notifications table lives in 'core' schema, not 'public'.
-// Using .schema('core') explicitly to avoid ambiguity.
+// P0-06 FIX: the notifications table lives in the 'public' schema.
+// core.notifications does NOT exist anywhere in schema.sql / migrations —
+// every .schema('core').from('notifications') call below was failing with
+// PGRST205 "Could not find the table core.notifications in the schema
+// cache", so the entire notification subsystem was silently dead.
+// public.notifications has been extended (migration 042) with all the
+// columns this service needs, so we now just use the default (public)
+// schema client, i.e. plain .from('notifications') with no .schema() call.
 
 import { supabase as browserSupabase } from '@/lib/supabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -65,9 +70,8 @@ export const notificationService = {
     metadata?: any;
   }) {
     const db = await createDB();
-    // FIX 8.4: Use .schema('core') explicitly — table is in core schema
+    // P0-06 FIX: public schema (default) — core.notifications doesn't exist.
     const { data, error } = await db
-      .schema('core')
       .from('notifications')
       .insert({
         user_id: params.userId,
@@ -161,9 +165,8 @@ export const notificationService = {
   // Get unread count for a user
   async getUnreadCount(userId: string): Promise<number> {
     const db = await createDB();
-    // FIX 8.4: Use .schema('core') explicitly
+    // P0-06 FIX: public schema (default) — core.notifications doesn't exist.
     const { count } = await db
-      .schema('core')
       .from('notifications')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', userId)
@@ -174,8 +177,8 @@ export const notificationService = {
   // Mark as read
   async markAsRead(notificationIds: string[], userId: string) {
     const db = await createDB();
+    // P0-06 FIX: public schema (default) — core.notifications doesn't exist.
     const { error } = await db
-      .schema('core')
       .from('notifications')
       .update({ is_read: true, read_at: new Date().toISOString() })
       .in('id', notificationIds)
@@ -186,8 +189,8 @@ export const notificationService = {
   // Mark all as read for a user
   async markAllAsRead(userId: string) {
     const db = await createDB();
+    // P0-06 FIX: public schema (default) — core.notifications doesn't exist.
     const { error } = await db
-      .schema('core')
       .from('notifications')
       .update({ is_read: true, read_at: new Date().toISOString() })
       .eq('user_id', userId)

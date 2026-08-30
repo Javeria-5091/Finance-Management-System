@@ -13,6 +13,10 @@ export default function VendorPaymentBatchesPage(){
   const [accounts,setAccounts]=useState<any[]>([]); 
   const [selected,setSelected]=useState<string[]>([]); 
   const [account,setAccount]=useState(""); 
+  // P0-08 FIX: payment_method is a REQUIRED field on the actual Zod schema
+  // (createSchema in /api/finance/vendor-payments/batches/route.ts) but the
+  // old UI never captured it at all.
+  const [paymentMethod,setPaymentMethod]=useState("");
   const [loading,setLoading]=useState(true);
   const load=useCallback(async()=>{setLoading(true);
     try{const [br,billRes,accRes]=await Promise.all([fetch('/api/finance/vendor-payments/batches'),supabase.schema('finance').from('vendor_bills').select('id,bill_number,vendor_id,outstanding_amount,currency,due_date,vendors:vendor_id(name)').in('status',['POSTED','PARTIALLY_PAID']).gt('outstanding_amount',0).order('due_date'),supabase.schema('finance').from('financial_accounts').select('id,account_name,currency').eq('is_active',true).order('account_name')]);
@@ -26,7 +30,31 @@ export default function VendorPaymentBatchesPage(){
   {
     if(!selected.length||!account)
         return toast.error('Select bills and a payment account');
-    const r=await fetch('/api/finance/vendor-payments/batches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_date:new Date().toISOString().slice(0,10),financial_account_id:account,bill_ids:selected})});const j=await r.json();if(!r.ok)return toast.error(j.error);toast.success(`Batch ${j.batch.batch_number} created`);setSelected([]);load()}
+    // P0-08 FIX: the endpoint's Zod schema requires
+    // {vendor_id, payment_method, allocations:[{vendor_bill_id, allocated_amount}]}
+    // — it does NOT accept a flat bill_ids array, and it enforces (server-side)
+    // that every allocated bill belongs to the SAME vendor_id. Derive that
+    // vendor_id from the selected bills and validate it client-side too, so
+    // the user gets an immediate, clear error instead of a 400 from the API.
+    if(!paymentMethod)
+        return toast.error('Select a payment method');
+    const selectedBills=bills.filter(b=>selected.includes(b.id));
+    const vendorIds=[...new Set(selectedBills.map(b=>b.vendor_id))];
+    if(vendorIds.length!==1)
+        return toast.error('Selected bills must all belong to the same vendor');
+    const payload={
+      vendor_id:vendorIds[0],
+      payment_date:new Date().toISOString().slice(0,10),
+      payment_method:paymentMethod,
+      financial_account_id:account,
+      allocations:selectedBills.map(b=>({vendor_bill_id:b.id,allocated_amount:Number(b.outstanding_amount)})),
+    };
+    const r=await fetch('/api/finance/vendor-payments/batches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const j=await r.json();
+    if(!r.ok)return toast.error(j.error);
+    // The endpoint returns {success:true, payment}, not {batch:...}.
+    toast.success(`Payment ${j.payment?.payment_number||''} created`);
+    setSelected([]);setPaymentMethod("");load()}
   async function action(id:string,action:'submit'|'approve')
   {
     const r=await fetch(`/api/finance/vendor-payments/batches/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
@@ -46,6 +74,10 @@ export default function VendorPaymentBatchesPage(){
     <div className="grid md:grid-cols-2 gap-3">
         <select className="input" value={account} onChange={e=>setAccount(e.target.value)}>
             <option value="">Payment account</option>{accounts.map(a=><option key={a.id} value={a.id}>{a.account_name} ({a.currency})</option>)}</select>
+        <select className="input" value={paymentMethod} onChange={e=>setPaymentMethod(e.target.value)}>
+            <option value="">Payment method</option>
+            {['BANK_TRANSFER','CHEQUE','CASH','JAZZCASH','EASYPAISA','PLATFORM','OTHER'].map(m=><option key={m} value={m}>{m.replace('_',' ')}</option>)}
+        </select>
             <button onClick={create} className="bg-blue-600 text-white rounded-lg px-4 py-2">Create Payment Proposal ({selected.length})</button>
             </div>
             <div className="max-h-72 overflow-auto border rounded-lg">

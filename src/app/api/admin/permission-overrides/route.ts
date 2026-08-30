@@ -11,6 +11,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
 
 export async function GET(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
@@ -42,6 +43,10 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
+  // P1-01 FIX (Spec §7.4): granting/denying a permission override is
+  // exactly the kind of approval-rights configuration change MFA must gate.
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
 
   try {
@@ -117,6 +122,10 @@ export async function POST(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
+  // P1-01 FIX (Spec §7.4): revoking a permission override also changes
+  // access configuration and must be MFA-gated.
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
 
   try {

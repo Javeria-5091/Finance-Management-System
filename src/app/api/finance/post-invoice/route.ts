@@ -229,6 +229,32 @@ export async function POST(req: NextRequest) {
     const totalDebit = journal.total_debit || totalAmount;
     const totalCredit = journal.total_credit || totalAmount;
 
+    // P0-01 FIX (Spec §11.3 step 8): link the invoice to its GL journal so
+    // reversal/reporting logic can find it via journal_entry_id instead of
+    // relying solely on a journal_entries.source_id lookup.
+    // NOTE: public.invoices' status CHECK constraint does not include a
+    // 'POSTED' value (its lifecycle is DRAFT/.../ISSUED/PARTIALLY_PAID/PAID/...)
+    // and the table has no posted_by/posted_at columns (confirmed against
+    // schema.sql) -- so unlike expense/income/vendor_bill/credit_note we do
+    // NOT set status here; GL-posted state for invoices is tracked via
+    // journal_entry_id being non-null while status remains ISSUED/APPROVED.
+    const { error: markPostedErr } = await supabase
+      .from('invoices')
+      .update({
+        journal_entry_id: journal.id,
+        period_id: period.id,
+      })
+      .eq('id', invoiceId)
+      .eq('organization_id', orgId);
+
+    if (markPostedErr) {
+      return NextResponse.json({
+        error: 'GL journal was created but the invoice record could not be linked to it: ' + markPostedErr.message,
+        journalId: journal.id,
+        reference,
+      }, { status: 500 });
+    }
+
     // 11. Audit log
     let auditLogFailed = false;
     try {

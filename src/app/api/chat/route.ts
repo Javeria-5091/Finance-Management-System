@@ -7,21 +7,31 @@ import { DATABASE_SCHEMA } from '@/lib/schema';
 import { z } from 'zod';
 
 // Spec 9.4: Tool Registry Definition — includes required permission per tool.
+// P0-07 FIX (Spec §9.5): added `scopeByUser` per tool. execute_ai_readonly_query()
+// requires a user_id predicate whenever p_enforce_user_scope is true, and will
+// reject the query up front if the view has no such column to filter on.
+// Only reporting.v_project_profitability exposes a user_id column (see
+// schema.sql) — v_cash_position and v_tax_computation_summary are org-wide
+// aggregates with no per-user dimension at all. Set explicitly per tool so a
+// future tool addition can't silently inherit the wrong scope.
 const AI_TOOLS = {
   get_cash_position: {
     view: 'reporting.v_cash_position',
     description: 'Cash and bank balances',
     requiredPermission: 'BANK_READ',
+    scopeByUser: false,
   },
   get_project_profitability: {
     view: 'reporting.v_project_profitability',
     description: 'Project margins and costs',
     requiredPermission: 'PROJECT_READ',
+    scopeByUser: false,
   },
   get_tax_summary: {
     view: 'reporting.v_tax_computation_summary',
     description: 'PBT, taxable income, and tax summary',
     requiredPermission: 'TAX_READ',
+    scopeByUser: false,
   },
 } as const;
 
@@ -374,14 +384,37 @@ export async function POST(req: Request) {
       // ✅ FIX (Gap 2): just the inner SELECT — org/user scoping, LIMIT, and
       // JSON aggregation now all happen inside execute_ai_readonly_query()
       // itself via typed uuid parameters, not string interpolation here.
-      const innerQuery = `SELECT * FROM ${toolDef.view}`;
+      //
+      // P0-07 FIX (Spec §9.5 "Inject or enforce organization/user scope
+      // independently of the model output"): execute_ai_readonly_query()'s
+      // own safety check REQUIRES the query text to already contain a
+      // literal `organization_id = '<uuid>'` predicate (it then overwrites
+      // that UUID with the authenticated p_org_id server-side, so a caller
+      // can never smuggle in another org's ID — see schema.sql's
+      // execute_ai_readonly_query()). The old code sent a bare
+      // `SELECT * FROM ${toolDef.view}` with no predicate at all, so this
+      // safety check rejected every pre-canned tool call with
+      // "AI query rejected: organization_id predicate is required".
+      //
+      // The predicate is injected here, by the gateway, from the
+      // server-verified `orgId` — never left for the model to produce, since
+      // these tool queries aren't model-generated in the first place. A
+      // user_id predicate is added the same way, but only for tools whose
+      // underlying view actually has that column (scopeByUser) — passing
+      // p_enforce_user_scope: true for a view with no user_id column would
+      // make the DB function reject the query before it even runs.
+      const scopeClauses = [`organization_id = '${orgId}'`];
+      if (toolDef.scopeByUser) {
+        scopeClauses.push(`user_id = '${user.id}'`);
+      }
+      const innerQuery = `SELECT * FROM ${toolDef.view} WHERE ${scopeClauses.join(' AND ')}`;
 
       const startTime = Date.now();
       const { data: res, error: toolError } = await supabase.rpc('execute_ai_readonly_query', {
         query_string: innerQuery,
         p_org_id: orgId,
         p_user_id: user.id,
-        p_enforce_user_scope: enforceUserScope,
+        p_enforce_user_scope: toolDef.scopeByUser,
       });
       latencyMs = Date.now() - startTime;
 

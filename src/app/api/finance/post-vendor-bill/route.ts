@@ -295,6 +295,33 @@ export async function POST(req: NextRequest) {
     const totalDebit = journal.total_debit || 0;
     const totalCredit = journal.total_credit || 0;
 
+    // P0-01 FIX (Spec §11.3 step 8): mark the vendor bill POSTED. Without
+    // this it stays status=APPROVED forever, so it's invisible to any AP
+    // report/reconciliation that filters on status='POSTED', and the maker-
+    // checker trail (posted_by/posted_at) is never recorded.
+    // NOTE: finance.vendor_bills has posted_by/posted_at columns but no
+    // journal_entry_id column (confirmed against schema.sql) -- the link to
+    // the journal is via journal_entries.source_type='VENDOR_BILL' /
+    // source_id=vendorBillId instead.
+    const { error: markPostedErr } = await supabase
+      .schema('finance')
+      .from('vendor_bills')
+      .update({
+        status: 'POSTED',
+        posted_by: auth.userId,
+        posted_at: new Date().toISOString(),
+      })
+      .eq('id', vendorBillId)
+      .eq('organization_id', orgId);
+
+    if (markPostedErr) {
+      return NextResponse.json({
+        error: 'GL journal was created but the vendor bill could not be marked POSTED: ' + markPostedErr.message,
+        journalId: journal.id,
+        reference,
+      }, { status: 500 });
+    }
+
     // 11. Audit log
     // BUG-023 FIX: surface a failed audit write via audit_log_warning
     // instead of only console-logging it (Spec 8.1).

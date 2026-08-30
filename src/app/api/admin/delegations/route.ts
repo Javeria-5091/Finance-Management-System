@@ -8,6 +8,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
 
 export async function GET(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
@@ -35,6 +36,10 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
+  // P1-01 FIX (Spec §7.4): granting a permission delegation to another user
+  // must be MFA-gated.
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
 
   try {
@@ -100,6 +105,9 @@ export async function POST(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
+  // P1-01 FIX (Spec §7.4): revoking a delegation must be MFA-gated.
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
 
   try {

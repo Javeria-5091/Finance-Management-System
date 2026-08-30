@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
 
 const TRANSACTION_TYPES = [
   'EXPENSE', 'PURCHASE', 'VENDOR_PAYMENT', 'BUDGET_REVISION', 'JOURNAL_ENTRY',
@@ -49,6 +50,10 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
+  // P1-01 FIX (Spec §7.4): setting an approval ceiling is exactly the kind
+  // of approval-rights configuration MFA must gate.
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
 
   try {
@@ -122,6 +127,9 @@ export async function POST(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
+  // P1-01 FIX (Spec §7.4): editing an approval ceiling must be MFA-gated.
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
 
   try {
@@ -168,6 +176,9 @@ export async function PATCH(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
+  // P1-01 FIX (Spec §7.4): removing an approval ceiling must be MFA-gated.
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
 
   try {

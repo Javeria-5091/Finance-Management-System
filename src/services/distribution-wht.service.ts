@@ -476,12 +476,23 @@ export async function recordWithholdingForTaxCompliance(
         credit_amount: line.withholding_amount,
         currency: whtCalculation.currency,
         status: 'PENDING', // WHT credit remains pending until claimed/adjusted
-        notes: `Dividend WHT ${whtCalculation.reference} — net payment PKR ${Number(line.net_amount).toLocaleString()}`,
+        // P0-10 FIX: finance.tax_credits_and_withholding (schema.sql) has no
+        // `metadata` column at all — the insert below used to send
+        // { metadata: { distribution_id, ownership_percentage } }, which
+        // PostgREST rejected outright with PGRST204 "Could not find the
+        // column metadata in the schema cache", failing every WHT record
+        // insert. The table's real columns are: organization_id,
+        // tax_computation_id, fiscal_year_id, period_id, credit_type,
+        // counterparty_name, counterparty_cnic, counterparty_ntn,
+        // source_type, source_id, gross_amount, wht_rate, credit_amount,
+        // currency, status, tax_return_id, notes, created_by. Of the two
+        // values that used to live in `metadata`: distribution_id is
+        // already captured above via source_id (source_type
+        // 'PROFIT_DISTRIBUTION'), so it was redundant; ownership_percentage
+        // has no dedicated column, so it's folded into the existing
+        // free-text `notes` column instead of being dropped silently.
+        notes: `Dividend WHT ${whtCalculation.reference} — net payment PKR ${Number(line.net_amount).toLocaleString()} (ownership ${Number(line.ownership_percentage) || 0}%)`,
         created_by: postedBy,
-        metadata: {
-          distribution_id: distributionId,
-            ownership_percentage: line.ownership_percentage,
-        },
       }));
 
     if (whtRecords.length === 0) {

@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { getAuthUser } from '@/lib/api-auth';
 import { notificationCreateSchema, validateBody } from '@/lib/validations';
+
+// P0-06 FIX: notifications live in the 'public' schema (default), not
+// 'core'. core.notifications does NOT exist in schema.sql / any migration,
+// so every .schema('core').from('notifications') call below was failing
+// with PGRST205 and silently killing the whole notifications API. Table is
+// public.notifications, extended in migration 042 with the extra columns
+// (notification_type, priority, action_url, entity_*, created_by,
+// expires_at, organization_id, read_at, etc.) this route relies on.
  
 function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
@@ -21,7 +29,7 @@ export async function GET(req: NextRequest) {
     const unreadOnly = searchParams.get('unread') === 'true';
  
     let query = supabase
-      .schema('core').from('notifications')
+      .from('notifications')
       .select('*', { count: 'exact' })
       .eq('user_id', auth.userId);
  
@@ -45,7 +53,7 @@ export async function GET(req: NextRequest) {
  
     // Get unread count
     const { count: unreadCount } = await supabase
-      .schema('core').from('notifications')
+      .from('notifications')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', auth.userId)
       .eq('is_read', false);
@@ -116,7 +124,7 @@ export async function POST(req: NextRequest) {
     }
  
     const { data, error } = await supabase
-      .schema('core').from('notifications')
+      .from('notifications')
       .insert({
         user_id: targetUserId,
         title,
@@ -159,7 +167,7 @@ export async function PATCH(req: NextRequest) {
  
     if (mark_all_read) {
       const { error } = await supabase
-        .schema('core').from('notifications')
+        .from('notifications')
         .update({ is_read: true, read_at: new Date().toISOString() })
         .eq('user_id', auth.userId)
         .eq('is_read', false);
@@ -173,7 +181,7 @@ export async function PATCH(req: NextRequest) {
  
     if (notification_ids && Array.isArray(notification_ids)) {
       const { error } = await supabase
-        .schema('core').from('notifications')
+        .from('notifications')
         .update({ is_read: true, read_at: new Date().toISOString() })
         .in('id', notification_ids)
         .eq('user_id', auth.userId);
@@ -190,4 +198,3 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-

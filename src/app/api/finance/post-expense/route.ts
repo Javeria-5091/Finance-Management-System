@@ -325,6 +325,35 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
     }
     const reference = journal.reference || `JE-EX-${journalId}`;
+
+    // P0-01 FIX (Spec §11.3 step 8): the RPC only creates the journal; it never
+    // touches the source record. Without this, the expense stays status=APPROVED
+    // with journal_entry_id=NULL forever, which breaks reverse_expense_atomic
+    // (requires status='POSTED' AND journal_entry_id IS NOT NULL), makes
+    // budget-check.service.ts's .eq('status','APPROVED') filter never see this
+    // expense as "actual" spend, and undercounts the "posted this month" KPI.
+    const { error: markPostedErr } = await supabase
+      .from('expenses')
+      .update({
+        status: 'POSTED',
+        journal_entry_id: journal.id,
+        // NOTE: public.expenses has no posted_by column (only posted_at) —
+        // confirmed against schema.sql; do not add a non-existent column here.
+        posted_at: new Date().toISOString(),
+      })
+      .eq('id', expenseId)
+      .eq('organization_id', orgId);
+
+    if (markPostedErr) {
+      // The journal is already committed at this point — we cannot silently
+      // pretend posting failed. Surface it loudly so ops can reconcile the
+      // source record with the journal that now exists.
+      return NextResponse.json({
+        error: 'GL journal was created but the expense record could not be marked POSTED: ' + markPostedErr.message,
+        journalId: journal.id,
+        reference,
+      }, { status: 500 });
+    }
  
     // FIX: Use RPC for correct audit columns
     try {

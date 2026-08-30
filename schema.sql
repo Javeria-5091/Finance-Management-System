@@ -6621,41 +6621,61 @@ END;
 ALTER FUNCTION "reporting"."cash_distribution"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_aging"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_aging"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$ BEGIN
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$ DECLARE
+  v_org_id UUID;
+BEGIN
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
   RETURN json_build_object(
     'receivable', COALESCE(json_build_object(
-      'current', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND due_date >= CURRENT_DATE), 0),
-      'overdue_1_30', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND due_date < CURRENT_DATE AND due_date >= CURRENT_DATE - INTERVAL '30 days'), 0),
-      'overdue_31_60', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND due_date < CURRENT_DATE - INTERVAL '30 days' AND due_date >= CURRENT_DATE - INTERVAL '60 days'), 0),
-      'overdue_61_90', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND due_date < CURRENT_DATE - INTERVAL '60 days' AND due_date >= CURRENT_DATE - INTERVAL '90 days'), 0),
-      'overdue_over_90', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND due_date < CURRENT_DATE - INTERVAL '90 days'), 0),
-      'total', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE')), 0)
+      'current', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND organization_id = v_org_id AND due_date >= CURRENT_DATE), 0),
+      'overdue_1_30', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND organization_id = v_org_id AND due_date < CURRENT_DATE AND due_date >= CURRENT_DATE - INTERVAL '30 days'), 0),
+      'overdue_31_60', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND organization_id = v_org_id AND due_date < CURRENT_DATE - INTERVAL '30 days' AND due_date >= CURRENT_DATE - INTERVAL '60 days'), 0),
+      'overdue_61_90', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND organization_id = v_org_id AND due_date < CURRENT_DATE - INTERVAL '60 days' AND due_date >= CURRENT_DATE - INTERVAL '90 days'), 0),
+      'overdue_over_90', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND organization_id = v_org_id AND due_date < CURRENT_DATE - INTERVAL '90 days'), 0),
+      'total', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND organization_id = v_org_id), 0)
     ), '{}'::JSON),
     'payable', COALESCE(json_build_object(
-      'current', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND due_date >= CURRENT_DATE), 0),
-      'overdue_1_30', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND due_date < CURRENT_DATE AND due_date >= CURRENT_DATE - INTERVAL '30 days'), 0),
-      'overdue_31_60', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND due_date < CURRENT_DATE - INTERVAL '30 days' AND due_date >= CURRENT_DATE - INTERVAL '60 days'), 0),
-      'overdue_61_90', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND due_date < CURRENT_DATE - INTERVAL '60 days' AND due_date >= CURRENT_DATE - INTERVAL '90 days'), 0),
-      'overdue_over_90', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND due_date < CURRENT_DATE - INTERVAL '90 days'), 0),
-      'total', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID')), 0)
+      'current', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND organization_id = v_org_id AND due_date >= CURRENT_DATE), 0),
+      'overdue_1_30', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND organization_id = v_org_id AND due_date < CURRENT_DATE AND due_date >= CURRENT_DATE - INTERVAL '30 days'), 0),
+      'overdue_31_60', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND organization_id = v_org_id AND due_date < CURRENT_DATE - INTERVAL '30 days' AND due_date >= CURRENT_DATE - INTERVAL '60 days'), 0),
+      'overdue_61_90', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND organization_id = v_org_id AND due_date < CURRENT_DATE - INTERVAL '60 days' AND due_date >= CURRENT_DATE - INTERVAL '90 days'), 0),
+      'overdue_over_90', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND organization_id = v_org_id AND due_date < CURRENT_DATE - INTERVAL '90 days'), 0),
+      'total', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND organization_id = v_org_id), 0)
     ), '{}'::JSON)
   );
 END;
  $$;
 
 
-ALTER FUNCTION "reporting"."ceo_chart_aging"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."ceo_chart_aging"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_budget"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_budget"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$ BEGIN
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$ DECLARE
+  v_org_id UUID;
+BEGIN
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
   RETURN COALESCE(json_agg(row_to_json(t)), '[]'::JSON) FROM (
-    SELECT 
+    SELECT
       COALESCE(b.name, 'Uncategorized') as category,
       COALESCE(b.total_amount, 0) as budget,
       COALESCE(SUM(jl.debit_amount - jl.credit_amount), 0) as actual,
@@ -6663,39 +6683,59 @@ CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_budget"() RETURNS json
     FROM public.budgets b
     LEFT JOIN finance.journal_lines jl ON jl.description ILIKE '%' || b.name || '%'
     LEFT JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id
-    LEFT JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED'
-    WHERE b.status IN ('APPROVED','ACTIVE')
+    LEFT JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' AND je.organization_id = v_org_id
+    WHERE b.status IN ('APPROVED','ACTIVE') AND b.organization_id = v_org_id
     GROUP BY b.id, b.name, b.total_amount
   ) t;
 END;
  $$;
 
 
-ALTER FUNCTION "reporting"."ceo_chart_budget"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."ceo_chart_budget"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_cash"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_cash"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$ BEGIN
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$ DECLARE
+  v_org_id UUID;
+BEGIN
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
   RETURN COALESCE(json_agg(row_to_json(t) ORDER BY balance DESC), '[]'::JSON) FROM (
     SELECT id, account_name, institution_type, currency, masked_identifier, opening_balance as balance
-    FROM finance.financial_accounts WHERE is_active = true
+    FROM finance.financial_accounts WHERE is_active = true AND organization_id = v_org_id
   ) t;
 END;
  $$;
 
 
-ALTER FUNCTION "reporting"."ceo_chart_cash"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."ceo_chart_cash"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_categories"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_categories"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$ BEGIN
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$ DECLARE
+  v_org_id UUID;
+BEGIN
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
   RETURN json_build_object(
     'expenses', COALESCE((SELECT json_agg(row_to_json(t) ORDER BY total DESC) FROM (
-      SELECT 
+      SELECT
         CASE ca.account_type
           WHEN 'COST_OF_SALES' THEN 'Cost of Sales'
           WHEN 'OPERATING_EXPENSE' THEN 'Operating Expenses'
@@ -6706,13 +6746,13 @@ CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_categories"() RETURNS json
       FROM finance.journal_lines jl
       JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id
       JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
-      WHERE je.status = 'POSTED' AND ca.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE')
+      WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE')
       GROUP BY ca.account_type
     ) t), '[]'::JSON),
 
     'assets', COALESCE((SELECT json_agg(row_to_json(t) ORDER BY total DESC) FROM (
-      SELECT 
-        CASE 
+      SELECT
+        CASE
           WHEN ca.code LIKE '11%' THEN 'Cash & Bank'
           WHEN ca.code LIKE '12%' THEN 'Receivables'
           WHEN ca.code LIKE '13%' THEN 'Advances & Prepayments'
@@ -6726,9 +6766,9 @@ CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_categories"() RETURNS json
       FROM finance.journal_lines jl
       JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id
       JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
-      WHERE je.status = 'POSTED' AND ca.account_type = 'ASSET'
-      GROUP BY 
-        CASE 
+      WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.account_type = 'ASSET'
+      GROUP BY
+        CASE
           WHEN ca.code LIKE '11%' THEN 'Cash & Bank'
           WHEN ca.code LIKE '12%' THEN 'Receivables'
           WHEN ca.code LIKE '13%' THEN 'Advances & Prepayments'
@@ -6741,7 +6781,7 @@ CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_categories"() RETURNS json
     ) t), '[]'::JSON),
 
     'liabilities', COALESCE((SELECT json_agg(row_to_json(t) ORDER BY total DESC) FROM (
-      SELECT 
+      SELECT
         CASE
           WHEN ca.code LIKE '21%' THEN 'Accounts Payable'
           WHEN ca.code LIKE '22%' THEN 'Tax Payables'
@@ -6755,8 +6795,8 @@ CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_categories"() RETURNS json
       FROM finance.journal_lines jl
       JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id
       JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
-      WHERE je.status = 'POSTED' AND ca.account_type = 'LIABILITY'
-      GROUP BY 
+      WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.account_type = 'LIABILITY'
+      GROUP BY
         CASE
           WHEN ca.code LIKE '21%' THEN 'Accounts Payable'
           WHEN ca.code LIKE '22%' THEN 'Tax Payables'
@@ -6772,157 +6812,195 @@ END;
  $$;
 
 
-ALTER FUNCTION "reporting"."ceo_chart_categories"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."ceo_chart_categories"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_monthly"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_monthly"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$ BEGIN
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$ DECLARE
+  v_org_id UUID;
+BEGIN
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
   RETURN COALESCE(json_agg(row_to_json(t) ORDER BY sort_order), '[]'::JSON) FROM (
     SELECT TO_CHAR(ap.start_date, 'Mon YYYY') as month, TO_CHAR(ap.start_date, 'YY-MM') as month_short,
       COALESCE(SUM(CASE WHEN ca.account_type = 'REVENUE' THEN jl.credit_amount - jl.debit_amount ELSE 0 END), 0) as revenue,
       COALESCE(SUM(CASE WHEN ca.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE') THEN jl.debit_amount - jl.credit_amount ELSE 0 END), 0) as expenses,
       ap.start_date as sort_order
     FROM finance.accounting_periods ap
-    LEFT JOIN finance.journal_entries je ON je.period_id = ap.id AND je.status = 'POSTED'
+    LEFT JOIN finance.journal_entries je ON je.period_id = ap.id AND je.status = 'POSTED' AND je.organization_id = v_org_id
     LEFT JOIN finance.journal_lines jl ON jl.journal_entry_id = je.id
     LEFT JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id
-    WHERE ap.start_date >= CURRENT_DATE - INTERVAL '6 months'
+    WHERE ap.organization_id = v_org_id AND ap.start_date >= CURRENT_DATE - INTERVAL '6 months'
     GROUP BY ap.id, ap.start_date
   ) t;
 END;
  $$;
 
 
-ALTER FUNCTION "reporting"."ceo_chart_monthly"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."ceo_chart_monthly"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."ceo_dashboard_kpis"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."ceo_dashboard_kpis"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
     AS $$ DECLARE
+  v_org_id UUID;
   v_period_id UUID;
   v_prev_period_id UUID;
   v_total_cash NUMERIC := 0;
   v_monthly_expense NUMERIC := 0;
 BEGIN
-  SELECT id INTO v_period_id FROM finance.accounting_periods WHERE status = 'OPEN' ORDER BY start_date DESC LIMIT 1;
-  SELECT id INTO v_prev_period_id FROM finance.accounting_periods WHERE status IN ('OPEN','SOFT_CLOSED','HARD_CLOSED') AND id != v_period_id ORDER BY start_date DESC LIMIT 1;
-  
-  SELECT COALESCE(SUM(opening_balance), 0) INTO v_total_cash FROM finance.financial_accounts WHERE is_active = true;
-  
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
+  SELECT id INTO v_period_id FROM finance.accounting_periods WHERE status = 'OPEN' AND organization_id = v_org_id ORDER BY start_date DESC LIMIT 1;
+  SELECT id INTO v_prev_period_id FROM finance.accounting_periods WHERE status IN ('OPEN','SOFT_CLOSED','HARD_CLOSED') AND organization_id = v_org_id AND id != v_period_id ORDER BY start_date DESC LIMIT 1;
+
+  SELECT COALESCE(SUM(opening_balance), 0) INTO v_total_cash FROM finance.financial_accounts WHERE is_active = true AND organization_id = v_org_id;
+
   SELECT COALESCE(SUM(jl.debit_amount - jl.credit_amount) / NULLIF(COUNT(DISTINCT je.period_id), 1), 0) INTO v_monthly_expense
   FROM finance.journal_lines jl
   JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
   JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id
   JOIN finance.accounting_periods ap ON ap.id = je.period_id
-  WHERE je.status = 'POSTED'
+  WHERE je.status = 'POSTED' AND je.organization_id = v_org_id
     AND ca.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE')
     AND ap.status IN ('SOFT_CLOSED','HARD_CLOSED')
     AND ap.end_date >= CURRENT_DATE - INTERVAL '4 months'
     AND ap.start_date < CURRENT_DATE;
-    
+
   IF v_monthly_expense = 0 THEN
     SELECT COALESCE(SUM(jl.debit_amount - jl.credit_amount) / 3, 0) INTO v_monthly_expense
     FROM finance.journal_lines jl
     JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
     JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id
-    WHERE je.status = 'POSTED' AND ca.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE');
+    WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE');
   END IF;
 
   RETURN json_build_object(
-    'revenue_mtd', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.status = 'POSTED' AND ca.account_type = 'REVENUE'), 0),
-    'revenue_prev', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_prev_period_id AND je.status = 'POSTED' AND ca.account_type = 'REVENUE'), 0),
-    'cogs_mtd', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.status = 'POSTED' AND ca.account_type = 'COST_OF_SALES'), 0),
-    'opex_mtd', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.status = 'POSTED' AND ca.account_type = 'OPERATING_EXPENSE'), 0),
-    'other_income_mtd', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.status = 'POSTED' AND ca.account_type = 'OTHER_INCOME'), 0),
-    'other_expense_mtd', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.status = 'POSTED' AND ca.account_type = 'OTHER_EXPENSE'), 0),
-    'net_profit_mtd', COALESCE((SELECT SUM(CASE WHEN ca.normal_balance = 'CREDIT' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.status = 'POSTED' AND ca.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE','OTHER_INCOME','OTHER_EXPENSE')), 0),
-    'net_profit_prev', COALESCE((SELECT SUM(CASE WHEN ca.normal_balance = 'CREDIT' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_prev_period_id AND je.status = 'POSTED' AND ca.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE','OTHER_INCOME','OTHER_EXPENSE')), 0),
-    'total_assets', COALESCE((SELECT SUM(CASE WHEN ca.code LIKE '153%' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.account_type = 'ASSET'), 0),
-    'current_assets', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.account_type = 'ASSET' AND ca.code LIKE '1%'), 0),
-    'fixed_assets_net', COALESCE((SELECT SUM(CASE WHEN ca.code LIKE '153%' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.code LIKE '15%' OR ca.code LIKE '153%'), 0),
-    'total_liabilities', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.account_type = 'LIABILITY'), 0),
-    'current_liabilities', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.account_type = 'LIABILITY' AND ca.code LIKE '2%'), 0),
+    'revenue_mtd', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.organization_id = v_org_id AND je.status = 'POSTED' AND ca.account_type = 'REVENUE'), 0),
+    'revenue_prev', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_prev_period_id AND je.organization_id = v_org_id AND je.status = 'POSTED' AND ca.account_type = 'REVENUE'), 0),
+    'cogs_mtd', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.organization_id = v_org_id AND je.status = 'POSTED' AND ca.account_type = 'COST_OF_SALES'), 0),
+    'opex_mtd', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.organization_id = v_org_id AND je.status = 'POSTED' AND ca.account_type = 'OPERATING_EXPENSE'), 0),
+    'other_income_mtd', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.organization_id = v_org_id AND je.status = 'POSTED' AND ca.account_type = 'OTHER_INCOME'), 0),
+    'other_expense_mtd', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.organization_id = v_org_id AND je.status = 'POSTED' AND ca.account_type = 'OTHER_EXPENSE'), 0),
+    'net_profit_mtd', COALESCE((SELECT SUM(CASE WHEN ca.normal_balance = 'CREDIT' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_period_id AND je.organization_id = v_org_id AND je.status = 'POSTED' AND ca.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE','OTHER_INCOME','OTHER_EXPENSE')), 0),
+    'net_profit_prev', COALESCE((SELECT SUM(CASE WHEN ca.normal_balance = 'CREDIT' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.period_id = v_prev_period_id AND je.organization_id = v_org_id AND je.status = 'POSTED' AND ca.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE','OTHER_INCOME','OTHER_EXPENSE')), 0),
+    'total_assets', COALESCE((SELECT SUM(CASE WHEN ca.code LIKE '153%' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.account_type = 'ASSET'), 0),
+    'current_assets', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.account_type = 'ASSET' AND ca.code LIKE '1%'), 0),
+    'fixed_assets_net', COALESCE((SELECT SUM(CASE WHEN ca.code LIKE '153%' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND (ca.code LIKE '15%' OR ca.code LIKE '153%')), 0),
+    'total_liabilities', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.account_type = 'LIABILITY'), 0),
+    'current_liabilities', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.account_type = 'LIABILITY' AND ca.code LIKE '2%'), 0),
     'total_cash', v_total_cash,
     'cash_runway_months', CASE WHEN v_monthly_expense > 0 THEN FLOOR(v_total_cash / v_monthly_expense) ELSE 0 END,
-    'accounts_receivable', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE')), 0),
-    'accounts_payable', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID')), 0),
-    'retained_earnings', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.code = '3200'), 0),
-    'reserve_balance', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.code LIKE '33%'), 0),
-    'owner_capital', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.code = '3110'), 0),
-    'owner_drawings', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.code = '2420'), 0),
+    'accounts_receivable', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM public.invoices WHERE status IN ('ISSUED','PARTIALLY_PAID','OVERDUE') AND organization_id = v_org_id), 0),
+    'accounts_payable', COALESCE((SELECT SUM(COALESCE(outstanding_amount, 0)) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND organization_id = v_org_id), 0),
+    'retained_earnings', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.code = '3200'), 0),
+    'reserve_balance', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.code LIKE '33%'), 0),
+    'owner_capital', COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.code = '3110'), 0),
+    'owner_drawings', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.code = '2420'), 0),
     'distributable_profit', GREATEST(
-      COALESCE((SELECT SUM(CASE WHEN ca.normal_balance = 'CREDIT' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE','OTHER_INCOME','OTHER_EXPENSE')), 0)
-      - COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.code = '7111'), 0)
-      - COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE ca.code LIKE '33%'), 0),
+      COALESCE((SELECT SUM(CASE WHEN ca.normal_balance = 'CREDIT' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE','OTHER_INCOME','OTHER_EXPENSE')), 0)
+      - COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.code = '7111'), 0)
+      - COALESCE((SELECT SUM(jl.credit_amount - jl.debit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' WHERE je.organization_id = v_org_id AND ca.code LIKE '33%'), 0),
       0
     ),
     'pending_approvals', (
-      COALESCE((SELECT COUNT(*) FROM public.invoices WHERE status = 'SUBMITTED'), 0) +
-      COALESCE((SELECT COUNT(*) FROM finance.vendor_bills WHERE status IN ('SUBMITTED','VERIFIED')), 0) +
-      COALESCE((SELECT COUNT(*) FROM public.expenses WHERE status = 'SUBMITTED'), 0)
+      COALESCE((SELECT COUNT(*) FROM public.invoices WHERE status = 'SUBMITTED' AND organization_id = v_org_id), 0) +
+      COALESCE((SELECT COUNT(*) FROM finance.vendor_bills WHERE status IN ('SUBMITTED','VERIFIED') AND organization_id = v_org_id), 0) +
+      COALESCE((SELECT COUNT(*) FROM public.expenses WHERE status = 'SUBMITTED' AND organization_id = v_org_id), 0)
     ),
-    'unreconciled_lines', COALESCE((SELECT COUNT(*) FROM finance.statement_lines WHERE reconciliation_status = 'UNRECONCILED'), 0),
-    'risk_overdue_receivables', COALESCE((SELECT COUNT(*) FROM public.invoices WHERE status = 'OVERDUE'), 0),
-    'risk_overdue_payables', COALESCE((SELECT COUNT(*) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND due_date < CURRENT_DATE), 0),
-    'risk_unreconciled', COALESCE((SELECT COUNT(DISTINCT bank_statement_id) FROM finance.statement_lines WHERE reconciliation_status = 'UNRECONCILED'), 0),
-    'risk_pending_period_close', COALESCE((SELECT COUNT(*) FROM finance.accounting_periods WHERE status = 'OPEN' AND end_date < CURRENT_DATE + INTERVAL '7 days'), 0)
+    'unreconciled_lines', COALESCE((SELECT COUNT(*) FROM finance.statement_lines WHERE reconciliation_status = 'UNRECONCILED' AND organization_id = v_org_id), 0),
+    'risk_overdue_receivables', COALESCE((SELECT COUNT(*) FROM public.invoices WHERE status = 'OVERDUE' AND organization_id = v_org_id), 0),
+    'risk_overdue_payables', COALESCE((SELECT COUNT(*) FROM finance.vendor_bills WHERE status IN ('POSTED','PARTIALLY_PAID') AND due_date < CURRENT_DATE AND organization_id = v_org_id), 0),
+    'risk_unreconciled', COALESCE((SELECT COUNT(DISTINCT bank_statement_id) FROM finance.statement_lines WHERE reconciliation_status = 'UNRECONCILED' AND organization_id = v_org_id), 0),
+    'risk_pending_period_close', COALESCE((SELECT COUNT(*) FROM finance.accounting_periods WHERE status = 'OPEN' AND end_date < CURRENT_DATE + INTERVAL '7 days' AND organization_id = v_org_id), 0)
   );
 END;
  $$;
 
 
-ALTER FUNCTION "reporting"."ceo_dashboard_kpis"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."ceo_dashboard_kpis"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."ceo_table_audit"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."ceo_table_audit"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$
-BEGIN
-    RETURN COALESCE(json_agg(row_to_json(t)), '[]'::JSON) FROM (
-        SELECT
-            al.id,
-            al.action,
-            COALESCE(al.entity_type, al.table_name) AS module,
-            COALESCE(al.description, al.changed_columns::TEXT, '') AS details,
-            al.created_at,
-            COALESCE(al.user_name,
-                (SELECT full_name FROM public.profiles p WHERE p.user_id = COALESCE(al.user_id, al.changed_id)),
-                COALESCE(al.user_id, al.changed_by)::TEXT
-            ) AS user_name,
-            COALESCE(al.entity_type, al.table_name) AS table_name
-        FROM audit.audit_log al  --  FIXED: correct table name
-        ORDER BY al.created_at DESC
-        LIMIT 30
-    ) t;
-END;
-$$;
-
-
-ALTER FUNCTION "reporting"."ceo_table_audit"() OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "reporting"."ceo_table_equity_tax"() RETURNS json
-    LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
+    SET "search_path" TO 'pg_catalog', 'reporting', 'audit', 'public', 'core'
     AS $$ DECLARE
+  v_org_id UUID;
+BEGIN
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
+  RETURN COALESCE(json_agg(row_to_json(t)), '[]'::JSON) FROM (
+    SELECT
+      al.id,
+      al.action,
+      COALESCE(al.entity_type, al.table_name) AS module,
+      COALESCE(al.description, al.changed_columns::TEXT, '') AS details,
+      al.created_at,
+      COALESCE(al.user_name,
+        (SELECT full_name FROM public.profiles p WHERE p.user_id = COALESCE(al.user_id, al.changed_by)),
+        COALESCE(al.user_id, al.changed_by)::TEXT
+      ) AS user_name,
+      COALESCE(al.entity_type, al.table_name) AS table_name
+    FROM audit.audit_log al
+    WHERE al.organization_id = v_org_id
+    ORDER BY al.created_at DESC
+    LIMIT 30
+  ) t;
+END;
+ $$;
+
+
+ALTER FUNCTION "reporting"."ceo_table_audit"("p_organization_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "reporting"."ceo_table_equity_tax"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$ DECLARE
+  v_org_id UUID;
   v_profit_before_tax NUMERIC := 0;
 BEGIN
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
   SELECT SUM(CASE WHEN ca.normal_balance = 'CREDIT' THEN jl.credit_amount - jl.debit_amount ELSE jl.debit_amount - jl.credit_amount END)
     INTO v_profit_before_tax
   FROM finance.journal_lines jl
   JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id
   JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
   JOIN finance.accounting_periods ap ON ap.id = je.period_id
-  WHERE je.status = 'POSTED' AND ap.status = 'OPEN'
+  WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ap.status = 'OPEN'
     AND ca.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE','OTHER_INCOME','OTHER_EXPENSE');
 
   RETURN json_build_object(
     'shareholders', COALESCE((SELECT json_agg(row_to_json(t)) FROM (
-      SELECT 
+      SELECT
         CASE ca.code
           WHEN '3110' THEN 'Owner Capital'
           WHEN '2420' THEN 'Owner Drawings'
@@ -6936,21 +7014,21 @@ BEGIN
       FROM finance.journal_lines jl
       JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id
       JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
-      WHERE je.status = 'POSTED' AND ca.code IN ('3110','2420','3200','3300','3320')
+      WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.code IN ('3110','2420','3200','3300','3320')
       GROUP BY ca.code, ca.name
     ) t), '[]'::JSON),
     'tax', json_build_object(
       'profit_before_tax', v_profit_before_tax,
-      'estimated_tax', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND ca.code = '7111'), 0),
-      'withholding_credits', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND ca.code = '1410'), 0),
+      'estimated_tax', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.code = '7111'), 0),
+      'withholding_credits', COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.code = '1410'), 0),
       'tax_payable', GREATEST(
-        COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND ca.code = '7111'), 0)
-        - COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND ca.code = '1410'), 0),
+        COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.code = '7111'), 0)
+        - COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.code = '1410'), 0),
         0
       ),
-      'profit_after_tax', GREATEST(v_profit_before_tax - 
-        COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND ca.code = '7111'), 0)
-        + COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND ca.code = '1410'), 0),
+      'profit_after_tax', GREATEST(v_profit_before_tax -
+        COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.code = '7111'), 0)
+        + COALESCE((SELECT SUM(jl.debit_amount - jl.credit_amount) FROM finance.journal_lines jl JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id JOIN finance.journal_entries je ON je.id = jl.journal_entry_id WHERE je.status = 'POSTED' AND je.organization_id = v_org_id AND ca.code = '1410'), 0),
         0
       )
     )
@@ -6959,35 +7037,44 @@ END;
  $$;
 
 
-ALTER FUNCTION "reporting"."ceo_table_equity_tax"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."ceo_table_equity_tax"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."ceo_table_fiscal"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."ceo_table_fiscal"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$ DECLARE
+  v_org_id UUID;
 BEGIN
-    RETURN COALESCE(json_agg(row_to_json(t) ORDER BY t.start_date), '[]'::JSON) FROM (
-        SELECT
-            ap.id, ap.name,
-            ap.start_date, ap.end_date, ap.status,
-            EXTRACT(MONTH FROM ap.start_date)::int AS month_num,
-            EXTRACT(MONTH FROM ap.end_date)::int - EXTRACT(MONTH FROM ap.start_date)::int + 1 AS total_months
-        FROM finance.accounting_periods ap
-        --  FIXED: Use status='OPEN' instead of non-existent is_current column
-        WHERE ap.fiscal_year_id = (
-            SELECT id FROM finance.fiscal_years
-            WHERE status = 'OPEN'
-            ORDER BY start_date DESC
-            LIMIT 1
-        )
-        ORDER BY ap.start_date
-    ) t;
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
+  RETURN COALESCE(json_agg(row_to_json(t) ORDER BY t.start_date), '[]'::JSON) FROM (
+    SELECT
+      ap.id, ap.name,
+      ap.start_date, ap.end_date, ap.status,
+      EXTRACT(MONTH FROM ap.start_date)::int AS month_num,
+      EXTRACT(MONTH FROM ap.end_date)::int - EXTRACT(MONTH FROM ap.start_date)::int + 1 AS total_months
+    FROM finance.accounting_periods ap
+    WHERE ap.organization_id = v_org_id
+      AND ap.fiscal_year_id = (
+        SELECT id FROM finance.fiscal_years
+        WHERE status = 'OPEN' AND organization_id = v_org_id
+        ORDER BY start_date DESC
+        LIMIT 1
+      )
+    ORDER BY ap.start_date
+  ) t;
 END;
-$$;
+ $$;
 
 
-ALTER FUNCTION "reporting"."ceo_table_fiscal"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."ceo_table_fiscal"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date", "p_organization_id" "uuid") RETURNS TABLE("section_order" integer, "section" "text", "code" "text", "account_name" "text", "net_amount" numeric)
@@ -7336,10 +7423,20 @@ END;
 ALTER FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[], "p_organization_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."pending_approvals_list"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."pending_approvals_list"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$ BEGIN
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$ DECLARE
+  v_org_id UUID;
+BEGIN
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
   RETURN COALESCE(
     json_agg(row_to_json(t) ORDER BY t.created_at DESC)
   , '[]'::JSON) FROM (
@@ -7349,7 +7446,7 @@ CREATE OR REPLACE FUNCTION "reporting"."pending_approvals_list"() RETURNS json
       COALESCE(total_amount, 0) as amount,
       created_by, created_at,
       CASE WHEN due_date < CURRENT_DATE THEN 'HIGH' ELSE 'NORMAL' END as urgency
-    FROM public.invoices WHERE status = 'SUBMITTED'
+    FROM public.invoices WHERE status = 'SUBMITTED' AND organization_id = v_org_id
     UNION ALL
     -- Vendor Bills
     SELECT id, 'VENDOR_BILL' as module_type, bill_number as reference,
@@ -7357,7 +7454,7 @@ CREATE OR REPLACE FUNCTION "reporting"."pending_approvals_list"() RETURNS json
       COALESCE(total_amount, 0) as amount,
       created_by, created_at,
       CASE WHEN due_date < CURRENT_DATE THEN 'HIGH' ELSE 'NORMAL' END as urgency
-    FROM finance.vendor_bills WHERE status IN ('SUBMITTED','VERIFIED')
+    FROM finance.vendor_bills WHERE status IN ('SUBMITTED','VERIFIED') AND organization_id = v_org_id
     UNION ALL
     -- Expenses
     SELECT id, 'EXPENSE' as module_type, reference_number as reference,
@@ -7365,51 +7462,61 @@ CREATE OR REPLACE FUNCTION "reporting"."pending_approvals_list"() RETURNS json
       COALESCE(total_amount, 0) as amount,
       created_by, created_at,
       'NORMAL' as urgency
-    FROM public.expenses WHERE status = 'SUBMITTED'
+    FROM public.expenses WHERE status = 'SUBMITTED' AND organization_id = v_org_id
   ) t;
 END;
  $$;
 
 
-ALTER FUNCTION "reporting"."pending_approvals_list"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."pending_approvals_list"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."project_profitability"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."project_profitability"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$ BEGIN
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$ DECLARE
+  v_org_id UUID;
+BEGIN
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
   RETURN COALESCE(
     json_agg(row_to_json(t) ORDER BY t.gross_profit DESC)
   , '[]'::JSON) FROM (
-    SELECT 
+    SELECT
       p.id,
       p.name as project_name,
-      COALESCE((SELECT c.name FROM public.clients c WHERE c.id = p.client_id), 'N/A') as client_name,
+      COALESCE((SELECT c.name FROM public.clients c WHERE c.id = p.client_id AND c.organization_id = v_org_id), 'N/A') as client_name,
       COALESCE(SUM(CASE WHEN ca.account_type = 'REVENUE' THEN jl.credit_amount - jl.debit_amount ELSE 0 END), 0) as revenue,
       COALESCE(SUM(CASE WHEN ca.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE') THEN jl.debit_amount - jl.credit_amount ELSE 0 END), 0) as costs,
       COALESCE(SUM(CASE WHEN ca.account_type = 'REVENUE' THEN jl.credit_amount - jl.debit_amount ELSE 0 END), 0)
         - COALESCE(SUM(CASE WHEN ca.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE') THEN jl.debit_amount - jl.credit_amount ELSE 0 END), 0) as gross_profit,
-      CASE 
-        WHEN COALESCE(SUM(CASE WHEN ca.account_type = 'REVENUE' THEN jl.credit_amount - jl.debit_amount ELSE 0 END), 0) > 0 
+      CASE
+        WHEN COALESCE(SUM(CASE WHEN ca.account_type = 'REVENUE' THEN jl.credit_amount - jl.debit_amount ELSE 0 END), 0) > 0
         THEN ROUND(
           ((SUM(CASE WHEN ca.account_type = 'REVENUE' THEN jl.credit_amount - jl.debit_amount ELSE 0 END)
             - SUM(CASE WHEN ca.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE') THEN jl.debit_amount - jl.credit_amount ELSE 0 END))
           / NULLIF(SUM(CASE WHEN ca.account_type = 'REVENUE' THEN jl.credit_amount - jl.debit_amount ELSE 0 END), 0)) * 100, 1)
-        ELSE 0 
+        ELSE 0
       END as margin,
       p.status
     FROM public.projects p
     LEFT JOIN finance.journal_lines jl ON jl.project_id = p.id
-    LEFT JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED'
+    LEFT JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED' AND je.organization_id = v_org_id
     LEFT JOIN finance.chart_of_accounts ca ON ca.id = jl.account_id
-    WHERE ca.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE')
+    WHERE p.organization_id = v_org_id AND ca.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE')
     GROUP BY p.id, p.name, p.client_id, p.status
   ) t;
 END;
  $$;
 
 
-ALTER FUNCTION "reporting"."project_profitability"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."project_profitability"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."receivable_aging_summary"() RETURNS json
@@ -7637,14 +7744,24 @@ END;
 ALTER FUNCTION "reporting"."transaction_summary"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "reporting"."unreconciled_summary"() RETURNS json
+CREATE OR REPLACE FUNCTION "reporting"."unreconciled_summary"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$ BEGIN
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$ DECLARE
+  v_org_id UUID;
+BEGIN
+  IF NOT core.is_finance_head() THEN
+    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
+  END IF;
+  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
+  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
+    RAISE EXCEPTION 'Access denied: organization scope mismatch';
+  END IF;
+
   RETURN COALESCE(
     json_agg(row_to_json(t) ORDER BY t.unreconciled_amount DESC)
   , '[]'::JSON) FROM (
-    SELECT 
+    SELECT
       fa.id as account_id,
       fa.account_name,
       fa.institution_type,
@@ -7654,14 +7771,14 @@ CREATE OR REPLACE FUNCTION "reporting"."unreconciled_summary"() RETURNS json
     FROM finance.statement_lines sl
     JOIN finance.bank_statements bs ON bs.id = sl.bank_statement_id
     JOIN finance.financial_accounts fa ON fa.id = bs.financial_account_id
-    WHERE sl.reconciliation_status = 'UNRECONCILED'
+    WHERE sl.reconciliation_status = 'UNRECONCILED' AND fa.organization_id = v_org_id
     GROUP BY fa.id, fa.account_name, fa.institution_type
   ) t;
 END;
  $$;
 
 
-ALTER FUNCTION "reporting"."unreconciled_summary"() OWNER TO "postgres";
+ALTER FUNCTION "reporting"."unreconciled_summary"("p_organization_id" "uuid") OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "ai"."ai_conversations" (
@@ -10699,6 +10816,7 @@ CREATE TABLE IF NOT EXISTS "public"."expenses" (
     "reversal_reason" "text",
     "reversed_by" "uuid",
     "reversed_at" timestamp with time zone,
+    "receipt_hash" "text",
     CONSTRAINT "expenses_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
 );
 
@@ -10707,6 +10825,10 @@ ALTER TABLE "public"."expenses" OWNER TO "postgres";
 
 
 COMMENT ON COLUMN "public"."expenses"."organization_id" IS 'Added migration 036 (Compliance Audit Finding 4.1). Backfilled from public.profiles via user_id.';
+
+
+
+COMMENT ON COLUMN "public"."expenses"."receipt_hash" IS 'SHA-256 hash of the uploaded receipt file, mirrored from finance.attachments.file_hash (see computeFileHash() in src/app/api/finance/attachment/route.ts). Denormalized here for fast duplicate-detection lookups (Spec 5.5). NULL when the expense has no receipt attached.';
 
 
 
@@ -10989,11 +11111,33 @@ CREATE TABLE IF NOT EXISTS "public"."notifications" (
     "title" character varying(255) NOT NULL,
     "message" "text" NOT NULL,
     "is_read" boolean DEFAULT false,
-    "created_at" timestamp with time zone DEFAULT "now"()
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "notification_type" "text",
+    "priority" "text" DEFAULT 'medium'::"text",
+    "action_url" "text",
+    "entity_type" "text",
+    "entity_id" "uuid",
+    "organization_id" "uuid",
+    "recipient_roles" "text"[],
+    "source_entity_type" "text",
+    "source_entity_id" "uuid",
+    "related_entity_type" "text",
+    "related_entity_id" "uuid",
+    "triggered_by" "uuid",
+    "created_by" "uuid",
+    "metadata" "jsonb",
+    "read_at" timestamp with time zone,
+    "expires_at" timestamp with time zone,
+    CONSTRAINT "notifications_notification_type_check" CHECK ((("notification_type" IS NULL) OR ("notification_type" = ANY (ARRAY['APPROVAL_PENDING'::"text", 'PAYMENT_DUE'::"text", 'BUDGET_ALERT'::"text", 'SYSTEM'::"text", 'WORKFLOW'::"text", 'REMINDER'::"text", 'OVERDUE'::"text", 'INFO'::"text", 'BUDGET_CAUTION'::"text", 'BUDGET_WARNING'::"text", 'BUDGET_BLOCKED'::"text", 'BUDGET_EXCEEDED'::"text"])))),
+    CONSTRAINT "notifications_priority_check" CHECK ((("priority" IS NULL) OR ("priority" = ANY (ARRAY['low'::"text", 'medium'::"text", 'high'::"text", 'urgent'::"text", 'info'::"text", 'critical'::"text"]))))
 );
 
 
 ALTER TABLE "public"."notifications" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."notifications" IS 'In-app notifications (Spec §13.4). Extended in migration 042 (P0-06 fix) with notification_type/priority/action_url/entity_*/organization_id/recipient_roles/source_entity_*/related_entity_*/triggered_by/created_by/metadata/read_at/expires_at so notification.service.ts inserts succeed. Table stays in the public schema (NOT core.notifications, which never existed) so it keeps its existing RLS policy, audit trigger, and the public.notification_deliveries FK intact.';
+
 
 
 CREATE OR REPLACE VIEW "public"."organization_config" WITH ("security_invoker"='true') AS
@@ -14352,11 +14496,19 @@ CREATE INDEX "idx_expenses_date" ON "public"."expenses" USING "btree" ("expense_
 
 
 
+CREATE INDEX "idx_expenses_dup_lookup" ON "public"."expenses" USING "btree" ("organization_id", "vendor_id", "amount", "expense_date");
+
+
+
 CREATE INDEX "idx_expenses_organization_id" ON "public"."expenses" USING "btree" ("organization_id");
 
 
 
 CREATE INDEX "idx_expenses_project_id" ON "public"."expenses" USING "btree" ("project_id");
+
+
+
+CREATE INDEX "idx_expenses_receipt_hash" ON "public"."expenses" USING "btree" ("organization_id", "receipt_hash") WHERE ("receipt_hash" IS NOT NULL);
 
 
 
@@ -14413,6 +14565,18 @@ CREATE INDEX "idx_notification_deliveries_status" ON "public"."notification_deli
 
 
 CREATE INDEX "idx_notification_prefs_user" ON "public"."notification_preferences" USING "btree" ("user_id");
+
+
+
+CREATE INDEX "idx_notifications_entity" ON "public"."notifications" USING "btree" ("entity_type", "entity_id");
+
+
+
+CREATE INDEX "idx_notifications_org" ON "public"."notifications" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_notifications_user_unread" ON "public"."notifications" USING "btree" ("user_id", "is_read") WHERE ("is_read" = false);
 
 
 
@@ -16971,6 +17135,21 @@ ALTER TABLE ONLY "public"."invoices"
 
 ALTER TABLE ONLY "public"."notification_deliveries"
     ADD CONSTRAINT "notification_deliveries_notification_id_fkey" FOREIGN KEY ("notification_id") REFERENCES "public"."notifications"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."notifications"
+    ADD CONSTRAINT "notifications_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."notifications"
+    ADD CONSTRAINT "notifications_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."notifications"
+    ADD CONSTRAINT "notifications_triggered_by_fkey" FOREIGN KEY ("triggered_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
 
 
 
@@ -19555,7 +19734,6 @@ GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", 
 
 
 
-
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
@@ -19854,48 +20032,48 @@ GRANT ALL ON FUNCTION "reporting"."cash_distribution"() TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."ceo_chart_aging"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."ceo_chart_aging"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."ceo_chart_aging"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_chart_aging"("p_organization_id" "uuid") TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."ceo_chart_budget"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."ceo_chart_budget"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."ceo_chart_budget"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_chart_budget"("p_organization_id" "uuid") TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."ceo_chart_cash"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."ceo_chart_cash"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."ceo_chart_cash"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_chart_cash"("p_organization_id" "uuid") TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."ceo_chart_categories"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."ceo_chart_categories"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."ceo_chart_categories"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_chart_categories"("p_organization_id" "uuid") TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."ceo_chart_monthly"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."ceo_chart_monthly"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."ceo_chart_monthly"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_chart_monthly"("p_organization_id" "uuid") TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."ceo_dashboard_kpis"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."ceo_dashboard_kpis"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."ceo_dashboard_kpis"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_dashboard_kpis"("p_organization_id" "uuid") TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."ceo_table_audit"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."ceo_table_audit"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."ceo_table_audit"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_table_audit"("p_organization_id" "uuid") TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."ceo_table_equity_tax"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."ceo_table_equity_tax"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."ceo_table_equity_tax"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_table_equity_tax"("p_organization_id" "uuid") TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."ceo_table_fiscal"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."ceo_table_fiscal"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."ceo_table_fiscal"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."ceo_table_fiscal"("p_organization_id" "uuid") TO "authenticated";
 
 
 
@@ -19909,13 +20087,13 @@ GRANT ALL ON FUNCTION "reporting"."get_project_profitability"("p_start_date" "da
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."pending_approvals_list"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."pending_approvals_list"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."pending_approvals_list"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."pending_approvals_list"("p_organization_id" "uuid") TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."project_profitability"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."project_profitability"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."project_profitability"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."project_profitability"("p_organization_id" "uuid") TO "authenticated";
 
 
 
@@ -19944,8 +20122,16 @@ GRANT ALL ON FUNCTION "reporting"."transaction_summary"() TO "authenticated";
 
 
 
-REVOKE ALL ON FUNCTION "reporting"."unreconciled_summary"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"() TO "authenticated";
+REVOKE ALL ON FUNCTION "reporting"."unreconciled_summary"("p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."unreconciled_summary"("p_organization_id" "uuid") TO "authenticated";
+
+
+
+
+
+
+
+
 
 
 
@@ -20071,6 +20257,11 @@ GRANT ALL ON TABLE "core"."user_permission_overrides" TO "service_role";
 
 GRANT ALL ON TABLE "core"."user_roles" TO "authenticated";
 GRANT ALL ON TABLE "core"."user_roles" TO "service_role";
+
+
+
+
+
 
 
 
@@ -20792,7 +20983,6 @@ GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_ro
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 
 
-
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "service_role";
 
@@ -20839,4 +21029,3 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
-

@@ -6,6 +6,7 @@ import {
 } from '@/lib/validations';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { getAuthUser, requirePermission } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
 import { createServerClient } from '@supabase/ssr';
 import { createClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
@@ -96,6 +97,11 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
+  // P1-01 FIX (Spec §7.4): role/account creation is exactly the kind of
+  // "approval or export rights" action MFA must gate — enforce it here so
+  // an AAL1-only session cannot create/promote accounts.
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
  
   try {
@@ -360,6 +366,10 @@ export async function POST(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
+  // P1-01 FIX (Spec §7.4): this is the exact repro from the ticket — a
+  // role change via PATCH must not succeed on an AAL1-only session.
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
  
   try {

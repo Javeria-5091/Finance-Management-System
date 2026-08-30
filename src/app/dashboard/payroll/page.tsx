@@ -385,10 +385,17 @@ export default function PayrollPage() {
 
     if (action === "post") {
       try {
-        const res = await fetch(`/api/payroll/runs`, {
-          method: "PUT",
+        // P0-11 FIX: PUT /api/payroll/runs is the plain status-update route
+        // and explicitly refuses posting (see src/app/api/payroll/runs/route.ts
+        // PUT handler: "Use /api/finance/payroll for posting..."). Posting
+        // needs an accounting period + control accounts resolved and a GL
+        // journal created — that logic only exists in the dedicated
+        // POST /api/finance/payroll route (action: 'post'), so call that
+        // instead. Its body shape is { action, run_id }, not { runId, action }.
+        const res = await fetch(`/api/finance/payroll`, {
+          method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ runId: run.id, action: "post" }),
+          body: JSON.stringify({ action: "post", run_id: run.id }),
         });
         const result = await res.json();
         if (res.ok) {

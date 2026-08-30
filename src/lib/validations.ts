@@ -62,7 +62,11 @@ export const paymentReversalSchema = z.object({
 
 // ─── Workflow Action ───
 export const workflowActionSchema = z.object({
-  module: z.enum(['expense', 'income', 'invoice', 'vendor_bill', 'journal_entry']),
+  // P0-02 FIX: enum was missing 'budget' and 'credit_note', which exist in the
+  // MODULES dict in workflow/route.ts. Without these, credit notes could never
+  // reach APPROVED (blocking GL posting) and budgets could never reach APPROVED
+  // (silently disabling budget enforcement system-wide).
+  module: z.enum(['expense', 'income', 'invoice', 'vendor_bill', 'journal_entry', 'budget', 'credit_note']),
   recordId: uuidSchema,
   action: z.enum(['submit', 'verify', 'approve', 'post', 'reject', 'reverse', 'reopen', 'issue', 'cancel']),
   reason: z.string().max(500).optional(),

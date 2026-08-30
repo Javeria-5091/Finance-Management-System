@@ -172,6 +172,31 @@ export async function POST(req: NextRequest) {
     }
     const reference = journal.reference || `JE-IN-${journalId}`;
 
+    // P0-01 FIX (Spec §11.3 step 8): mark the source record POSTED. Without
+    // this the income stays status=APPROVED with journal_entry_id=NULL, which
+    // breaks reverse_income_atomic (requires status='POSTED' AND
+    // journal_entry_id IS NOT NULL) and makes GL-posted income invisible to
+    // reports/dashboards that key off status or journal_entry_id.
+    // NOTE: public.incomes has no posted_by column (only posted_at) --
+    // confirmed against schema.sql.
+    const { error: markPostedErr } = await supabase
+      .from('incomes')
+      .update({
+        status: 'POSTED',
+        journal_entry_id: journal.id,
+        posted_at: new Date().toISOString(),
+      })
+      .eq('id', incomeId)
+      .eq('organization_id', auth.orgId);
+
+    if (markPostedErr) {
+      return NextResponse.json({
+        error: 'GL journal was created but the income record could not be marked POSTED: ' + markPostedErr.message,
+        journalId: journal.id,
+        reference,
+      }, { status: 500 });
+    }
+
     // 11. Audit log
     let auditLogFailed = false;
     try {
