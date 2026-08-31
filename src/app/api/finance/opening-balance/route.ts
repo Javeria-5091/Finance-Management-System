@@ -54,92 +54,26 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: `Opening balances must balance. Total Debit: ${totalDebit.toFixed(2)}, Total Credit: ${totalCredit.toFixed(2)}, Difference: ${(totalDebit - totalCredit).toFixed(2)}` }, { status: 400 });
       }
  
-      // Get open period for the fiscal year
-      let periodId: string | null = null;
-      if (fiscalYearId) {
-        const period = (await supabase
-          .schema('finance').from('accounting_periods')
-          .select('id')
-          .eq('fiscal_year_id', fiscalYearId)
-          .eq('organization_id', auth.orgId)
-          .order('start_date', { ascending: true })
-          .limit(1)
-          .single()).data;
-        periodId = period?.id || null;
-      }
- 
-      // Get next batch number
-      const { data: numData } = await supabase.schema('finance').rpc('get_next_number', {
-        p_type: 'OBI',
+      // FND-FIN-012 FIX: journal creation and every opening_balance_imports
+      // row are now committed by one SECURITY DEFINER transaction.
+      const { data: importResult, error: importErr } = await supabase.schema('finance').rpc('import_opening_balance_atomic', {
+        p_rows: rows.map((row) => ({
+          ...row,
+          debit_amount: Math.abs(Number(row.debit_amount) || 0),
+          credit_amount: Math.abs(Number(row.credit_amount) || 0),
+        })),
+        p_fiscal_year_id: fiscalYearId || null,
+        p_import_batch_id: `OBI-${Date.now().toString().slice(-10)}`,
+        p_transaction_date: new Date().toISOString().slice(0, 10),
       });
-      const batchId = numData || `OBI-${Date.now().toString().slice(-6)}`;
-      const batchSourceId = crypto.randomUUID();
- 
-      // BUG-001 FIX: Build journal lines with CORRECT column names (debit_amount/credit_amount)
-      const rpcLines = [];
-      for (const row of rows) {
-        const debit = Math.abs(Number(row.debit_amount) || 0);
-        const credit = Math.abs(Number(row.credit_amount) || 0);
- 
-        if (debit > 0) {
-          rpcLines.push({
-            account_id: row.account_id || null,
-            account_code: row.account_code,
-            debit_amount: debit,
-            credit_amount: 0,
-            description: `Opening Balance - ${row.account_name || row.account_code}`,
-          });
-        }
-        if (credit > 0) {
-          rpcLines.push({
-            account_id: row.account_id || null,
-            account_code: row.account_code,
-            debit_amount: 0,
-            credit_amount: credit,
-            description: `Opening Balance - ${row.account_name || row.account_code}`,
-          });
-        }
+
+      if (importErr || !importResult) {
+        return NextResponse.json({ error: 'Atomic opening-balance import failed: ' + (importErr?.message || 'Unknown error') }, { status: 500 });
       }
- 
-      // BUG-001 FIX: Use `finance.post_journal_entry` (with schema prefix) and CORRECT parameter names
-      // BUG-001 FIX (part 2): p_lines is jsonb — JSON.stringify(rpcLines)
-      // double-encodes it into a jsonb scalar string and crashes
-      // jsonb_array_length(p_lines) inside the function. Pass the array.
-      const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
-        p_description: 'Opening Balance Import',
-        p_transaction_date: new Date().toISOString().split('T')[0],
-        p_period_id: periodId,
-        p_lines: rpcLines,
-        p_currency: 'PKR',
-        p_exchange_rate: 1,
-        p_source_type: 'OPENING_BALANCE',
-        p_source_id: batchSourceId,
-      });
- 
-      if (postErr) {
-        return NextResponse.json({ error: 'Posting failed: ' + postErr.message }, { status: 500 });
-      }
- 
-      // Track each import row
-      for (const row of rows) {
-        await supabase.schema('finance').from('opening_balance_imports').insert({
-          organization_id: auth.orgId,
-          import_batch_id: batchId,
-          account_id: row.account_id || null,
-          account_code: row.account_code,
-          account_name: row.account_name || '',
-          debit_amount: Number(row.debit_amount) || 0,
-          credit_amount: Number(row.credit_amount) || 0,
-          currency: row.currency || 'PKR',
-          exchange_rate: Number(row.exchange_rate) || 1,
-          base_amount: (Number(row.debit_amount) || Number(row.credit_amount) || 0) * (Number(row.exchange_rate) || 1),
-          fiscal_year_id: fiscalYearId || null,
-          status: 'IMPORTED',
-          journal_entry_id: journalId || null,
-          imported_by: auth.userId,
-        });
-      }
- 
+
+      const batchId = importResult.batch_id;
+      const journalId = importResult.journal_id;
+
       // BUG-027 FIX: Use proper audit RPC instead of raw insert
       await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,

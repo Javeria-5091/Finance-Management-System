@@ -3360,6 +3360,112 @@ COMMENT ON FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p_o
 
 
 
+CREATE OR REPLACE FUNCTION "finance"."import_opening_balance_atomic"("p_batch_id" "text", "p_fiscal_year_id" "uuid", "p_rows" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_period_id uuid;
+  v_journal_id uuid;
+  v_row jsonb;
+  v_account_id uuid;
+  v_debit numeric(18,2);
+  v_credit numeric(18,2);
+  v_rate numeric(18,6);
+  v_total_dr numeric(18,2) := 0;
+  v_total_cr numeric(18,2) := 0;
+  v_lines jsonb := '[]'::jsonb;
+  v_source_id uuid := gen_random_uuid();
+BEGIN
+  IF p_user_id IS NULL OR p_user_id <> auth.uid() OR NOT core.same_org(p_organization_id) THEN
+    RAISE EXCEPTION 'Invalid authenticated organization context';
+  END IF;
+  IF p_rows IS NULL OR jsonb_typeof(p_rows) <> 'array' OR jsonb_array_length(p_rows) = 0 THEN
+    RAISE EXCEPTION 'rows array is required';
+  END IF;
+
+  SELECT id INTO v_period_id
+  FROM finance.accounting_periods
+  WHERE organization_id = p_organization_id
+    AND status = 'OPEN'
+    AND (p_fiscal_year_id IS NULL OR fiscal_year_id = p_fiscal_year_id)
+  ORDER BY start_date ASC
+  LIMIT 1;
+  IF v_period_id IS NULL THEN
+    RAISE EXCEPTION 'No OPEN accounting period found for the selected fiscal year';
+  END IF;
+
+  FOR v_row IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
+    SELECT id INTO v_account_id
+    FROM finance.chart_of_accounts
+    WHERE organization_id = p_organization_id
+      AND (id = NULLIF(v_row->>'account_id','')::uuid OR code = v_row->>'account_code')
+      AND is_active = true AND posting_allowed = true
+    LIMIT 1;
+    IF v_account_id IS NULL THEN
+      RAISE EXCEPTION 'Account % not found in your organization', v_row->>'account_code';
+    END IF;
+
+    v_debit := round(abs(COALESCE((v_row->>'debit_amount')::numeric, 0)), 2);
+    v_credit := round(abs(COALESCE((v_row->>'credit_amount')::numeric, 0)), 2);
+    IF (v_debit = 0 AND v_credit = 0) OR (v_debit > 0 AND v_credit > 0) THEN
+      RAISE EXCEPTION 'Each opening balance row must contain exactly one non-zero side';
+    END IF;
+    v_total_dr := v_total_dr + v_debit;
+    v_total_cr := v_total_cr + v_credit;
+    v_lines := v_lines || jsonb_build_array(jsonb_build_object(
+      'account_id', v_account_id,
+      'debit_amount', v_debit,
+      'credit_amount', v_credit,
+      'description', 'Opening Balance - ' || COALESCE(v_row->>'account_name', v_row->>'account_code')
+    ));
+  END LOOP;
+
+  IF abs(v_total_dr - v_total_cr) > 0.01 THEN
+    RAISE EXCEPTION 'Opening balances must balance. Total Debit: %, Total Credit: %', v_total_dr, v_total_cr;
+  END IF;
+
+  v_journal_id := finance.post_journal_entry(
+    p_description => 'Opening Balance Import ' || p_batch_id,
+    p_transaction_date => CURRENT_DATE,
+    p_period_id => v_period_id,
+    p_lines => v_lines,
+    p_currency => 'PKR',
+    p_exchange_rate => 1,
+    p_source_type => 'OPENING_BALANCE',
+    p_source_id => v_source_id
+  );
+
+  FOR v_row IN SELECT * FROM jsonb_array_elements(p_rows) LOOP
+    SELECT id INTO v_account_id
+    FROM finance.chart_of_accounts
+    WHERE organization_id = p_organization_id
+      AND (id = NULLIF(v_row->>'account_id','')::uuid OR code = v_row->>'account_code')
+      AND is_active = true AND posting_allowed = true
+    LIMIT 1;
+    v_rate := COALESCE((v_row->>'exchange_rate')::numeric, 1);
+    INSERT INTO finance.opening_balance_imports (
+      organization_id, import_batch_id, account_id, account_code, account_name,
+      debit_amount, credit_amount, currency, exchange_rate, base_amount,
+      fiscal_year_id, status, journal_entry_id, imported_by
+    ) VALUES (
+      p_organization_id, p_batch_id, v_account_id, v_row->>'account_code', COALESCE(v_row->>'account_name',''),
+      round(abs(COALESCE((v_row->>'debit_amount')::numeric,0)),2),
+      round(abs(COALESCE((v_row->>'credit_amount')::numeric,0)),2),
+      COALESCE(v_row->>'currency','PKR'), v_rate,
+      round((abs(COALESCE((v_row->>'debit_amount')::numeric,0)) + abs(COALESCE((v_row->>'credit_amount')::numeric,0))) * v_rate,2),
+      p_fiscal_year_id, 'IMPORTED', v_journal_id, p_user_id
+    );
+  END LOOP;
+
+  RETURN jsonb_build_object('batch_id',p_batch_id,'journal_id',v_journal_id,'period_id',v_period_id,'rows',jsonb_array_length(p_rows));
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."import_opening_balance_atomic"("p_batch_id" "text", "p_fiscal_year_id" "uuid", "p_rows" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."is_date_in_open_period"("p_date" "date") RETURNS boolean
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
@@ -6125,6 +6231,232 @@ $$;
 ALTER FUNCTION "finance"."reverse_vendor_bill_atomic"("p_vendor_bill_id" "uuid", "p_reversal_date" "date", "p_reason" "text") OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "finance"."vendor_bills" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "bill_number" "text",
+    "vendor_id" "uuid" NOT NULL,
+    "bill_date" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "due_date" "date",
+    "currency" "text" DEFAULT 'PKR'::"text",
+    "exchange_rate" numeric(18,4) DEFAULT 1,
+    "subtotal" numeric(18,2) DEFAULT 0,
+    "tax_amount" numeric(18,2) DEFAULT 0,
+    "withholding_amount" numeric(18,2) DEFAULT 0,
+    "discount_amount" numeric(18,2) DEFAULT 0,
+    "total_amount" numeric(18,2) NOT NULL,
+    "base_subtotal" numeric(18,2) DEFAULT 0,
+    "base_tax_amount" numeric(18,2) DEFAULT 0,
+    "base_withholding_amount" numeric(18,2) DEFAULT 0,
+    "base_discount_amount" numeric(18,2) DEFAULT 0,
+    "base_total_amount" numeric(18,2) NOT NULL,
+    "amount_paid" numeric(18,2) DEFAULT 0,
+    "outstanding_amount" numeric(18,2) DEFAULT 0,
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "project_id" "uuid",
+    "description" "text",
+    "submitted_by" "uuid",
+    "submitted_at" timestamp with time zone,
+    "verified_by" "uuid",
+    "verified_at" timestamp with time zone,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "posted_by" "uuid",
+    "posted_at" timestamp with time zone,
+    "rejection_reason" "text",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    "organization_id" "uuid" NOT NULL,
+    "rate_date" "date",
+    "rate_source" "text",
+    "rate_snapshot" "jsonb",
+    CONSTRAINT "vendor_bills_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'PARTIALLY_PAID'::"text", 'PAID'::"text", 'REVERSED'::"text", 'CANCELLED'::"text"])))
+);
+
+
+ALTER TABLE "finance"."vendor_bills" OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."save_vendor_bill_atomic"("p_bill_id" "uuid", "p_payload" "jsonb", "p_lines" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "finance"."vendor_bills"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_bill finance.vendor_bills;
+  v_vendor_org uuid;
+  v_line jsonb;
+  v_bill_number text;
+  v_status text;
+BEGIN
+  IF p_user_id IS NULL OR p_user_id <> auth.uid() OR NOT core.same_org(p_organization_id) THEN
+    RAISE EXCEPTION 'Invalid authenticated organization context';
+  END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to save vendor bills';
+  END IF;
+  IF p_payload IS NULL OR p_lines IS NULL OR jsonb_typeof(p_lines) <> 'array' OR jsonb_array_length(p_lines) = 0 THEN
+    RAISE EXCEPTION 'Vendor bill requires at least one line';
+  END IF;
+
+  SELECT organization_id INTO v_vendor_org FROM finance.vendors WHERE id = (p_payload->>'vendor_id')::uuid;
+  IF v_vendor_org IS NULL OR v_vendor_org <> p_organization_id THEN
+    RAISE EXCEPTION 'Vendor not found in your organization';
+  END IF;
+
+  v_status := COALESCE(p_payload->>'status','DRAFT');
+  IF v_status <> 'DRAFT' THEN
+    RAISE EXCEPTION 'New/edited vendor bills must be saved as DRAFT';
+  END IF;
+
+  IF p_bill_id IS NULL THEN
+    v_bill_number := COALESCE(NULLIF(p_payload->>'bill_number',''), finance.get_next_number('VENDOR_BILL', p_organization_id));
+    INSERT INTO finance.vendor_bills (
+      bill_number,vendor_id,project_id,bill_date,due_date,currency,exchange_rate,
+      subtotal,tax_amount,withholding_amount,discount_amount,total_amount,
+      base_subtotal,base_tax_amount,base_withholding_amount,base_discount_amount,base_total_amount,
+      amount_paid,outstanding_amount,status,description,created_by,organization_id
+    ) VALUES (
+      v_bill_number,(p_payload->>'vendor_id')::uuid,NULLIF(p_payload->>'project_id','')::uuid,
+      (p_payload->>'bill_date')::date,NULLIF(p_payload->>'due_date','')::date,
+      COALESCE(p_payload->>'currency','PKR'),COALESCE((p_payload->>'exchange_rate')::numeric,1),
+      COALESCE((p_payload->>'subtotal')::numeric,0),COALESCE((p_payload->>'tax_amount')::numeric,0),
+      COALESCE((p_payload->>'withholding_amount')::numeric,0),COALESCE((p_payload->>'discount_amount')::numeric,0),
+      (p_payload->>'total_amount')::numeric,COALESCE((p_payload->>'base_subtotal')::numeric,0),
+      COALESCE((p_payload->>'base_tax_amount')::numeric,0),COALESCE((p_payload->>'base_withholding_amount')::numeric,0),
+      COALESCE((p_payload->>'base_discount_amount')::numeric,0),(p_payload->>'base_total_amount')::numeric,
+      COALESCE((p_payload->>'amount_paid')::numeric,0),(p_payload->>'outstanding_amount')::numeric,
+      'DRAFT',NULLIF(p_payload->>'description',''),p_user_id,p_organization_id
+    ) RETURNING * INTO v_bill;
+  ELSE
+    SELECT * INTO v_bill FROM finance.vendor_bills
+    WHERE id=p_bill_id AND organization_id=p_organization_id FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Vendor bill not found'; END IF;
+    IF v_bill.status NOT IN ('DRAFT','SUBMITTED','VERIFIED','APPROVED') THEN
+      RAISE EXCEPTION 'Only editable vendor bills can be changed';
+    END IF;
+
+    UPDATE finance.vendor_bills SET
+      vendor_id=(p_payload->>'vendor_id')::uuid,
+      project_id=NULLIF(p_payload->>'project_id','')::uuid,
+      bill_date=(p_payload->>'bill_date')::date,
+      due_date=NULLIF(p_payload->>'due_date','')::date,
+      currency=COALESCE(p_payload->>'currency','PKR'),
+      exchange_rate=COALESCE((p_payload->>'exchange_rate')::numeric,1),
+      subtotal=COALESCE((p_payload->>'subtotal')::numeric,0),
+      tax_amount=COALESCE((p_payload->>'tax_amount')::numeric,0),
+      withholding_amount=COALESCE((p_payload->>'withholding_amount')::numeric,0),
+      discount_amount=COALESCE((p_payload->>'discount_amount')::numeric,0),
+      total_amount=(p_payload->>'total_amount')::numeric,
+      base_subtotal=COALESCE((p_payload->>'base_subtotal')::numeric,0),
+      base_tax_amount=COALESCE((p_payload->>'base_tax_amount')::numeric,0),
+      base_withholding_amount=COALESCE((p_payload->>'base_withholding_amount')::numeric,0),
+      base_discount_amount=COALESCE((p_payload->>'base_discount_amount')::numeric,0),
+      base_total_amount=(p_payload->>'base_total_amount')::numeric,
+      amount_paid=COALESCE((p_payload->>'amount_paid')::numeric,0),
+      outstanding_amount=(p_payload->>'outstanding_amount')::numeric,
+      status='DRAFT',description=NULLIF(p_payload->>'description',''),updated_at=now()
+    WHERE id=p_bill_id AND organization_id=p_organization_id
+    RETURNING * INTO v_bill;
+
+    DELETE FROM finance.vendor_bill_lines WHERE vendor_bill_id=p_bill_id;
+  END IF;
+
+  FOR v_line IN SELECT * FROM jsonb_array_elements(p_lines) LOOP
+    INSERT INTO finance.vendor_bill_lines (
+      vendor_bill_id,line_number,account_id,description,quantity,unit_price,tax_code_id,
+      tax_rate,tax_amount,withholding_rate,withholding_amount,line_total,project_id
+    ) VALUES (
+      v_bill.id,(v_line->>'line_number')::int,(v_line->>'account_id')::uuid,
+      COALESCE(v_line->>'description',''),COALESCE((v_line->>'quantity')::numeric,1),
+      COALESCE((v_line->>'unit_price')::numeric,0),NULLIF(v_line->>'tax_code_id','')::uuid,
+      COALESCE((v_line->>'tax_rate')::numeric,0),COALESCE((v_line->>'tax_amount')::numeric,0),
+      COALESCE((v_line->>'withholding_rate')::numeric,0),COALESCE((v_line->>'withholding_amount')::numeric,0),
+      (v_line->>'line_total')::numeric,NULLIF(v_line->>'project_id','')::uuid
+    );
+  END LOOP;
+
+  SELECT * INTO v_bill FROM finance.vendor_bills WHERE id=v_bill.id;
+  RETURN v_bill;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."save_vendor_bill_atomic"("p_bill_id" "uuid", "p_payload" "jsonb", "p_lines" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."set_fx_snapshot"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_currency text;
+  v_rate numeric;
+  v_rate_date date;
+  v_source text;
+  v_org uuid;
+  v_date date;
+BEGIN
+  -- Never overwrite an existing snapshot: this is an immutable audit fact.
+  IF NEW.rate_snapshot IS NOT NULL THEN
+    RETURN NEW;
+  END IF;
+
+  IF TG_TABLE_SCHEMA = 'finance' AND TG_TABLE_NAME = 'journal_entries' THEN
+    v_currency := NEW.currency; v_rate := COALESCE(NEW.exchange_rate, 1); v_org := NEW.organization_id; v_date := NEW.transaction_date;
+  ELSIF TG_TABLE_SCHEMA = 'finance' AND TG_TABLE_NAME = 'journal_lines' THEN
+    v_currency := NEW.currency; v_rate := COALESCE(NEW.exchange_rate, 1); v_date := CURRENT_DATE;
+    SELECT organization_id INTO v_org FROM finance.journal_entries WHERE id = NEW.journal_entry_id;
+  ELSIF TG_TABLE_SCHEMA = 'finance' AND TG_TABLE_NAME = 'payment_receipts' THEN
+    v_currency := NEW.currency; v_rate := COALESCE(NEW.exchange_rate, 1); v_org := NEW.organization_id; v_date := NEW.payment_date;
+  ELSIF TG_TABLE_SCHEMA = 'finance' AND TG_TABLE_NAME = 'credit_notes' THEN
+    v_currency := NEW.currency; v_rate := COALESCE(NEW.exchange_rate, 1); v_org := NEW.organization_id; v_date := COALESCE(NEW.created_at::date, CURRENT_DATE);
+  ELSIF TG_TABLE_SCHEMA = 'finance' AND TG_TABLE_NAME = 'vendor_bills' THEN
+    v_currency := NEW.currency; v_rate := COALESCE(NEW.exchange_rate, 1); v_org := NEW.organization_id; v_date := NEW.bill_date;
+  ELSIF TG_TABLE_SCHEMA = 'public' AND TG_TABLE_NAME = 'expenses' THEN
+    v_currency := NEW.currency; v_rate := COALESCE(NEW.exchange_rate, 1); v_org := NEW.organization_id; v_date := NEW.expense_date;
+  ELSIF TG_TABLE_SCHEMA = 'public' AND TG_TABLE_NAME = 'incomes' THEN
+    v_currency := NEW.currency; v_rate := COALESCE(NEW.exchange_rate, 1); v_org := NEW.organization_id; v_date := NEW.income_date;
+  ELSIF TG_TABLE_SCHEMA = 'public' AND TG_TABLE_NAME = 'invoices' THEN
+    v_currency := NEW.currency; v_rate := COALESCE(NEW.exchange_rate, 1); v_org := NEW.organization_id; v_date := NEW.issue_date;
+  END IF;
+
+  IF v_currency IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  v_rate_date := COALESCE(v_date, CURRENT_DATE);
+
+  SELECT er.rate_date, COALESCE(er.source_platform, er.rate_type)
+    INTO v_rate_date, v_source
+  FROM finance.exchange_rates er
+  WHERE er.organization_id = v_org
+    AND er.from_currency = v_currency
+    AND er.to_currency = 'PKR'
+    AND er.rate = v_rate
+    AND er.rate_date <= v_rate_date
+    AND er.approved_by IS NOT NULL
+    AND er.is_locked = true
+  ORDER BY er.rate_date DESC, er.rate_time DESC NULLS LAST
+  LIMIT 1;
+
+  NEW.rate_date := COALESCE(v_rate_date, v_date, CURRENT_DATE);
+  NEW.rate_source := COALESCE(v_source, CASE WHEN upper(v_currency) = 'PKR' AND v_rate = 1 THEN 'BASE_CURRENCY' ELSE 'RECORDED_RATE' END);
+  NEW.rate_snapshot := jsonb_build_object(
+    'currency', v_currency,
+    'base_currency', 'PKR',
+    'exchange_rate', v_rate,
+    'rate_date', NEW.rate_date,
+    'rate_source', NEW.rate_source,
+    'captured_at', clock_timestamp()
+  );
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."set_fx_snapshot"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."snapshot_tax_rule_set"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -6349,6 +6681,37 @@ $$;
 
 
 ALTER FUNCTION "finance"."update_bank_transfer_status"("p_transfer_id" "uuid", "p_status" "text", "p_rejection_reason" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."validate_capital_transaction_owner_org"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_owner_org uuid;
+BEGIN
+  IF NEW.organization_id IS NULL THEN
+    RAISE EXCEPTION 'Capital transaction organization_id is required';
+  END IF;
+
+  SELECT organization_id INTO v_owner_org
+  FROM finance.owners
+  WHERE id = NEW.owner_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Owner % not found', NEW.owner_id;
+  END IF;
+
+  IF v_owner_org IS NULL OR v_owner_org <> NEW.organization_id THEN
+    RAISE EXCEPTION 'Owner does not belong to the capital transaction organization';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."validate_capital_transaction_owner_org"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."validate_ownership_percentage_total"() RETURNS "trigger"
@@ -10342,6 +10705,9 @@ END) STORED,
     "notes" "text",
     "credit_note_date" "date" DEFAULT CURRENT_DATE NOT NULL,
     "rejection_reason" "text",
+    "rate_date" "date",
+    "rate_source" "text",
+    "rate_snapshot" "jsonb",
     CONSTRAINT "credit_notes_amount_check" CHECK (("amount" > (0)::numeric)),
     CONSTRAINT "credit_notes_exactly_one_source" CHECK (((("invoice_id" IS NOT NULL) AND ("vendor_bill_id" IS NULL)) OR (("invoice_id" IS NULL) AND ("vendor_bill_id" IS NOT NULL)))),
     CONSTRAINT "credit_notes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
@@ -10845,6 +11211,9 @@ CREATE TABLE IF NOT EXISTS "finance"."journal_entries" (
     "reversed_at" timestamp with time zone,
     "entry_date" "date",
     "organization_id" "uuid" NOT NULL,
+    "rate_date" "date",
+    "rate_source" "text",
+    "rate_snapshot" "jsonb",
     CONSTRAINT "je_date_not_null" CHECK (("transaction_date" IS NOT NULL)),
     CONSTRAINT "journal_entries_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"]))),
     CONSTRAINT "journal_entries_total_credit_check" CHECK (("total_credit" >= (0)::numeric)),
@@ -10875,6 +11244,9 @@ CREATE TABLE IF NOT EXISTS "finance"."journal_lines" (
     "cost_center_id" "uuid",
     "tax_code_id" "uuid",
     "matching_ref" "text",
+    "rate_date" "date",
+    "rate_source" "text",
+    "rate_snapshot" "jsonb",
     CONSTRAINT "jl_one_side_only" CHECK ((("debit_amount" = (0)::numeric) OR ("credit_amount" = (0)::numeric))),
     CONSTRAINT "journal_lines_credit_amount_check" CHECK (("credit_amount" >= (0)::numeric)),
     CONSTRAINT "journal_lines_debit_amount_check" CHECK (("debit_amount" >= (0)::numeric)),
@@ -11022,6 +11394,9 @@ CREATE TABLE IF NOT EXISTS "finance"."payment_receipts" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
+    "rate_date" "date",
+    "rate_source" "text",
+    "rate_snapshot" "jsonb",
     CONSTRAINT "payment_receipts_amount_check" CHECK (("amount" >= (0)::numeric)),
     CONSTRAINT "payment_receipts_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "payment_receipts_payment_method_check" CHECK (("payment_method" = ANY (ARRAY['BANK_TRANSFER'::"text", 'PLATFORM'::"text", 'CASH'::"text", 'CHEQUE'::"text", 'OTHER'::"text"]))),
@@ -11589,49 +11964,6 @@ CREATE TABLE IF NOT EXISTS "finance"."vendor_bill_lines" (
 ALTER TABLE "finance"."vendor_bill_lines" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "finance"."vendor_bills" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "bill_number" "text",
-    "vendor_id" "uuid" NOT NULL,
-    "bill_date" "date" DEFAULT CURRENT_DATE NOT NULL,
-    "due_date" "date",
-    "currency" "text" DEFAULT 'PKR'::"text",
-    "exchange_rate" numeric(18,4) DEFAULT 1,
-    "subtotal" numeric(18,2) DEFAULT 0,
-    "tax_amount" numeric(18,2) DEFAULT 0,
-    "withholding_amount" numeric(18,2) DEFAULT 0,
-    "discount_amount" numeric(18,2) DEFAULT 0,
-    "total_amount" numeric(18,2) NOT NULL,
-    "base_subtotal" numeric(18,2) DEFAULT 0,
-    "base_tax_amount" numeric(18,2) DEFAULT 0,
-    "base_withholding_amount" numeric(18,2) DEFAULT 0,
-    "base_discount_amount" numeric(18,2) DEFAULT 0,
-    "base_total_amount" numeric(18,2) NOT NULL,
-    "amount_paid" numeric(18,2) DEFAULT 0,
-    "outstanding_amount" numeric(18,2) DEFAULT 0,
-    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
-    "project_id" "uuid",
-    "description" "text",
-    "submitted_by" "uuid",
-    "submitted_at" timestamp with time zone,
-    "verified_by" "uuid",
-    "verified_at" timestamp with time zone,
-    "approved_by" "uuid",
-    "approved_at" timestamp with time zone,
-    "posted_by" "uuid",
-    "posted_at" timestamp with time zone,
-    "rejection_reason" "text",
-    "created_at" timestamp with time zone DEFAULT "now"(),
-    "updated_at" timestamp with time zone DEFAULT "now"(),
-    "created_by" "uuid",
-    "organization_id" "uuid" NOT NULL,
-    CONSTRAINT "vendor_bills_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'PARTIALLY_PAID'::"text", 'PAID'::"text", 'REVERSED'::"text", 'CANCELLED'::"text"])))
-);
-
-
-ALTER TABLE "finance"."vendor_bills" OWNER TO "postgres";
-
-
 CREATE TABLE IF NOT EXISTS "finance"."vendor_payment_allocations" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "vendor_payment_id" "uuid" NOT NULL,
@@ -12190,6 +12522,9 @@ CREATE TABLE IF NOT EXISTS "public"."expenses" (
     "reversed_by" "uuid",
     "reversed_at" timestamp with time zone,
     "receipt_hash" "text",
+    "rate_date" "date",
+    "rate_source" "text",
+    "rate_snapshot" "jsonb",
     CONSTRAINT "expenses_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
 );
 
@@ -12308,6 +12643,9 @@ CREATE TABLE IF NOT EXISTS "public"."incomes" (
     "reversed_at" timestamp with time zone,
     "invoice_id" "uuid",
     "client_id" "uuid",
+    "rate_date" "date",
+    "rate_source" "text",
+    "rate_snapshot" "jsonb",
     CONSTRAINT "incomes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "incomes_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
 );
@@ -12357,6 +12695,9 @@ CREATE TABLE IF NOT EXISTS "public"."invoices" (
     "voided_by" "uuid",
     "voided_at" timestamp with time zone,
     "organization_id" "uuid" NOT NULL,
+    "rate_date" "date",
+    "rate_source" "text",
+    "rate_snapshot" "jsonb",
     CONSTRAINT "invoices_amounts_non_negative_check" CHECK ((("amount" >= (0)::numeric) AND ("subtotal" >= (0)::numeric) AND ("tax_amount" >= (0)::numeric) AND ("discount_amount" >= (0)::numeric) AND ("total_amount" >= (0)::numeric) AND ("base_subtotal" >= (0)::numeric) AND ("base_tax_amount" >= (0)::numeric) AND ("base_discount_amount" >= (0)::numeric) AND ("base_total_amount" >= (0)::numeric) AND ("amount_paid" >= (0)::numeric) AND ("base_amount_paid" >= (0)::numeric) AND ("outstanding_amount" >= (0)::numeric) AND ("base_outstanding_amount" >= (0)::numeric))),
     CONSTRAINT "invoices_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'SUBMITTED'::character varying, 'PENDING_APPROVAL'::character varying, 'VERIFIED'::character varying, 'APPROVED'::character varying, 'ISSUED'::character varying, 'PARTIALLY_PAID'::character varying, 'PAID'::character varying, 'OVERDUE'::character varying, 'VOID'::character varying, 'CREDITED'::character varying, 'REFUNDED'::character varying])::"text"[])))
 );
@@ -16836,6 +17177,10 @@ CREATE CONSTRAINT TRIGGER "trg_check_journal_balance" AFTER INSERT OR DELETE OR 
 
 
 
+CREATE OR REPLACE TRIGGER "trg_credit_notes_fx_snapshot" BEFORE INSERT ON "finance"."credit_notes" FOR EACH ROW EXECUTE FUNCTION "finance"."set_fx_snapshot"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_depreciation_schedule_ts" BEFORE UPDATE ON "finance"."depreciation_schedule" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_update_timestamp"();
 
 
@@ -16868,6 +17213,14 @@ CREATE OR REPLACE TRIGGER "trg_gen_bt_number" BEFORE INSERT ON "finance"."bank_t
 
 
 
+CREATE OR REPLACE TRIGGER "trg_journal_entries_fx_snapshot" BEFORE INSERT ON "finance"."journal_entries" FOR EACH ROW EXECUTE FUNCTION "finance"."set_fx_snapshot"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_journal_lines_fx_snapshot" BEFORE INSERT ON "finance"."journal_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."set_fx_snapshot"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "finance"."bank_transfers" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_maker_checker"();
 
 
@@ -16889,6 +17242,10 @@ CREATE OR REPLACE TRIGGER "trg_maker_checker" BEFORE INSERT OR UPDATE ON "financ
 
 
 CREATE OR REPLACE TRIGGER "trg_payment_receipt_client_org" BEFORE INSERT OR UPDATE OF "client_id", "organization_id" ON "finance"."payment_receipts" FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_payment_receipt_client_org"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_payment_receipts_fx_snapshot" BEFORE INSERT ON "finance"."payment_receipts" FOR EACH ROW EXECUTE FUNCTION "finance"."set_fx_snapshot"();
 
 
 
@@ -17092,6 +17449,10 @@ CREATE OR REPLACE TRIGGER "trg_updated_at" BEFORE UPDATE ON "finance"."vendors" 
 
 
 
+CREATE OR REPLACE TRIGGER "trg_validate_capital_transaction_owner_org" BEFORE INSERT OR UPDATE OF "owner_id", "organization_id" ON "finance"."capital_transactions" FOR EACH ROW EXECUTE FUNCTION "finance"."validate_capital_transaction_owner_org"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_validate_fa_ledger" BEFORE INSERT OR UPDATE OF "linked_ledger_account_id" ON "finance"."financial_accounts" FOR EACH ROW EXECUTE FUNCTION "finance"."fn_validate_fa_ledger"();
 
 
@@ -17105,6 +17466,10 @@ CREATE OR REPLACE TRIGGER "trg_validate_payment_allocation" BEFORE INSERT OR UPD
 
 
 CREATE OR REPLACE TRIGGER "trg_validate_vendor_payment_allocation" BEFORE INSERT OR UPDATE ON "finance"."vendor_payment_allocations" FOR EACH ROW EXECUTE FUNCTION "finance"."validate_vendor_payment_allocation"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_vendor_bills_fx_snapshot" BEFORE INSERT ON "finance"."vendor_bills" FOR EACH ROW EXECUTE FUNCTION "finance"."set_fx_snapshot"();
 
 
 
@@ -17205,6 +17570,18 @@ CREATE OR REPLACE TRIGGER "trg_commissions_updated" BEFORE UPDATE ON "public"."c
 
 
 CREATE OR REPLACE TRIGGER "trg_contractors_updated" BEFORE UPDATE ON "public"."contractors" FOR EACH ROW EXECUTE FUNCTION "public"."update_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_expenses_fx_snapshot" BEFORE INSERT ON "public"."expenses" FOR EACH ROW EXECUTE FUNCTION "finance"."set_fx_snapshot"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_incomes_fx_snapshot" BEFORE INSERT ON "public"."incomes" FOR EACH ROW EXECUTE FUNCTION "finance"."set_fx_snapshot"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_invoices_fx_snapshot" BEFORE INSERT ON "public"."invoices" FOR EACH ROW EXECUTE FUNCTION "finance"."set_fx_snapshot"();
 
 
 
@@ -17738,6 +18115,11 @@ ALTER TABLE ONLY "finance"."capital_transactions"
 
 ALTER TABLE ONLY "finance"."capital_transactions"
     ADD CONSTRAINT "capital_transactions_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "finance"."owners"("id");
+
+
+
+ALTER TABLE ONLY "finance"."capital_transactions"
+    ADD CONSTRAINT "capital_transactions_owner_org_fk" FOREIGN KEY ("owner_id") REFERENCES "finance"."owners"("id");
 
 
 
@@ -19153,7 +19535,7 @@ CREATE POLICY "authenticated_read_prompts" ON "ai"."ai_prompt_versions" FOR SELE
 
 
 
-CREATE POLICY "delete_own_conversations" ON "ai"."ai_conversations" FOR DELETE USING (("user_id" = "auth"."uid"()));
+CREATE POLICY "delete_own_conversations" ON "ai"."ai_conversations" FOR DELETE TO "authenticated" USING ((("user_id" = "auth"."uid"()) AND "core"."same_org"("organization_id")));
 
 
 
@@ -19197,7 +19579,7 @@ CREATE POLICY "read_ai_tool_calls" ON "ai"."ai_tool_calls" FOR SELECT USING ((((
 
 
 
-CREATE POLICY "update_own_conversations" ON "ai"."ai_conversations" FOR UPDATE USING (("user_id" = "auth"."uid"()));
+CREATE POLICY "update_own_conversations" ON "ai"."ai_conversations" FOR UPDATE TO "authenticated" USING ((("user_id" = "auth"."uid"()) AND "core"."same_org"("organization_id"))) WITH CHECK ((("user_id" = "auth"."uid"()) AND "core"."same_org"("organization_id")));
 
 
 
@@ -21596,6 +21978,10 @@ GRANT ALL ON FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p
 
 
 
+GRANT ALL ON FUNCTION "finance"."import_opening_balance_atomic"("p_batch_id" "text", "p_fiscal_year_id" "uuid", "p_rows" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "finance"."is_date_in_open_period"("p_date" "date") TO "authenticated";
 
 
@@ -21716,6 +22102,15 @@ GRANT ALL ON FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" 
 
 REVOKE ALL ON FUNCTION "finance"."reverse_vendor_bill_atomic"("p_vendor_bill_id" "uuid", "p_reversal_date" "date", "p_reason" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."reverse_vendor_bill_atomic"("p_vendor_bill_id" "uuid", "p_reversal_date" "date", "p_reason" "text") TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "finance"."vendor_bills" TO "authenticated";
+GRANT ALL ON TABLE "finance"."vendor_bills" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "finance"."save_vendor_bill_atomic"("p_bill_id" "uuid", "p_payload" "jsonb", "p_lines" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
 
 
@@ -22429,11 +22824,6 @@ GRANT ALL ON TABLE "finance"."vendor_bill_lines" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "finance"."vendor_bills" TO "authenticated";
-GRANT ALL ON TABLE "finance"."vendor_bills" TO "service_role";
-
-
-
 GRANT ALL ON TABLE "finance"."vendor_payment_allocations" TO "authenticated";
 GRANT ALL ON TABLE "finance"."vendor_payment_allocations" TO "service_role";
 
@@ -22869,6 +23259,11 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
+
+
+
+
+
 
 
 

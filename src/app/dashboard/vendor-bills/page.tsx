@@ -391,45 +391,31 @@ const handleLineChange = useCallback((newLines: any[]) => {
         status: "DRAFT",
       };
 
-      let billId: string | null = null;
-
-      if (editingBill) {
-        const { error } = await db.from("vendor_bills").update(payload).eq("id", editingBill.id);
-        if (error) throw error;
-        billId = editingBill.id;
-
-        // Delete old lines
-        await db.from("vendor_bill_lines").delete().eq("vendor_bill_id", editingBill.id);
-      } else {
-        const { data: numData } = await db.rpc("get_next_number", { p_type: "VENDOR_BILL" });
-        payload.bill_number = numData || `VB-${Date.now()}`;
-
-        const { data, error } = await db.from("vendor_bills").insert(payload).select("id").single();
-        if (error) throw error;
-        billId = data.id;
-      }
-
-      // Insert line items — ONLY columns that exist in the table
-      if (billId && lines.length > 0) {
-        const linePayloads = lines.map((l, idx) => ({
-          vendor_bill_id: billId,
-          line_number: idx + 1,
-          account_id: l.account_id,
-          description: l.description || "",
-          quantity: safeNum(l.quantity),
-          unit_price: safeNum(l.unit_price),
-          tax_code_id: null,
-          tax_rate: safeNum(l.tax_rate),
-          tax_amount: safeNum(l.tax_amount),
-          withholding_rate: safeNum(l.withholding_rate),
-          withholding_amount: safeNum(l.withholding_amount),
-          line_total: safeNum(l.line_total),
-          project_id: l.project_id || null,
-        }));
-
-        const { error: lineErr } = await db.from("vendor_bill_lines").insert(linePayloads);
-        if (lineErr) throw new Error("Lines failed: " + lineErr.message);
-      }
+      const response = await fetch('/api/finance/vendor-bills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          id: editingBill?.id || null,
+          bill: payload,
+          lines: lines.map((l, idx) => ({
+            line_number: idx + 1,
+            account_id: l.account_id,
+            description: l.description || '',
+            quantity: safeNum(l.quantity, 1),
+            unit_price: safeNum(l.unit_price),
+            tax_code_id: null,
+            tax_rate: safeNum(l.tax_rate),
+            tax_amount: safeNum(l.tax_amount),
+            withholding_rate: safeNum(l.withholding_rate),
+            withholding_amount: safeNum(l.withholding_amount),
+            line_total: safeNum(l.line_total),
+            project_id: l.project_id || null,
+          })),
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || 'Failed to save vendor bill');
 
       setShowForm(false);
       setEditingBill(null);

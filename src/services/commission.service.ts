@@ -211,33 +211,50 @@ export async function deleteCommission(id: string) {
 }
 
 // ─── Approve commission ───
-export async function approveCommission(id: string, approvedBy: string) {
-  const orgId = await getCurrentOrgId();
-  const { data, error } = await supabase.schema('finance').rpc('post_commission_approval', {
-    p_commission_id: id,
+export async function approveCommission(id: string, approvedBy?: string) {
+  // FND-PBV-004 FIX: commission posting is exposed by the authenticated API
+  // route, not by a nonexistent legacy commission approval RPC. The API
+  // route performs permission, maker-checker, MFA (where required), GL posting,
+  // and organization checks using the caller's authenticated session.
+  const response = await fetch(`/api/finance/commissions/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ action: 'approve', ...(approvedBy ? { approved_by: approvedBy } : {}) }),
   });
-  if (error) throw new Error(error.message);
-  return data as CommissionRow;
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.error || 'Commission approval failed');
+  return payload?.data as CommissionRow;
 }
 
 // ─── Mark commission as paid ───
-export async function markCommissionPaid(id: string, paymentDate: string, paymentRef: string) {
-  const { data, error } = await supabase.schema('finance').rpc('post_commission_payment', {
-    p_commission_id: id,
-  });
-  if (error) throw new Error(error.message);
-  // Payment metadata is non-accounting detail; update it after the atomic GL payment.
-  if (paymentDate || paymentRef) {
-    const { data: updated, error: metaError } = await supabase
-      .schema('public').from('commissions')
-      .update({ payment_date: paymentDate || new Date().toISOString().slice(0,10), payment_ref: paymentRef || null })
-      .eq('id', id)
-      .eq('organization_id', await getCurrentOrgId())
-      .select('*').single();
-    if (metaError) throw new Error(metaError.message);
-    return updated as CommissionRow;
+export async function markCommissionPaid(
+  id: string,
+  paymentDate: string,
+  paymentRef: string,
+  financialAccountId?: string,
+) {
+  // FND-PBV-004 FIX: use the canonical authenticated API. Payment requires
+  // the source bank/cash financial account so the API can post the correct
+  // GL credit; silently guessing an account would be a financial-data bug.
+  if (!financialAccountId) {
+    throw new Error('financialAccountId is required to pay a commission');
   }
-  return data as CommissionRow;
+
+  const response = await fetch(`/api/finance/commissions/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      action: 'pay',
+      payment_date: paymentDate || undefined,
+      payment_ref: paymentRef || undefined,
+      financial_account_id: financialAccountId,
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.error || 'Commission payment failed');
+  return payload?.data as CommissionRow;
 }
 
 // ─── Fetch summary by person (from view) ───

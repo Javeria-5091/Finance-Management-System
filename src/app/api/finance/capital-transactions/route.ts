@@ -56,6 +56,11 @@ export async function POST(req:NextRequest)
                 throw new Error('Capital transaction not found');
             if(row.status!=='APPROVED')
                 throw new Error(`Only APPROVED capital transactions can be posted. Current: ${row.status}`);
+
+            const owner=getData(await supabase.schema('finance').from('owners')
+                .select('id,organization_id,status').eq('id',row.owner_id).eq('organization_id',a.orgId).maybeSingle());
+            if(!owner || owner.status !== 'ACTIVE')
+                throw new Error('Owner not found, inactive, or outside your organization');
             if(!row.financial_account_id||!row.equity_account_id)
                 throw new Error('Capital transaction is missing its bank/cash or equity account and cannot be posted.');
 
@@ -140,6 +145,11 @@ export async function POST(req:NextRequest)
         if(b.action==='create'){
             if(!b.owner_id||!b.transaction_type||!b.amount||!b.transaction_date||!b.financial_account_id||!b.equity_account_id)
                 throw new Error('owner, type, amount, date, financial account and equity account are required');
+
+            const owner=getData(await supabase.schema('finance').from('owners')
+                .select('id,organization_id,status').eq('id',b.owner_id).eq('organization_id',a.orgId).maybeSingle());
+            if(!owner || owner.status !== 'ACTIVE')
+                throw new Error('Owner not found, inactive, or outside your organization');
 
             const financialAccount=getData(await supabase.schema('finance').from('financial_accounts')
                 .select('id,is_active').eq('id',b.financial_account_id).eq('organization_id',a.orgId).maybeSingle());
