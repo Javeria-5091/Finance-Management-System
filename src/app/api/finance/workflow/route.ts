@@ -2,14 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthUser, getAuthSupabase, checkApprovalLimitAsync } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
 import { workflowActionSchema, validateBody } from '@/lib/validations';
+import type { ApprovalTransactionType } from '@/lib/approval-limits';
  
 const MODULES: Record<string, {
-  table: string; permPrefix: string; amountField: string; creatorField: string;
+  table: string; permPrefix: string; transactionType: ApprovalTransactionType; amountField: string; creatorField: string;
   periodIdField?: string; periodDateField?: string;
   transitions: Record<string, { from: string[]; perm: string }>;
 }> = {
   expense: {
-    table: 'expenses', permPrefix: 'EXPENSE', amountField: 'amount', creatorField: 'user_id',
+    table: 'expenses', permPrefix: 'EXPENSE', transactionType: 'EXPENSE', amountField: 'amount', creatorField: 'user_id',
     periodIdField: 'period_id', periodDateField: 'expense_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'EXPENSE_UPDATE' },
@@ -21,7 +22,7 @@ const MODULES: Record<string, {
     },
   },
   income: {
-    table: 'incomes', permPrefix: 'INCOME', amountField: 'amount', creatorField: 'created_by',
+    table: 'incomes', permPrefix: 'INCOME', transactionType: 'INCOME', amountField: 'amount', creatorField: 'created_by',
     periodIdField: 'period_id', periodDateField: 'income_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'INCOME_UPDATE' },
@@ -33,7 +34,7 @@ const MODULES: Record<string, {
     },
   },
   invoice: {
-    table: 'invoices', permPrefix: 'INVOICE', amountField: 'total_amount', creatorField: 'created_by',
+    table: 'invoices', permPrefix: 'INVOICE', transactionType: 'INVOICE', amountField: 'total_amount', creatorField: 'created_by',
     periodIdField: 'period_id', periodDateField: 'issue_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'INVOICE_UPDATE' },
@@ -44,7 +45,7 @@ const MODULES: Record<string, {
     },
   },
   vendor_bill: {
-    table: 'vendor_bills', permPrefix: 'VENDOR_BILL', amountField: 'total_amount', creatorField: 'created_by',
+    table: 'vendor_bills', permPrefix: 'VENDOR_BILL', transactionType: 'VENDOR_BILL', amountField: 'total_amount', creatorField: 'created_by',
     periodDateField: 'bill_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'VENDOR_BILL_UPDATE' },
@@ -56,7 +57,7 @@ const MODULES: Record<string, {
     },
   },
   journal_entry: {
-    table: 'journal_entries', permPrefix: 'JOURNAL', amountField: 'total_debit', creatorField: 'created_by',
+    table: 'journal_entries', permPrefix: 'JOURNAL', transactionType: 'JOURNAL_ENTRY', amountField: 'total_debit', creatorField: 'created_by',
     periodIdField: 'period_id', periodDateField: 'transaction_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'JOURNAL_UPDATE' },
@@ -68,7 +69,7 @@ const MODULES: Record<string, {
     },
   },
   budget: {
-    table: 'budgets', permPrefix: 'BUDGET', amountField: 'total_amount', creatorField: 'submitted_by',
+    table: 'budgets', permPrefix: 'BUDGET', transactionType: 'BUDGET_REVISION', amountField: 'total_amount', creatorField: 'submitted_by',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'BUDGET_UPDATE' },
       approve: { from: ['SUBMITTED'], perm: 'BUDGET_APPROVE' },
@@ -83,7 +84,7 @@ const MODULES: Record<string, {
   // SUBMITTED/VERIFIED step), so the lifecycle here is simpler than the
   // other modules: DRAFT -> APPROVED (or REJECTED) directly.
   credit_note: {
-    table: 'credit_notes', permPrefix: 'INVOICE_CREDIT_NOTE', amountField: 'amount', creatorField: 'created_by',
+    table: 'credit_notes', permPrefix: 'INVOICE_CREDIT_NOTE', transactionType: 'INVOICE_CREDIT_NOTE', amountField: 'amount', creatorField: 'created_by',
     periodDateField: 'credit_note_date',
     transitions: {
       approve: { from: ['DRAFT'], perm: 'APPROVE_INVOICE' },
@@ -203,7 +204,7 @@ export async function POST(req: NextRequest) {
     if (action === 'approve') {
       const amount = Number(record[config.amountField]) || 0;
       const limitCheck = await checkApprovalLimitAsync(
-        supabase, auth.orgId, auth.userId, auth.role, config.permPrefix, amount
+        supabase, auth.orgId, auth.userId, auth.role, config.transactionType, amount
       );
       if (!limitCheck.allowed) return NextResponse.json({ error: limitCheck.reason }, { status: 403 });
     }

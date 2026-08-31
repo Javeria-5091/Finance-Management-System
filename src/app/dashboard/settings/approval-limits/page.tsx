@@ -5,12 +5,10 @@ import { usePermissions } from "@/context/PermissionContext";
 import { ShieldAlert, Plus, Trash2, X, Loader2, Info } from "lucide-react";
 import toast from "react-hot-toast";
 
-const TRANSACTION_TYPES = [
-  "EXPENSE", "PURCHASE", "VENDOR_PAYMENT", "BUDGET_REVISION", "JOURNAL_ENTRY",
-  "BANK_TRANSFER", "SALARY_PAYROLL", "OWNER_DISTRIBUTION", "PERIOD_REOPEN",
-  "INVOICE_CREDIT_NOTE", "VENDOR_BILL", "RESERVE_ALLOCATION",
-];
-const SCOPES = ["OWN", "PROJECT", "DEPARTMENT", "ALL"];
+import { APPROVAL_TRANSACTION_TYPES, APPROVAL_SCOPES } from "@/lib/approval-limits";
+
+const TRANSACTION_TYPES = APPROVAL_TRANSACTION_TYPES;
+const SCOPES = APPROVAL_SCOPES;
 
 interface LimitRow {
   id: string;
