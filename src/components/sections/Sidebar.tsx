@@ -10,6 +10,7 @@ import {LayoutDashboard, FolderKanban, ArrowDownCircle, ArrowUpCircle, FileText,
   ChevronRight, ArrowLeftRight, Scale, TrendingUp, TrendingDown, Calculator, Shield, Landmark, PieChart, Receipt,
   RotateCcw, Download, Upload, CheckCircle, PiggyBank, UserCircle, UserPlus, Bell, FileSpreadsheet, Hash, BookCheck,
   FileBarChart, UsersRound, FileCheck, CircleDollarSign, Banknote, Repeat, HardHat, Percent, ShieldAlert, KeyRound, 
+  Coins, History,
 } from "lucide-react";
  
 interface SidebarProps {
@@ -61,6 +62,8 @@ const ICONS: Record<string, any> = {
   ShieldAlert,
   KeyRound,
   UserCog,
+  Coins,
+  History,
 };
  
 interface NavItem {
@@ -197,6 +200,9 @@ const navGroups: NavGroup[] = [
       { id: "financial-statements", label: "Financial Statements", icon: "FileSpreadsheet", path: "/dashboard/reports/financial-statements", perm: "REPORT_READ" },
       { id: "general-ledger", label: "General Ledger", icon: "BookCheck", path: "/dashboard/reports/general-ledger", perm: "GL_READ" },
       { id: "trial-balance", label: "Trial Balance", icon: "FileBarChart", path: "/dashboard/reports/trial-balance", perm: "GL_READ" },
+      { id: "general-ledger-multi-currency", label: "Original-Currency Ledgers", icon: "Coins", path: "/dashboard/reports/general-ledger-multi-currency", perm: "GL_READ" },
+      { id: "exchange-rate-history", label: "Manual-Rate History", icon: "History", path: "/dashboard/reports/exchange-rate-history", perm: "GL_READ" },
+      { id: "pkr-conversion", label: "PKR Conversion", icon: "Repeat", path: "/dashboard/reports/pkr-conversion", perm: "GL_READ" },
       { id: "aging-reports", label: "Aging (AR/AP)", icon: "Receipt", path: "/dashboard/reports/aging-reports", perm: "REPORT_READ" },
       { id: "project-profitability", label: "Project Profitability", icon: "TrendingUp", path: "/dashboard/reports/project-profitability", perm: "REPORT_READ" },
       { id: "cash-bank", label: "Cash & Bank", icon: "Landmark", path: "/dashboard/reports/cash-bank", perm: "BANK_READ" },

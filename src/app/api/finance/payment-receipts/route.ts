@@ -108,6 +108,33 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: rateError }, { status: 400 });
     }
 
+    // FC-04 FIX: the UI previously hardcoded currency=PKR, exchange_rate=1,
+    // so multi-currency AR silently posted wrong GL amounts for any non-PKR
+    // invoice payment. Now that the UI can submit a real currency/rate, the
+    // API must not just trust an arbitrary client-supplied rate — confirm an
+    // approved rate exists in finance.exchange_rates for this currency pair
+    // on or before the payment date before allowing the receipt to post.
+    const receiptCurrency = (currency || 'PKR').toUpperCase();
+    if (receiptCurrency !== 'PKR') {
+      const approvedRate = getData(await supabase
+        .schema('finance').from('exchange_rates')
+        .select('id, rate, rate_date')
+        .eq('organization_id', auth.orgId)
+        .eq('from_currency', receiptCurrency)
+        .eq('to_currency', 'PKR')
+        .not('approved_by', 'is', null)
+        .lte('rate_date', received_date || new Date().toISOString().split('T')[0])
+        .order('rate_date', { ascending: false })
+        .limit(1)
+        .maybeSingle());
+
+      if (!approvedRate) {
+        return NextResponse.json({
+          error: `No approved exchange rate found for ${receiptCurrency} -> PKR on or before ${received_date || 'today'}. Enter and approve a rate in Settings > Exchange Rates before recording this payment.`,
+        }, { status: 400 });
+      }
+    }
+
     // Validate client exists
     const client = getData(await supabase
       .from('clients')

@@ -310,3 +310,75 @@ export interface CurrencyExposureRow {
   realized_gain_loss: number;
   unrealized_gain_loss: number;
 }
+
+// ─── MF-03: Original-currency ledgers ───
+export interface GLMultiCurrencyEntry {
+  id: string;
+  date: string;
+  ref: string;
+  description: string;
+  account_code: string;
+  account_name: string;
+  original_currency: string;
+  original_debit: number;
+  original_credit: number;
+  base_currency: string;
+  base_debit: number;
+  base_credit: number;
+  applied_exchange_rate: number;
+  running_balance_base: number;
+}
+
+// ─── MF-04: Manual-rate history ───
+export interface ExchangeRateHistoryRow {
+  id: string;
+  from_currency: string;
+  to_currency: string;
+  rate: number;
+  rate_date: string;
+  rate_time?: string;
+  rate_type: 'PLATFORM' | 'BANK' | 'MANUAL' | 'PAYMENT_CHANNEL';
+  source_platform?: string;
+  evidence_reference: string;
+  entered_by: string;
+  entered_by_name?: string;
+  entered_by_email?: string;
+  approved_by?: string;
+  approved_by_name?: string;
+  approved_by_email?: string;
+  approved_at?: string;
+  is_locked: boolean;
+  approval_status: 'PENDING_APPROVAL' | 'APPROVED' | 'N/A';
+  created_at: string;
+}
+
+// ─── MF-05: PKR conversion report ───
+export type RateMethod =
+  | 'BASE_CURRENCY'
+  | 'ACTUAL_PLATFORM_BANK_RATE'
+  | 'APPROVED_ACCOUNTING_RATE'
+  | 'PENDING_APPROVAL'
+  | 'PENDING_CONVERSION';
+
+export interface PkrConversionRow {
+  journal_entry_id: string;
+  line_id: string;
+  journal_reference: string;
+  journal_description: string;
+  transaction_date: string;
+  account_code: string;
+  account_name: string;
+  original_currency: string;
+  base_currency: string;
+  original_debit: number;
+  original_credit: number;
+  pkr_debit: number;
+  pkr_credit: number;
+  applied_rate: number;
+  rate_date: string;
+  rate_period_id?: string;
+  matched_rate_type?: string;
+  matched_rate_value?: number;
+  matched_rate_evidence?: string;
+  rate_method: RateMethod;
+}

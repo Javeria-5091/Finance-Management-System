@@ -8,6 +8,7 @@ import {
   CalendarDays, ShieldCheck, ArrowRight, BarChart3,
   DollarSign, TrendingUp, Calculator, FileSpreadsheet,
   ArrowLeftRight, Scale, Clock, AlertTriangle, Users,
+  Coins, History, Repeat,
 } from "lucide-react";
  
 /* Reports Landing Page - CEO Spec v1.3 Section 13.2 */
@@ -41,6 +42,7 @@ const COLOR_MAP: Record<string, string> = {
   purple:  "#A855F7",
   indigo:  "#6366F1",
   red:     "#EF4444",
+  fuchsia: "#D946EF",
 };
  
 const reportGroups: ReportGroup[] = [
@@ -76,6 +78,41 @@ const reportGroups: ReportGroup[] = [
         icon: Scale,
         perm: "GL_READ",
         reports: ["Trial Balance"],
+      },
+    ],
+  },
+  {
+    id: "multi-currency-fx",
+    label: "Multi-Currency and FX",
+    color: "fuchsia",
+    icon: Coins,
+    cards: [
+      {
+        id: "general-ledger-multi-currency",
+        title: "Original-Currency Ledgers",
+        description: "Foreign-currency journal entries shown in their original currency alongside PKR and the applied rate",
+        href: "/dashboard/reports/general-ledger-multi-currency",
+        icon: Coins,
+        perm: "GL_READ",
+        reports: ["Original-Currency Ledgers"],
+      },
+      {
+        id: "exchange-rate-history",
+        title: "Manual-Rate History",
+        description: "Full history of every exchange rate entered, who entered/approved it, and its evidence reference",
+        href: "/dashboard/reports/exchange-rate-history",
+        icon: History,
+        perm: "GL_READ",
+        reports: ["Manual-Rate History"],
+      },
+      {
+        id: "pkr-conversion",
+        title: "PKR Conversion",
+        description: "Every foreign-currency amount converted to PKR, labeled by rate method and rate date/period",
+        href: "/dashboard/reports/pkr-conversion",
+        icon: Repeat,
+        perm: "GL_READ",
+        reports: ["PKR Conversion"],
       },
     ],
   },
@@ -245,6 +282,7 @@ const colorStyles: Record<string, { badge: string; iconBg: string; border: strin
   purple:  { badge: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400", iconBg: "bg-purple-50 dark:bg-purple-900/20", border: "border-gray-200 dark:border-gray-700", hoverBorder: "hover:border-purple-300 dark:hover:border-purple-700" },
   indigo:  { badge: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400", iconBg: "bg-indigo-50 dark:bg-indigo-900/20", border: "border-gray-200 dark:border-gray-700", hoverBorder: "hover:border-indigo-300 dark:hover:border-indigo-700" },
   red:     { badge: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400", iconBg: "bg-red-50 dark:bg-red-900/20", border: "border-gray-200 dark:border-gray-700", hoverBorder: "hover:border-red-300 dark:hover:border-red-700" },
+  fuchsia: { badge: "bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/30 dark:text-fuchsia-400", iconBg: "bg-fuchsia-50 dark:bg-fuchsia-900/20", border: "border-gray-200 dark:border-gray-700", hoverBorder: "hover:border-fuchsia-300 dark:hover:border-fuchsia-700" },
 };
  
 export default function ReportsLandingPage() {

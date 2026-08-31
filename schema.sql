@@ -12341,6 +12341,89 @@ CREATE OR REPLACE VIEW "reporting"."changes_in_equity" WITH ("security_invoker"=
 ALTER VIEW "reporting"."changes_in_equity" OWNER TO "postgres";
 
 
+CREATE OR REPLACE VIEW "reporting"."exchange_rate_history" WITH ("security_invoker"='true') AS
+ SELECT "er"."id",
+    "er"."organization_id",
+    "er"."from_currency",
+    "er"."to_currency",
+    "er"."rate",
+    "er"."rate_date",
+    "er"."rate_time",
+    "er"."rate_type",
+    "er"."source_platform",
+    "er"."evidence_reference",
+    "er"."entered_by",
+    "enterer"."full_name" AS "entered_by_name",
+    "enterer"."email" AS "entered_by_email",
+    "er"."approved_by",
+    "approver"."full_name" AS "approved_by_name",
+    "approver"."email" AS "approved_by_email",
+    "er"."approved_at",
+    "er"."is_locked",
+        CASE
+            WHEN (("er"."rate_type" = 'MANUAL'::"text") AND ("er"."approved_by" IS NULL)) THEN 'PENDING_APPROVAL'::"text"
+            WHEN (("er"."rate_type" = 'MANUAL'::"text") AND ("er"."approved_by" IS NOT NULL)) THEN 'APPROVED'::"text"
+            ELSE 'N/A'::"text"
+        END AS "approval_status",
+    "er"."created_at",
+    "er"."updated_at"
+   FROM (("finance"."exchange_rates" "er"
+     LEFT JOIN "public"."profiles" "enterer" ON (("enterer"."user_id" = "er"."entered_by")))
+     LEFT JOIN "public"."profiles" "approver" ON (("approver"."user_id" = "er"."approved_by")));
+
+
+ALTER VIEW "reporting"."exchange_rate_history" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "reporting"."exchange_rate_history" IS 'MF-04 (Spec 13.2): Manual-rate history report. Full history of finance.exchange_rates (platform/bank/manual/payment-channel rates), with who entered/approved each rate and its evidence reference, per Spec 5.12.';
+
+
+
+CREATE OR REPLACE VIEW "reporting"."general_ledger_multi_currency" WITH ("security_invoker"='true') AS
+ SELECT "je"."id" AS "journal_entry_id",
+    "je"."reference" AS "journal_reference",
+    "je"."description" AS "journal_description",
+    "je"."transaction_date",
+    "je"."posting_date",
+    "je"."period_id",
+    "je"."fiscal_year_id",
+    "je"."project_id",
+    "je"."source_type",
+    "je"."source_id",
+    "je"."organization_id",
+    "jl"."id" AS "line_id",
+    "jl"."line_number",
+    "jl"."account_id",
+    "coa"."code" AS "account_code",
+    "coa"."name" AS "account_name",
+    "coa"."account_type",
+    "coa"."normal_balance",
+    "jl"."description" AS "line_description",
+    "je"."currency" AS "original_currency",
+    "jl"."debit_amount" AS "original_debit",
+    "jl"."credit_amount" AS "original_credit",
+    "je"."base_currency",
+    COALESCE("jl"."base_debit", "jl"."debit_amount") AS "base_debit",
+    COALESCE("jl"."base_credit", "jl"."credit_amount") AS "base_credit",
+    "je"."exchange_rate" AS "applied_exchange_rate",
+    "sum"(
+        CASE
+            WHEN ("coa"."normal_balance" = 'DEBIT'::"text") THEN (COALESCE("jl"."base_debit", "jl"."debit_amount") - COALESCE("jl"."base_credit", "jl"."credit_amount"))
+            ELSE (COALESCE("jl"."base_credit", "jl"."credit_amount") - COALESCE("jl"."base_debit", "jl"."debit_amount"))
+        END) OVER (PARTITION BY "jl"."account_id" ORDER BY "je"."transaction_date", "je"."reference", "jl"."line_number" ROWS UNBOUNDED PRECEDING) AS "running_balance_base"
+   FROM (("finance"."journal_lines" "jl"
+     JOIN "finance"."journal_entries" "je" ON (("je"."id" = "jl"."journal_entry_id")))
+     JOIN "finance"."chart_of_accounts" "coa" ON (("coa"."id" = "jl"."account_id")))
+  WHERE (("je"."status" = 'POSTED'::"text") AND ("je"."currency" <> "je"."base_currency"));
+
+
+ALTER VIEW "reporting"."general_ledger_multi_currency" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "reporting"."general_ledger_multi_currency" IS 'MF-03 (Spec 13.2): Original-currency ledgers report. Restricts reporting.general_ledger to entries actually posted in a foreign currency and keeps their original-currency amounts alongside the PKR-converted amounts and the applied rate, so foreign-currency transactions can be reviewed in the currency they were recorded in.';
+
+
+
 CREATE OR REPLACE VIEW "reporting"."payable_aging" WITH ("security_invoker"='true') AS
  SELECT "vb"."id" AS "bill_id",
     "vb"."bill_number",
@@ -12380,6 +12463,67 @@ CREATE OR REPLACE VIEW "reporting"."payable_aging" WITH ("security_invoker"='tru
 
 
 ALTER VIEW "reporting"."payable_aging" OWNER TO "postgres";
+
+
+CREATE OR REPLACE VIEW "reporting"."pkr_conversion" WITH ("security_invoker"='true') AS
+ SELECT "je"."id" AS "journal_entry_id",
+    "je"."reference" AS "journal_reference",
+    "je"."description" AS "journal_description",
+    "je"."transaction_date",
+    "je"."posting_date",
+    "je"."period_id",
+    "je"."fiscal_year_id",
+    "je"."organization_id",
+    "jl"."id" AS "line_id",
+    "jl"."account_id",
+    "coa"."code" AS "account_code",
+    "coa"."name" AS "account_name",
+    "je"."currency" AS "original_currency",
+    "je"."base_currency",
+    "jl"."debit_amount" AS "original_debit",
+    "jl"."credit_amount" AS "original_credit",
+    COALESCE("jl"."base_debit", "jl"."debit_amount") AS "pkr_debit",
+    COALESCE("jl"."base_credit", "jl"."credit_amount") AS "pkr_credit",
+    "je"."exchange_rate" AS "applied_rate",
+    "je"."transaction_date" AS "rate_date",
+    "je"."period_id" AS "rate_period_id",
+    "matched_rate"."rate_type" AS "matched_rate_type",
+    "matched_rate"."rate" AS "matched_rate_value",
+    "matched_rate"."approved_by" AS "matched_rate_approved_by",
+    "matched_rate"."evidence_reference" AS "matched_rate_evidence",
+        CASE
+            WHEN ("je"."currency" = "je"."base_currency") THEN 'BASE_CURRENCY'::"text"
+            WHEN ("matched_rate"."rate_type" = ANY (ARRAY['PLATFORM'::"text", 'BANK'::"text", 'PAYMENT_CHANNEL'::"text"])) THEN 'ACTUAL_PLATFORM_BANK_RATE'::"text"
+            WHEN (("matched_rate"."rate_type" = 'MANUAL'::"text") AND ("matched_rate"."approved_by" IS NOT NULL)) THEN 'APPROVED_ACCOUNTING_RATE'::"text"
+            WHEN (("matched_rate"."rate_type" = 'MANUAL'::"text") AND ("matched_rate"."approved_by" IS NULL)) THEN 'PENDING_APPROVAL'::"text"
+            ELSE 'PENDING_CONVERSION'::"text"
+        END AS "rate_method"
+   FROM ((("finance"."journal_lines" "jl"
+     JOIN "finance"."journal_entries" "je" ON (("je"."id" = "jl"."journal_entry_id")))
+     JOIN "finance"."chart_of_accounts" "coa" ON (("coa"."id" = "jl"."account_id")))
+     LEFT JOIN LATERAL ( SELECT "er"."rate_type",
+            "er"."rate",
+            "er"."approved_by",
+            "er"."evidence_reference"
+           FROM "finance"."exchange_rates" "er"
+          WHERE (("er"."organization_id" = "je"."organization_id") AND ("er"."from_currency" = "je"."currency") AND ("er"."to_currency" = "je"."base_currency") AND ("er"."rate_date" = "je"."transaction_date"))
+          ORDER BY ("er"."rate" = "je"."exchange_rate") DESC,
+                CASE "er"."rate_type"
+                    WHEN 'PLATFORM'::"text" THEN 1
+                    WHEN 'BANK'::"text" THEN 2
+                    WHEN 'PAYMENT_CHANNEL'::"text" THEN 3
+                    WHEN 'MANUAL'::"text" THEN 4
+                    ELSE 5
+                END, "er"."approved_at" DESC NULLS LAST
+         LIMIT 1) "matched_rate" ON (true))
+  WHERE ("je"."status" = 'POSTED'::"text");
+
+
+ALTER VIEW "reporting"."pkr_conversion" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "reporting"."pkr_conversion" IS 'MF-05 (Spec 13.2): PKR conversion report. Shows, per journal line, the applied rate method (actual platform/bank rate, approved accounting rate, or pending conversion), and the rate date/period used, by matching each journal entry against finance.exchange_rates on currency pair + rate_date.';
+
 
 
 CREATE OR REPLACE VIEW "reporting"."pnl" WITH ("security_invoker"='true') AS
@@ -19734,6 +19878,7 @@ GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", 
 
 
 
+
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
@@ -20922,9 +21067,24 @@ GRANT ALL ON TABLE "reporting"."changes_in_equity" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "reporting"."exchange_rate_history" TO "authenticated";
+GRANT ALL ON TABLE "reporting"."exchange_rate_history" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "reporting"."general_ledger_multi_currency" TO "authenticated";
+GRANT ALL ON TABLE "reporting"."general_ledger_multi_currency" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "reporting"."payable_aging" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."payable_aging" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."payable_aging" TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "reporting"."pkr_conversion" TO "authenticated";
+GRANT ALL ON TABLE "reporting"."pkr_conversion" TO "service_role";
 
 
 
@@ -21029,3 +21189,4 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
+

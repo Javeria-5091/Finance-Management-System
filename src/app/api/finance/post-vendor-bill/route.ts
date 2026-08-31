@@ -146,10 +146,6 @@ export async function POST(req: NextRequest) {
       .schema('finance').from('chart_of_accounts').select('id, code, name')
       .eq('account_type', 'ASSET').eq('is_active', true).eq('organization_id', auth.orgId).ilike('name', '%input tax%').order('code').limit(1).maybeSingle());
 
-    const withholdingReceivableAccount = getData(await supabase
-      .schema('finance').from('chart_of_accounts').select('id, code, name')
-      .eq('account_type', 'ASSET').eq('is_active', true).eq('code', '1410').eq('organization_id', auth.orgId).maybeSingle());
-
     const creditAccountId = payableAccount?.id;
 
     if (!creditAccountId) {
@@ -158,9 +154,19 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // Build correct AP accounting:
-    // Dr expense subtotal + Dr input tax + Dr withholding-tax receivable
-    // Cr vendor payable for the net amount due to the vendor.
+    // FC-02 FIX: WHT is a liability owed to the tax authority on the
+    // vendor's behalf, not a receivable owed to us — the vendor is simply
+    // paid the net amount. Correct accounting is:
+    //   Dr Expense (gross, per coded lines) + Dr Input Tax (if any)
+    //   Cr Vendor Payable (NET = total - WHT withheld)
+    //   Cr WHT Payable  (the WHT amount, remitted to the tax authority later)
+    // The previous code additionally debited a "withholding-tax receivable"
+    // (account 1410) for the same WHT amount while also crediting AP for the
+    // GROSS total — that double-counted the WHT (it inflated both an asset
+    // and a liability that don't exist for this transaction) instead of
+    // simply netting it out of what's owed to the vendor. There is no DR
+    // receivable line for WHT on a vendor bill; it only nets AP down and
+    // credits the WHT Payable liability.
     const totalAmount = Number(bill.total_amount) || 0;
     const totalTax = Number(bill.tax_amount) || 0;
     const withholdingAmount = Number(bill.withholding_amount) || 0;
@@ -168,9 +174,6 @@ export async function POST(req: NextRequest) {
 
     if (totalTax > 0 && !inputTaxAccount) {
       return NextResponse.json({ error: 'Vendor bill has tax_amount but no active Input Tax asset account is configured.' }, { status: 400 });
-    }
-    if (withholdingAmount > 0 && !withholdingReceivableAccount) {
-      return NextResponse.json({ error: 'Vendor bill has withholding_amount but withholding-tax receivable account 1410 is not configured.' }, { status: 400 });
     }
 
     // BUG-007 FIX: finance.vendor_bill_lines has NO `amount` or `category`
@@ -232,19 +235,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `Vendor bill line total (${expenseTotal}) does not match subtotal (${subtotal}).` }, { status: 400 });
     }
     if (totalTax > 0) rpcLines.push({ account_id: inputTaxAccount.id, debit_amount: totalTax, credit_amount: 0, description: `Input tax: ${bill.bill_number || 'N/A'}` });
-    if (withholdingAmount > 0) rpcLines.push({ account_id: withholdingReceivableAccount.id, debit_amount: withholdingAmount, credit_amount: 0, description: `Withholding tax receivable: ${bill.bill_number || 'N/A'}` });
-    // C-03 fix: the debit side already includes withholdingAmount as its own
-    // DR line above (in addition to the expense/tax lines), so DR total =
-    // totalAmount + withholdingAmount. Crediting AP for the *net* payable
-    // (totalAmount - withholdingAmount) therefore left the journal unbalanced
-    // by 2x withholdingAmount. AP must be credited for the gross totalAmount;
-    // the WHT debit line is what nets AP down to the actual amount owed.
-    if (withholdingAmount > totalAmount) return NextResponse.json({ error: 'Withholding amount cannot exceed vendor bill total.' }, { status: 400 });
-    rpcLines.push({ account_id: creditAccountId, debit_amount: 0, credit_amount: totalAmount, description: `Vendor payable: ${bill.bill_number || 'N/A'}` });
 
-    // Critical fix: mirror finance.post_vendor_bill() and add the WHT Payable
-    // credit when withholding is present. The existing route already debits
-    // the WHT receivable account, so this keeps the journal balanced.
+    // FC-02 FIX: no DR line for WHT here (see comment above). Debit side is
+    // just expenseTotal (== subtotal) + totalTax, so AP must be credited for
+    // the NET amount (totalAmount - withholdingAmount) to keep the journal
+    // balanced; the WHT Payable credit below picks up the remaining
+    // withholdingAmount so total credits still equal totalAmount.
+    if (withholdingAmount > totalAmount) return NextResponse.json({ error: 'Withholding amount cannot exceed vendor bill total.' }, { status: 400 });
+    rpcLines.push({ account_id: creditAccountId, debit_amount: 0, credit_amount: totalAmount - withholdingAmount, description: `Vendor payable (net of WHT): ${bill.bill_number || 'N/A'}` });
+
+    // Credit the WHT Payable liability for the amount withheld — this is
+    // remitted to the tax authority separately, not owed to the vendor.
     if (withholdingAmount > 0) {
       const withholdingPayableAccount = getData(await supabase
         .schema('finance').from('chart_of_accounts').select('id')

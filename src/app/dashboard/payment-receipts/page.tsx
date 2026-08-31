@@ -37,7 +37,11 @@ export default function PaymentReceiptsPage() {
     payment_method: "BANK_TRANSFER", 
     reference: "", 
     description: "",
-    payment_date: new Date().toISOString().split("T")[0]
+    payment_date: new Date().toISOString().split("T")[0],
+    // FC-04 FIX: currency/exchange_rate are now real, user-editable fields
+    // instead of being hardcoded to PKR/1 at submit time.
+    currency: "PKR",
+    exchange_rate: "1",
   });
  
   const totalAllocated = Object.values(allocations).reduce((sum, val) => sum + val, 0);
@@ -106,7 +110,9 @@ export default function PaymentReceiptsPage() {
       payment_method: "BANK_TRANSFER", 
       reference: "", 
       description: "",
-      payment_date: new Date().toISOString().split("T")[0]
+      payment_date: new Date().toISOString().split("T")[0],
+      currency: "PKR",
+      exchange_rate: "1",
     });
     setSelectedClientName("");
     setClientSearch("");
@@ -127,6 +133,11 @@ export default function PaymentReceiptsPage() {
     if (!isBalanced || !form.amount) return alert("Pura amount invoices ke against allocate karna zaroori hai.");
     if (!form.client_id) return alert("Client select karna zaroori hai.");
     if (!financialAccountId) return alert("Active bank/cash account configure karna zaroori hai.");
+    const currency = (form.currency || "PKR").toUpperCase();
+    const exchangeRate = parseFloat(form.exchange_rate) || 0;
+    if (currency !== "PKR" && exchangeRate <= 0) {
+      return alert("Non-PKR payment ke liye valid exchange rate zaroori hai.");
+    }
 
     setSaving(true);
     try {
@@ -137,8 +148,8 @@ export default function PaymentReceiptsPage() {
         body: JSON.stringify({
           client_id: form.client_id,
           amount: Number(form.amount),
-          currency: 'PKR',
-          exchange_rate: 1,
+          currency,
+          exchange_rate: currency === "PKR" ? 1 : exchangeRate,
           received_date: form.payment_date,
           payment_method: form.payment_method,
           reference: form.reference || undefined,
@@ -297,13 +308,39 @@ export default function PaymentReceiptsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Total Amount Received (PKR) *</label>
+                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Total Amount Received *</label>
                   <input 
                     type="number" 
                     value={form.amount} 
                     onChange={(e) => setForm({ ...form, amount: e.target.value })} 
                     className="w-full p-2 border dark:border-gray-600 rounded bg-transparent dark:bg-gray-700 text-gray-900 dark:text-white text-sm" 
                     placeholder="0.00" 
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Currency *</label>
+                  <input
+                    type="text"
+                    maxLength={3}
+                    value={form.currency}
+                    onChange={(e) => {
+                      const currency = e.target.value.toUpperCase();
+                      setForm((p) => ({ ...p, currency, exchange_rate: currency === "PKR" ? "1" : p.exchange_rate }));
+                    }}
+                    placeholder="PKR"
+                    className="w-full p-2 border dark:border-gray-600 rounded bg-transparent dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Exchange Rate {form.currency !== "PKR" ? "*" : ""}</label>
+                  <input
+                    type="number"
+                    min="0.000001"
+                    step="0.000001"
+                    disabled={form.currency === "PKR"}
+                    value={form.exchange_rate}
+                    onChange={(e) => setForm({ ...form, exchange_rate: e.target.value })}
+                    className="w-full p-2 border dark:border-gray-600 rounded bg-transparent dark:bg-gray-700 text-gray-900 dark:text-white text-sm disabled:opacity-60"
                   />
                 </div>
                 <div>

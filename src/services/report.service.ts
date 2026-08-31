@@ -999,6 +999,125 @@ export const getCurrencyExposure = async (organization_id?: string) => {
   return rows as unknown as CurrencyExposureRow[];
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-Currency & FX Reports (Spec §13.2) — MF-03, MF-04, MF-05
+// ═══════════════════════════════════════════════════════════════════════════
+
+// MF-03: Original-currency ledgers report
+export const getGeneralLedgerMultiCurrency = async (params: {
+  currency?: string;
+  accountId?: string;
+  startDate?: string;
+  endDate?: string;
+  page?: number;
+  pageSize?: number;
+}) => {
+  const page = params.page || 1;
+  const pageSize = params.pageSize || 50;
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+
+  let query = reportingDb()
+    .from('general_ledger_multi_currency')
+    .select('*', { count: 'exact' });
+
+  if (params.currency) query = query.eq('original_currency', params.currency);
+  if (params.accountId) query = query.eq('account_id', params.accountId);
+  if (params.startDate) query = query.gte('transaction_date', params.startDate);
+  if (params.endDate) query = query.lte('transaction_date', params.endDate);
+
+  const { data, error, count } = await query
+    .order('transaction_date', { ascending: true })
+    .range(from, to);
+
+  if (error) throw new Error(error.message);
+
+  const rows = ((data || []) as any[]).map((r) => ({
+    id: r.line_id,
+    date: r.transaction_date,
+    ref: r.journal_reference,
+    description: r.line_description || r.journal_description,
+    account_code: r.account_code,
+    account_name: r.account_name,
+    original_currency: r.original_currency,
+    original_debit: Number(r.original_debit ?? 0),
+    original_credit: Number(r.original_credit ?? 0),
+    base_currency: r.base_currency,
+    base_debit: Number(r.base_debit ?? 0),
+    base_credit: Number(r.base_credit ?? 0),
+    applied_exchange_rate: Number(r.applied_exchange_rate ?? 1),
+    running_balance_base: Number(r.running_balance_base ?? 0),
+  }));
+
+  return { rows, total_count: count || 0 };
+};
+
+// MF-04: Manual-rate history report
+export const getExchangeRateHistory = async (params: {
+  fromCurrency?: string;
+  toCurrency?: string;
+  rateType?: string;
+  startDate?: string;
+  endDate?: string;
+  page?: number;
+  pageSize?: number;
+}) => {
+  const page = params.page || 1;
+  const pageSize = params.pageSize || 50;
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+
+  let query = reportingDb()
+    .from('exchange_rate_history')
+    .select('*', { count: 'exact' });
+
+  if (params.fromCurrency) query = query.eq('from_currency', params.fromCurrency);
+  if (params.toCurrency) query = query.eq('to_currency', params.toCurrency);
+  if (params.rateType) query = query.eq('rate_type', params.rateType);
+  if (params.startDate) query = query.gte('rate_date', params.startDate);
+  if (params.endDate) query = query.lte('rate_date', params.endDate);
+
+  const { data, error, count } = await query
+    .order('rate_date', { ascending: false })
+    .range(from, to);
+
+  if (error) throw new Error(error.message);
+
+  return { rows: (data || []) as any[], total_count: count || 0 };
+};
+
+// MF-05: PKR conversion report with rate-method labeling
+export const getPkrConversionReport = async (params: {
+  currency?: string;
+  rateMethod?: string;
+  startDate?: string;
+  endDate?: string;
+  page?: number;
+  pageSize?: number;
+}) => {
+  const page = params.page || 1;
+  const pageSize = params.pageSize || 50;
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+
+  let query = reportingDb()
+    .from('pkr_conversion')
+    .select('*', { count: 'exact' });
+
+  if (params.currency) query = query.eq('original_currency', params.currency);
+  if (params.rateMethod) query = query.eq('rate_method', params.rateMethod);
+  if (params.startDate) query = query.gte('transaction_date', params.startDate);
+  if (params.endDate) query = query.lte('transaction_date', params.endDate);
+
+  const { data, error, count } = await query
+    .order('transaction_date', { ascending: false })
+    .range(from, to);
+
+  if (error) throw new Error(error.message);
+
+  return { rows: (data || []) as any[], total_count: count || 0 };
+};
+
 export default {
   getProfitAndLoss,
   getBalanceSheet,

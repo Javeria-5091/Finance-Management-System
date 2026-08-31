@@ -34,7 +34,32 @@ if(b.action==='draft_bill'){const sub=(event as any).subscriptions;
     if(ve)throw ve;
     if(!vendors?.[0])
         throw new Error('Matching vendor not found; create vendor first');
-    const {data:bill,error:be}=await supabase.schema('finance').from('vendor_bills').insert({vendor_id:vendors[0].id,bill_date:event.renewal_date,due_date:event.renewal_date,currency:sub.currency,total_amount:sub.amount,base_total_amount:sub.amount,subtotal:sub.amount,base_subtotal:sub.amount,status:'DRAFT',description:`Subscription renewal: ${sub.name}`,created_by:a.userId,organization_id:a.orgId}).select().single();
+    // FC-03 FIX: base_total_amount/base_subtotal were previously set to
+    // sub.amount directly with no FX conversion, so a foreign-currency
+    // subscription (e.g. USD 100 @ rate 280) posted to the GL as if it were
+    // PKR 100 — understating the expense by the exchange rate factor. The
+    // base_* columns must always be the PKR-equivalent (amount * rate).
+    const subCurrency=(sub.currency||'PKR').toUpperCase();
+    let exchangeRate=1;
+    if(subCurrency!=='PKR'){
+        const {data:rateRow,error:re}=await supabase.schema('finance').from('exchange_rates')
+            .select('rate,rate_date')
+            .eq('organization_id',a.orgId)
+            .eq('from_currency',subCurrency)
+            .eq('to_currency','PKR')
+            .not('approved_by','is',null)
+            .lte('rate_date',event.renewal_date)
+            .order('rate_date',{ascending:false})
+            .limit(1)
+            .maybeSingle();
+        if(re)throw re;
+        if(!rateRow)
+            throw new Error(`No approved exchange rate found for ${subCurrency} -> PKR on or before ${event.renewal_date}. Enter and approve a rate before drafting this bill.`);
+        exchangeRate=Number(rateRow.rate);
+    }
+    const amount=Number(sub.amount)||0;
+    const baseAmount=Math.round(amount*exchangeRate*100)/100;
+    const {data:bill,error:be}=await supabase.schema('finance').from('vendor_bills').insert({vendor_id:vendors[0].id,bill_date:event.renewal_date,due_date:event.renewal_date,currency:subCurrency,exchange_rate:exchangeRate,total_amount:amount,base_total_amount:baseAmount,subtotal:amount,base_subtotal:baseAmount,status:'DRAFT',description:`Subscription renewal: ${sub.name}`,created_by:a.userId,organization_id:a.orgId}).select().single();
     if(be)throw be;
     await supabase.from('subscription_renewal_events').update({status:'DRAFT_BILL_CREATED',draft_vendor_bill_id:bill.id}).eq('id',event.id).eq('organization_id',a.orgId);
     return NextResponse.json({data:bill});}}
