@@ -13,7 +13,7 @@ const schema = z.object({
   payment_reference:z.string().trim().max(200).optional().nullable(),
   payment_method:z.enum(['bank_transfer','cheque','online','adjustment']).default('bank_transfer'), payment_date:z.string().date(),
   financial_account_id:z.string().uuid().optional().nullable(),
-  debit_account_id:z.string().uuid().optional().nullable(), credit_account_id:z.string().uuid().optional().nullable(),
+  debit_account_id:z.string().uuid(), credit_account_id:z.string().uuid(),
   notes:z.string().trim().max(2000).optional().nullable(),
 }).strict();
 
@@ -28,28 +28,33 @@ export async function POST(req:NextRequest){
   const auth=await requirePermission('TAX_APPROVE'); if(auth instanceof NextResponse)return auth;
   const mfa=await enforceMFA(auth); if(mfa)return mfa;
   const parsed=schema.safeParse(await req.json()); if(!parsed.success)return NextResponse.json({error:parsed.error.issues[0]?.message},{status:400});
+  const idempotencyKey = req.headers.get('Idempotency-Key')?.trim();
+  if(!idempotencyKey) return NextResponse.json({error:'Idempotency-Key header is required for tax payment commands'},{status:400});
+  if(idempotencyKey.length > 200) return NextResponse.json({error:'Idempotency-Key is too long'},{status:400});
+
   const body=parsed.data; const {supabase}=await getAuthSupabase(req);
-  if(body.financial_account_id){
-    const {data}=await supabase.schema('finance').from('financial_accounts').select('id,linked_ledger_account_id').eq('id',body.financial_account_id).eq('organization_id',auth.orgId).eq('is_active',true).maybeSingle();
-    if(!data)return NextResponse.json({error:'Financial account not found or inactive'},{status:404});
-  }
-  if(body.debit_account_id||body.credit_account_id){
-    if(!body.debit_account_id||!body.credit_account_id)return NextResponse.json({error:'Both debit_account_id and credit_account_id are required for ledger posting'},{status:400});
-    const {data:accounts}=await supabase.schema('finance').from('chart_of_accounts').select('id').eq('organization_id',auth.orgId).in('id',[body.debit_account_id,body.credit_account_id]);
-    if(!accounts||accounts.length!==2)return NextResponse.json({error:'Ledger accounts must belong to your organization'},{status:400});
-  }
-  let journal_entry_id:string|null=null;
-  if(body.debit_account_id&&body.credit_account_id){
-    if(!body.period_id)return NextResponse.json({error:'period_id is required when posting to the ledger'},{status:400});
-    const lines=[
-      {account_id:body.debit_account_id,debit_amount:Number((body.amount+body.penalty_amount+body.surcharge_amount).toFixed(2)),credit_amount:0,description:`Tax ${body.payment_type}`},
-      {account_id:body.credit_account_id,debit_amount:0,credit_amount:Number((body.amount+body.penalty_amount+body.surcharge_amount).toFixed(2)),description:`Tax ${body.payment_type}`},
-    ];
-    const {data:jid,error:jerr}=await supabase.schema('finance').rpc('post_journal_entry',{p_description:`Tax ${body.payment_type}`,p_transaction_date:body.payment_date,p_period_id:body.period_id,p_lines:lines,p_currency:body.currency,p_exchange_rate:1,p_source_type:'TAX_PAYMENT'});
-    if(jerr)return NextResponse.json({error:jerr.message},{status:400}); journal_entry_id=jid;
-  }
-  const {data,error}=await supabase.schema('finance').from('tax_payments_and_refunds').insert({
-    ...body, currency:body.currency.toUpperCase(), organization_id:auth.orgId, created_by:auth.userId, journal_entry_id, status:journal_entry_id?'COMPLETED':'PENDING'
-  }).select().single();
-  if(error)return NextResponse.json({error:error.message},{status:400}); return NextResponse.json({data},{status:201});
+  const { data, error } = await supabase.schema('finance').rpc('post_tax_payment_atomic', {
+    p_tax_computation_id: body.tax_computation_id,
+    p_tax_return_id: body.tax_return_id,
+    p_fiscal_year_id: body.fiscal_year_id,
+    p_period_id: body.period_id,
+    p_payment_type: body.payment_type,
+    p_tax_authority: body.tax_authority,
+    p_cpr_number: body.cpr_number,
+    p_prs_number: body.prs_number,
+    p_amount: body.amount,
+    p_currency: body.currency.toUpperCase(),
+    p_penalty_amount: body.penalty_amount,
+    p_surcharge_amount: body.surcharge_amount,
+    p_payment_reference: body.payment_reference,
+    p_payment_method: body.payment_method,
+    p_payment_date: body.payment_date,
+    p_financial_account_id: body.financial_account_id,
+    p_debit_account_id: body.debit_account_id,
+    p_credit_account_id: body.credit_account_id,
+    p_notes: body.notes,
+    p_idempotency_key: idempotencyKey,
+  });
+  if(error)return NextResponse.json({error:error.message},{status:400});
+  return NextResponse.json({data},{status:data?.idempotent_replay ? 200 : 201});
 }

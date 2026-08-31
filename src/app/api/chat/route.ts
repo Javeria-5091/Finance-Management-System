@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import { getAuthSupabase, isSqlSafe, checkAiDailyLimit, checkOrgAiDailyLimit, recordAiUsage } from '@/lib/api-auth';
 import { logAIEvent } from '@/lib/logAction';
 import { getActiveModel, resolveModel, getActivePrompt } from '@/lib/ai-registry';
+import { AI_TOOL_REGISTRY } from '@/lib/ai-tool-registry';
 import { DATABASE_SCHEMA } from '@/lib/schema';
 import { z } from 'zod';
 
@@ -15,24 +16,9 @@ import { z } from 'zod';
 // aggregates with no per-user dimension at all. Set explicitly per tool so a
 // future tool addition can't silently inherit the wrong scope.
 const AI_TOOLS = {
-  get_cash_position: {
-    view: 'reporting.v_cash_position',
-    description: 'Cash and bank balances',
-    requiredPermission: 'BANK_READ',
-    scopeByUser: false,
-  },
-  get_project_profitability: {
-    view: 'reporting.v_project_profitability',
-    description: 'Project margins and costs',
-    requiredPermission: 'PROJECT_READ',
-    scopeByUser: false,
-  },
-  get_tax_summary: {
-    view: 'reporting.v_tax_computation_summary',
-    description: 'PBT, taxable income, and tax summary',
-    requiredPermission: 'TAX_READ',
-    scopeByUser: false,
-  },
+  get_cash_position: AI_TOOL_REGISTRY.get_cash_position,
+  get_project_profitability: AI_TOOL_REGISTRY.get_project_profitability,
+  get_tax_summary: AI_TOOL_REGISTRY.get_tax_summary,
 } as const;
 
 // Fallbacks used only if the DB prompt registry row is missing/inactive —
@@ -177,8 +163,11 @@ export async function POST(req: Request) {
         .insert({ user_id: user.id, organization_id: orgId, title: userQuestion.slice(0, 50) })
         .select('id')
         .single();
-      if (convError) console.error('ai_conversations insert error:', convError.message);
-      convId = newConv?.id;
+      if (convError || !newConv?.id) {
+        console.error('ai_conversations insert error:', convError?.message || 'No conversation id returned');
+        return NextResponse.json({ error: 'Unable to create AI conversation. Please try again.', request_id: requestId }, { status: 503 });
+      }
+      convId = newConv.id;
     }
 
     const { data: userMsgData, error: userMsgError } = await supabase
@@ -187,8 +176,11 @@ export async function POST(req: Request) {
       .insert({ conversation_id: convId, role: 'user', content: userQuestion, content_type: 'text' })
       .select('id')
       .single();
-    if (userMsgError) console.error('ai_messages (user) insert error:', userMsgError.message);
-    const userMsgId = userMsgData?.id;
+    if (userMsgError || !userMsgData?.id) {
+      console.error('ai_messages (user) insert error:', userMsgError?.message || 'No user message id returned');
+      return NextResponse.json({ error: 'Unable to persist AI request. Please try again.', request_id: requestId }, { status: 503 });
+    }
+    const userMsgId = userMsgData.id;
 
     const nowIso = new Date().toISOString();
     const complianceWarning = 'AI figures are draft. Cross-check with official reports before decisions.';
@@ -322,7 +314,7 @@ export async function POST(req: Request) {
       toolUsed = selectedTool;
       const toolDef = AI_TOOLS[selectedTool as keyof typeof AI_TOOLS];
 
-      const allowed = await hasPermission(supabase, user.id, toolDef.requiredPermission);
+      const allowed = (await Promise.all(toolDef.requiredPermission.map((permission) => hasPermission(supabase, user.id, permission)))).some(Boolean);
       if (!allowed) {
         await supabase.schema('ai').from('ai_tool_calls').insert({
           message_id: userMsgId,
@@ -330,7 +322,7 @@ export async function POST(req: Request) {
           user_id: user.id,
           organization_id: orgId,
           tool_name: toolUsed,
-          input_params: { orgId, view: toolDef.view },
+          input_params: { orgId, tool: toolDef.name },
           permission_check: 'denied',
           user_role: userRole,
           status: 'blocked',
@@ -392,7 +384,7 @@ export async function POST(req: Request) {
       // that UUID with the authenticated p_org_id server-side, so a caller
       // can never smuggle in another org's ID — see schema.sql's
       // execute_ai_readonly_query()). The old code sent a bare
-      // `SELECT * FROM ${toolDef.view}` with no predicate at all, so this
+      // `SELECT * FROM ${toolDef.name}` with no predicate at all, so this
       // safety check rejected every pre-canned tool call with
       // "AI query rejected: organization_id predicate is required".
       //
@@ -403,18 +395,14 @@ export async function POST(req: Request) {
       // underlying view actually has that column (scopeByUser) — passing
       // p_enforce_user_scope: true for a view with no user_id column would
       // make the DB function reject the query before it even runs.
-      const scopeClauses = [`organization_id = '${orgId}'`];
-      if (toolDef.scopeByUser) {
-        scopeClauses.push(`user_id = '${user.id}'`);
-      }
-      const innerQuery = `SELECT * FROM ${toolDef.view} WHERE ${scopeClauses.join(' AND ')}`;
+      const innerQuery = (toolDef.query || '').replace(/\$\{orgId\}/g, orgId);
 
       const startTime = Date.now();
       const { data: res, error: toolError } = await supabase.rpc('execute_ai_readonly_query', {
         query_string: innerQuery,
         p_org_id: orgId,
         p_user_id: user.id,
-        p_enforce_user_scope: toolDef.scopeByUser,
+        p_enforce_user_scope: toolDef.enforceUserScope,
       });
       latencyMs = Date.now() - startTime;
 
@@ -424,7 +412,7 @@ export async function POST(req: Request) {
         user_id: user.id,
         organization_id: orgId,
         tool_name: toolUsed,
-        input_params: { orgId, view: toolDef.view },
+        input_params: { orgId, tool: toolDef.name },
         permission_check: 'passed',
         user_role: userRole,
         status: toolError ? 'error' : 'success',

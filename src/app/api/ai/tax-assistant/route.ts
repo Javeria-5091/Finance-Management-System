@@ -12,7 +12,6 @@
 // represent its explanation as professional tax advice."
 // =============================================================================
 
-import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
@@ -26,8 +25,8 @@ import {
   TokenUsage,
 } from '@/lib/ai-cost-tracking';
 import { z } from 'zod';
-
-const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+import { buildAiResponse, type AiResponseContract } from '@/lib/ai-response';
+import { getActiveModel, resolveModel } from '@/lib/ai-registry';
 
 // SECURITY FIX (BUG-004, CRITICAL — SQL injection): tax_year is a
 // client-supplied string. It must never be interpolated into a SQL string
@@ -50,6 +49,16 @@ const TaxAssistantRequestSchema = z.object({
   tax_year: z.string().optional(),
   question: z.string().optional().default(''),
 });
+
+function taxYearPeriod(taxYear?: string): { from: string; to: string } | null {
+  if (!taxYear) return null;
+  const match = taxYear.match(/^(\d{4})(?:-(\d{4}))?$/);
+  if (!match) return null;
+  const startYear = Number(match[1]);
+  const endYear = Number(match[2] || startYear + 1);
+  // OSYSTIC specification uses a 1 July–30 June fiscal calendar.
+  return { from: `${startYear}-07-01`, to: `${endYear}-06-30` };
+}
 
 export async function POST(req: Request) {
   const permissionCheck = await requirePermission('REPORT_READ');
@@ -114,7 +123,7 @@ export async function POST(req: Request) {
       // with no user_id column (per-user filtering would fail closed with
       // an "undefined_column" error from the DB function otherwise).
       const safeTaxYear = String(tax_year).replace(/'/g, "''");
-      const innerQuery = `SELECT * FROM reporting.v_tax_computation_summary WHERE tax_year = '${safeTaxYear}'`;
+      const innerQuery = `SELECT * FROM reporting.v_tax_computation_summary WHERE organization_id = '${orgId}' AND tax_year = '${safeTaxYear}'`;
 
       const { data: taxSummary, error: taxErr } = await supabase.rpc('execute_ai_readonly_query', {
         query_string: innerQuery,
@@ -165,21 +174,25 @@ This is a DRAFT checklist for accountant review — NOT a substitute for profess
       general_question: `${question}\n\nTax computation data:\n${taxData || 'No specific tax year data provided.'}`,
     };
 
+    const aiModel = await getActiveModel(supabase, 'tax_assistant');
+
     const aiResult = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
+      model: resolveModel(aiModel),
       system: systemPrompt,
       prompt: actionPrompts[action],
     });
 
     // 5. Build response
     const totalLatency = Date.now() - startTime;
+    const confidence: AiResponseContract['confidence'] = taxData ? 'medium' : 'low';
+
     const responsePayload = {
       action,
       tax_year: tax_year || null,
       analysis: aiResult.text,
       computation_status: taxData ? 'data_available' : 'no_data',
       data_as_of: new Date().toISOString(),
-      confidence: taxData ? 'medium' : 'low',
+      confidence,
       compliance_note: 'AI explanation only. NOT professional tax advice. Accountant decides all tax actions: deductibility, rule selection, approval, filing, payment, and amendments.',
       safety_reminder: 'This AI cannot approve tax computations, submit returns, or initiate payments. All tax decisions require authorized accountant approval.',
     };
@@ -191,7 +204,7 @@ This is a DRAFT checklist for accountant review — NOT a substitute for profess
 
     await updateAiCostTracking(supabase, user.id, orgId, {
       inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
-      estimatedCostUsd: estimatedCost, model: 'llama-3.3-70b-versatile', latencyMs: totalLatency,
+      estimatedCostUsd: estimatedCost, model: aiModel.modelId, latencyMs: totalLatency,
     });
 
     await logAiAuditEvent(supabase, {
@@ -199,12 +212,23 @@ This is a DRAFT checklist for accountant review — NOT a substitute for profess
       status: 'success', severity: 'info',
       question: question || `Tax ${action} for year ${tax_year || 'current'}`,
       normalizedIntent: 'tax_assistant', selectedTool: action === 'return_checklist' ? 'prepare_tax_return_checklist' : 'explain_tax_reconciliation',
-      model: 'llama-3.3-70b-versatile', latencyMs: totalLatency,
+      model: aiModel.modelId, latencyMs: totalLatency,
       costUsd: estimatedCost, inputTokens, outputTokens,
       requestId, ipAddress: requestMetadata.ipAddress, userAgent: requestMetadata.userAgent,
     });
 
-    return NextResponse.json(responsePayload);
+    return NextResponse.json(buildAiResponse(responsePayload, {
+      answer: responsePayload.analysis,
+      metric_or_report: action === 'return_checklist' ? 'prepare_tax_return_checklist' : 'explain_tax_reconciliation',
+      period: taxYearPeriod(tax_year),
+      currency: 'PKR',
+      filters: [{ field: 'organization_id', value: orgId }],
+      data_as_of: responsePayload.data_as_of,
+      confidence: responsePayload.confidence,
+      warnings: [responsePayload.compliance_note],
+      source_rows_or_report: 'reporting.v_tax_computation_summary',
+      suggested_safe_actions: ['Review deterministic tax computation', 'Have an authorized accountant approve any tax action'],
+    }));
   } catch (error: any) {
     console.error('Tax Assistant API error:', error.message);
     return NextResponse.json({ error: 'Failed to generate tax analysis.' }, { status: 500 });

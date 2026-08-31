@@ -417,41 +417,25 @@ export default function PayrollPage() {
 
     if (action === "approve" && canApprove) {
       try {
-        const { error } = await supabase
-          .from("payroll_runs")
-          .update({
-            status: "APPROVED",
-            approved_by: user?.id,
-            approved_at: new Date().toISOString(),
-          })
-          .eq("id", run.id);
-        if (error) throw error;
-        toast.success("Payroll run approved");
-        await logAudit.approve(
-          "payroll_runs",
-          run.id,
-          `Approved payroll run: ${run.payroll_period}`
-        );
+        const res = await fetch('/api/payroll/runs', { method:'PUT', headers:{'Content-Type':'application/json'}, credentials:'include', body:JSON.stringify({runId:run.id,action:'approve'}) });
+        const result = await res.json().catch(()=>({}));
+        if(!res.ok) throw new Error(result.error || 'Approval failed');
+        toast.success(result.message || 'Payroll run approved');
+        await logAudit.update('payroll_runs', run.id, `Approved payroll run: ${run.payroll_period}`);
         refetchRuns();
-      } catch (err: any) {
-        toast.error("Failed: " + (err.message || "Unknown"));
-      }
+      } catch(err:any){ toast.error('Failed: '+(err.message||'Unknown')); }
       return;
     }
 
     if (action === "cancel") {
       if (!confirm("Cancel this payroll run?")) return;
       try {
-        const { error } = await supabase
-          .from("payroll_runs")
-          .update({ status: "CANCELLED" })
-          .eq("id", run.id);
-        if (error) throw error;
-        toast.success("Payroll run cancelled");
+        const res = await fetch('/api/payroll/runs', { method:'PUT', headers:{'Content-Type':'application/json'}, credentials:'include', body:JSON.stringify({runId:run.id,action:'cancel'}) });
+        const result = await res.json().catch(()=>({}));
+        if(!res.ok) throw new Error(result.error || 'Cancellation failed');
+        toast.success(result.message || 'Payroll run cancelled');
         refetchRuns();
-      } catch (err: any) {
-        toast.error("Failed: " + (err.message || "Unknown"));
-      }
+      } catch(err:any){ toast.error('Failed: '+(err.message||'Unknown')); }
     }
   }
 
@@ -497,40 +481,14 @@ export default function PayrollPage() {
   }
 
   async function handleAdvanceAction(advance: PayrollAdvance, action: string) {
-    if (action === "approve" && canAdvanceApprove) {
+    if ((action === 'approve' || action === 'reject') && canAdvanceApprove) {
       try {
-        const { error } = await supabase
-          .from("payroll_advances")
-          .update({
-            approval_status: "APPROVED",
-            approved_by: user?.id,
-            approved_at: new Date().toISOString(),
-          })
-          .eq("id", advance.id);
-        if (error) throw error;
-        toast.success("Advance approved");
+        const res = await fetch(`/api/payroll/advances/${advance.id}`, { method:'PATCH', headers:{'Content-Type':'application/json'}, credentials:'include', body:JSON.stringify({action}) });
+        const result = await res.json().catch(()=>({}));
+        if(!res.ok) throw new Error(result.error || `Advance ${action} failed`);
+        toast.success(result.message || `Advance ${action}d`);
         refetchAdvances();
-      } catch (err: any) {
-        toast.error("Failed: " + (err.message || "Unknown"));
-      }
-      return;
-    }
-    if (action === "reject" && canAdvanceApprove) {
-      try {
-        const { error } = await supabase
-          .from("payroll_advances")
-          .update({
-            approval_status: "REJECTED",
-            approved_by: user?.id,
-            approved_at: new Date().toISOString(),
-          })
-          .eq("id", advance.id);
-        if (error) throw error;
-        toast.success("Advance rejected");
-        refetchAdvances();
-      } catch (err: any) {
-        toast.error("Failed: " + (err.message || "Unknown"));
-      }
+      } catch(err:any){ toast.error('Failed: '+(err.message||'Unknown')); }
     }
   }
 

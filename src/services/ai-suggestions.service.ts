@@ -17,12 +17,12 @@ export interface AiSuggestion {
   entity_type: string;
   entity_id?: string;
   suggestion_type: string;
-  confidence: 'high' | 'medium' | 'low';
+  confidence: number;
   suggestion_data: any;
   status: 'pending' | 'accepted' | 'rejected' | 'expired';
-  accepted_by?: string;
-  accepted_at?: string;
-  rejection_reason?: string;
+  resolved_by?: string;
+  resolved_at?: string;
+  reasons?: string[];
   created_at?: string;
 }
 
@@ -108,8 +108,8 @@ export async function acceptSuggestion(
       .from('ai_suggestions')
       .update({
         status: 'accepted',
-        accepted_by: acceptedBy,
-        accepted_at: new Date().toISOString(),
+        resolved_by: acceptedBy,
+        resolved_at: new Date().toISOString(),
       })
       .eq('id', suggestionId);
 
@@ -140,7 +140,8 @@ export async function rejectSuggestion(
       .from('ai_suggestions')
       .update({
         status: 'rejected',
-        rejection_reason: reason || null,
+        resolved_by: userId,
+        resolved_at: new Date().toISOString(),
       })
       .eq('id', suggestionId);
 

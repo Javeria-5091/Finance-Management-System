@@ -173,13 +173,30 @@ export default function TaxReconciliationPage() {
     computeTax.mutate(selectedId, { onSuccess: () => refetchDetail() });
   };
 
-  const handleStatusChange = (status: string) => {
+  const handleStatusChange = async (status: string) => {
     if (!selectedId || !detail) return;
-    const updates: any = { status };
+
+    // Approval MUST go through the canonical API/RPC so MFA, TAX_APPROVE,
+    // organization scope and maker-checker are enforced server-side.
     if (status === 'ACCOUNTANT_APPROVED') {
-      updates.accountant_approved_by = user?.id;
-      updates.approved_at = new Date().toISOString();
+      try {
+        const res = await fetch('/api/finance/tax/reconciliation', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ id: selectedId, action: 'approve' }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload.error || 'Tax reconciliation approval failed');
+        await refetchDetail();
+        queryClient.invalidateQueries({ queryKey: ['tax_reconciliations'] });
+      } catch (error: any) {
+        alert(error?.message || 'Tax reconciliation approval failed');
+      }
+      return;
     }
+
+    const updates: any = { status };
     if (status === 'FILED') updates.filing_date = new Date().toISOString().split('T')[0];
     updateRecon.mutate({ id: selectedId, ...updates }, { onSuccess: () => refetchDetail() });
   };
@@ -414,7 +431,7 @@ export default function TaxReconciliationPage() {
                   {detail.status === 'CALCULATED' && hasPermission('TAX_MANAGE') && (
                     <button onClick={() => handleStatusChange('UNDER_REVIEW')} className="px-4 py-2 bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 rounded-lg text-sm font-medium hover:bg-yellow-200">Send for Review</button>
                   )}
-                  {detail.status === 'UNDER_REVIEW' && hasPermission('TAX_MANAGE') && (
+                  {detail.status === 'UNDER_REVIEW' && hasPermission('TAX_APPROVE') && (
                     <button onClick={() => handleStatusChange('ACCOUNTANT_APPROVED')} className="px-4 py-2 bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400 rounded-lg text-sm font-medium hover:bg-indigo-200">Accountant Approve</button>
                   )}
                   {detail.status === 'ACCOUNTANT_APPROVED' && hasPermission('TAX_MANAGE') && (

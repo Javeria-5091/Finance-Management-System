@@ -13,7 +13,6 @@
 // Spec 9.6: "AI-generated content is NEVER auto-posted. Always draft only."
 // =============================================================================
 
-import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
@@ -27,8 +26,8 @@ import {
   TokenUsage,
 } from '@/lib/ai-cost-tracking';
 import { z } from 'zod';
-
-const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+import { buildAiResponse } from '@/lib/ai-response';
+import { getActiveModel, resolveModel } from '@/lib/ai-registry';
 
 // ─── Request Schema ───
 const DocumentExtractionRequestSchema = z.object({
@@ -101,7 +100,7 @@ const ALLOWED_MIME_TYPES = [
 ];
 
 export async function POST(req: Request) {
-  const permissionCheck = await requirePermission('REPORT_READ');
+  const permissionCheck = await requirePermission('EXPENSE_READ');
   if (permissionCheck instanceof Response) return permissionCheck;
   const requestId = generateRequestId();
   const requestMetadata = extractRequestMetadata(req);
@@ -162,8 +161,10 @@ export async function POST(req: Request) {
     // 4. AI Extraction (Spec 9.6 Step 3)
     const extractionPrompt = buildExtractionPrompt(document_type, ocr_text || '');
 
+    const aiModel = await getActiveModel(supabase, 'document_extraction');
+
     const aiResult = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
+      model: resolveModel(aiModel),
       system: `You are a financial document extraction AI for OSYSTIC Finance System.
 Extract structured fields from the provided document text.
 
@@ -233,15 +234,17 @@ CRITICAL RULES:
       .insert({
         user_id: user.id,
         organization_id: orgId,
-        file_path,
-        file_name: file_name || null,
-        file_hash: file_hash || null,
+        file_id: null,
+        file_name: file_name || file_path.split('/').pop() || 'uploaded-document',
         document_type,
-        extracted_fields: extractedFields,
-        confidence: extractionConfidence,
-        validation_warnings: validationWarnings,
+        extracted_fields: {
+          ...extractedFields,
+          _source: { file_path, file_hash: file_hash || null },
+          _validation_warnings: validationWarnings,
+        },
+        confidence: extractionConfidence === 'high' ? 0.95 : extractionConfidence === 'medium' ? 0.75 : 0.0,
         status: 'draft', // ALWAYS draft — Spec 9.6
-        reviewed_by: null,
+        reviewer_id: null,
         reviewed_at: null,
       })
       .select('id')
@@ -266,7 +269,7 @@ CRITICAL RULES:
       outputTokens,
       totalTokens: inputTokens + outputTokens,
       estimatedCostUsd: estimatedCost,
-      model: 'llama-3.3-70b-versatile',
+      model: aiModel.modelId,
       latencyMs: totalLatency,
     });
 
@@ -283,7 +286,7 @@ CRITICAL RULES:
       normalizedIntent: 'document_extraction',
       selectedTool: 'extract_finance_document',
       rowCount: 1,
-      model: 'llama-3.3-70b-versatile',
+      model: aiModel.modelId,
       latencyMs: totalLatency,
       costUsd: estimatedCost,
       inputTokens,
@@ -294,7 +297,7 @@ CRITICAL RULES:
     });
 
     // 10. Return draft extraction for user review (Spec 9.6 Step 5)
-    return NextResponse.json({
+    return NextResponse.json(buildAiResponse({
       extraction_id: extractionRecord?.id,
       status: 'draft', // User MUST review before posting
       document_type,
@@ -303,7 +306,18 @@ CRITICAL RULES:
       validation_warnings: validationWarnings,
       next_step: 'Review extracted fields and accept/correct before submitting to expense workflow.',
       compliance_note: 'This is a DRAFT extraction. It has NOT been posted to any finance record. You must review and confirm before creating an expense or vendor bill.',
-    });
+    }, {
+      answer: 'Document fields were extracted into a draft for human review.',
+      metric_or_report: 'extract_finance_document',
+      period: extractedFields.document_date ? { from: extractedFields.document_date, to: extractedFields.document_date } : null,
+      currency: extractedFields.currency || 'PKR',
+      filters: [{ field: 'organization_id', value: orgId }],
+      data_as_of: new Date().toISOString(),
+      confidence: extractionConfidence,
+      warnings: validationWarnings,
+      source_rows_or_report: 'private uploaded document',
+      suggested_safe_actions: ['Review extracted fields', 'Correct uncertain fields', 'Create normal finance workflow only after review'],
+    }));
   } catch (error: any) {
     console.error('Document Extraction API error:', error.message);
     return NextResponse.json(

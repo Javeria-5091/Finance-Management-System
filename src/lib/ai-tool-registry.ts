@@ -148,7 +148,7 @@ export const AI_TOOL_REGISTRY: Record<string, AiToolDefinition> = {
     query: "SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (SELECT * FROM reporting.v_project_profitability WHERE organization_id = '${orgId}' LIMIT 200) t",
     rowLimit: 200,
     timeoutMs: 10000,
-    enforceUserScope: true,
+    enforceUserScope: false,
     cacheable: true,
     cacheTtlSeconds: 300,
     auditFields: ['organization_id', 'project_id'],

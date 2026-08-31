@@ -12,7 +12,6 @@
 // and comparisons must come from deterministic reporting views."
 // =============================================================================
 
-import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
 import { getAuthSupabase, enforceAiRequestLimits } from '@/lib/api-auth';
@@ -27,8 +26,8 @@ import {
   TokenUsage,
 } from '@/lib/ai-cost-tracking';
 import { z } from 'zod';
-
-const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+import { buildAiResponse, type AiResponseContract } from '@/lib/ai-response';
+import { getActiveModel, resolveModel } from '@/lib/ai-registry';
 
 // ─── Request Schema ───
 const ReportNarrativeRequestSchema = z.object({
@@ -111,11 +110,12 @@ export async function POST(req: Request) {
 
     // 3. Permission check — server-side only. Never trust the client role/tool registry.
     const permissionCheck = await requirePermission('REPORT_READ');
+
     if (permissionCheck instanceof NextResponse) {
       await logAiAuditEvent(supabase, {
         userId: user.id,
         userEmail: user.email,
-        status: 'blocked',
+        status: 'refused',
         severity: 'warning',
         question: `Report narrative request: ${report_type}`,
         normalizedIntent: 'report_narrative',
@@ -125,6 +125,7 @@ export async function POST(req: Request) {
         userAgent: requestMetadata.userAgent,
         refusalReason: 'Insufficient permissions',
       });
+
       return NextResponse.json(
         { error: 'Insufficient permissions for report access.' },
         { status: 403 }
@@ -156,9 +157,11 @@ PERIOD: ${period ? JSON.stringify(period) : 'Not specified'}
 CURRENCY: ${currency}
 ${context ? `ADDITIONAL CONTEXT: ${context}` : ''}`;
 
+    const aiModel = await getActiveModel(supabase, 'report_narrative');
+
     const intentStart = Date.now();
     const result = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
+      model: resolveModel(aiModel),
       system: systemPrompt,
       prompt: userPrompt,
     });
@@ -175,6 +178,9 @@ ${context ? `ADDITIONAL CONTEXT: ${context}` : ''}`;
       'AI narrative is based on deterministic report data. Cross-check with official reports before making decisions.';
     const totalLatency = Date.now() - startTime;
 
+    const confidence: AiResponseContract['confidence'] =
+      data && Object.keys(data).length > 0 ? 'medium' : 'low';
+
     const responsePayload = {
       narrative,
       key_findings: keyFindings,
@@ -183,7 +189,7 @@ ${context ? `ADDITIONAL CONTEXT: ${context}` : ''}`;
       data_source: `reporting.${report_type}`,
       period: period || null,
       currency,
-      confidence: data && Object.keys(data).length > 0 ? 'medium' : 'low',
+      confidence,
       compliance_note: complianceNote,
     };
 
@@ -198,7 +204,7 @@ ${context ? `ADDITIONAL CONTEXT: ${context}` : ''}`;
       outputTokens,
       totalTokens: inputTokens + outputTokens,
       estimatedCostUsd: estimatedCost,
-      model: 'llama-3.3-70b-versatile',
+      model: aiModel.modelId,
       latencyMs: totalLatency,
     };
 
@@ -215,7 +221,7 @@ ${context ? `ADDITIONAL CONTEXT: ${context}` : ''}`;
       normalizedIntent: 'report_narrative',
       selectedTool: 'run_saved_report',
       rowCount: Array.isArray(data) ? data.length : 1,
-      model: 'llama-3.3-70b-versatile',
+      model: aiModel.modelId,
       latencyMs: totalLatency,
       costUsd: estimatedCost,
       inputTokens,
@@ -225,7 +231,18 @@ ${context ? `ADDITIONAL CONTEXT: ${context}` : ''}`;
       userAgent: requestMetadata.userAgent,
     });
 
-    return NextResponse.json(responsePayload);
+    return NextResponse.json(buildAiResponse(responsePayload, {
+      answer: responsePayload.narrative,
+      metric_or_report: report_type,
+      period: period || null,
+      currency,
+      filters,
+      data_as_of: new Date().toISOString(),
+      confidence: responsePayload.confidence,
+      warnings: responsePayload.risks_or_warnings,
+      source_rows_or_report: responsePayload.data_source,
+      suggested_safe_actions: responsePayload.recommendations,
+    }));
   } catch (error: any) {
     console.error('Report Narrative API error:', error.message);
 

@@ -204,7 +204,7 @@ export default function ProfitDistributionPage() {
       updates.approved_at = now;
     }
     if (status === 'CANCELLED') {
-      updates.cancellation_reason = reason;
+      updates.notes = [detail.notes, reason ? `Cancelled: ${reason}` : 'Cancelled'].filter(Boolean).join('\n');
     }
     updateDist.mutate({ id: selectedId, ...updates }, { onSuccess: () => refetch() });
   };

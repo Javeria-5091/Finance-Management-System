@@ -9,7 +9,6 @@
 // Spec 9.7: "Confidence shown; human approval required"
 // =============================================================================
 
-import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
@@ -24,8 +23,8 @@ import {
   TokenUsage,
 } from '@/lib/ai-cost-tracking';
 import { z } from 'zod';
-
-const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+import { buildAiResponse } from '@/lib/ai-response';
+import { getActiveModel, resolveModel } from '@/lib/ai-registry';
 
 // ─── Request Schema ───
 const TransactionCodingRequestSchema = z.object({
@@ -83,7 +82,7 @@ async function fetchProjects(supabase: any, orgId: string): Promise<string> {
     .from('projects')
     .select('id, name, client_name, status')
     .eq('organization_id', orgId)
-    .eq('status', 'active')
+    .eq('status', 'Active')
     .limit(50);
 
   if (!data || data.length === 0) return 'No active projects.';
@@ -106,7 +105,7 @@ async function fetchVendors(supabase: any, orgId: string): Promise<string> {
 }
 
 export async function POST(req: Request) {
-  const permissionCheck = await requirePermission('REPORT_READ');
+  const permissionCheck = await requirePermission('COA_READ');
   if (permissionCheck instanceof Response) return permissionCheck;
   const requestId = generateRequestId();
   const requestMetadata = extractRequestMetadata(req);
@@ -196,8 +195,10 @@ Return JSON:
   "human_review_required": true/false
 }`;
 
+    const aiModel = await getActiveModel(supabase, 'transaction_coding');
+
     const aiResult = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
+      model: resolveModel(aiModel),
       system: systemPrompt,
       prompt: userPrompt,
     });
@@ -238,7 +239,7 @@ Return JSON:
       organization_id: orgId,
       entity_type: 'transaction',
       suggestion_type: 'transaction_coding',
-      confidence: suggestion.confidence,
+      confidence: suggestion.confidence === 'high' ? 0.95 : suggestion.confidence === 'medium' ? 0.75 : 0.0,
       suggestion_data: suggestion,
       status: 'pending',
     }).select('id').single();
@@ -251,7 +252,7 @@ Return JSON:
 
     await updateAiCostTracking(supabase, user.id, orgId, {
       inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
-      estimatedCostUsd: estimatedCost, model: 'llama-3.3-70b-versatile', latencyMs: totalLatency,
+      estimatedCostUsd: estimatedCost, model: aiModel.modelId, latencyMs: totalLatency,
     });
 
     await logAiAuditEvent(supabase, {
@@ -260,16 +261,27 @@ Return JSON:
       entityType: 'ai_suggestion', entityId: suggestionRecord?.id,
       question: `Code transaction: ${description} (PKR ${amount})`,
       normalizedIntent: 'transaction_coding', selectedTool: 'suggest_transaction_coding',
-      model: 'llama-3.3-70b-versatile', latencyMs: totalLatency,
+      model: aiModel.modelId, latencyMs: totalLatency,
       costUsd: estimatedCost, inputTokens, outputTokens,
       requestId, ipAddress: requestMetadata.ipAddress, userAgent: requestMetadata.userAgent,
     });
 
-    return NextResponse.json({
+    return NextResponse.json(buildAiResponse({
       suggestion_id: suggestionRecord?.id,
       ...suggestion,
       compliance_note: 'AI suggestion only. Human review and approval required before posting.',
-    });
+    }, {
+      answer: suggestion.suggested_description || 'Transaction coding suggestion generated for human review.',
+      metric_or_report: 'suggest_transaction_coding',
+      period: transaction_date ? { from: transaction_date, to: transaction_date } : null,
+      currency: 'PKR',
+      filters: [{ field: 'organization_id', value: orgId }],
+      data_as_of: new Date().toISOString(),
+      confidence: suggestion.confidence,
+      warnings: suggestion.confidence === 'low' ? ['Low-confidence suggestion; manual input is required.'] : [],
+      source_rows_or_report: 'finance.chart_of_accounts, public.projects, public.vendors',
+      suggested_safe_actions: ['Review suggestion', 'Accept or edit coding before posting'],
+    }));
   } catch (error: any) {
     console.error('Transaction Coding API error:', error.message);
     return NextResponse.json({ error: 'Failed to categorize transaction.' }, { status: 500 });

@@ -10,7 +10,6 @@
 // Spec 9.7: "Anomaly detection must combine deterministic rules and AI signals."
 // =============================================================================
 
-import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
@@ -25,8 +24,8 @@ import {
   TokenUsage,
 } from '@/lib/ai-cost-tracking';
 import { z } from 'zod';
-
-const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+import { buildAiResponse } from '@/lib/ai-response';
+import { getActiveModel, resolveModel } from '@/lib/ai-registry';
 
 const DuplicateDetectionRequestSchema = z.object({
   /** Transaction amount to check for duplicates */
@@ -44,7 +43,7 @@ const DuplicateDetectionRequestSchema = z.object({
 });
 
 export async function POST(req: Request) {
-  const permissionCheck = await requirePermission('REPORT_READ');
+  const permissionCheck = await requirePermission('EXPENSE_READ');
   if (permissionCheck instanceof Response) return permissionCheck;
   const requestId = generateRequestId();
   const requestMetadata = extractRequestMetadata(req);
@@ -168,11 +167,14 @@ export async function POST(req: Request) {
       }
     }
 
+    const aiModel = await getActiveModel(supabase, 'duplicate_detection');
+
     // 4. AI-powered anomaly analysis (Spec 9.7)
     const aiAnomalies: string[] = [];
     if (duplicates.length > 0 || anomalies.length > 0) {
-      const aiResult = await generateText({
-        model: groq('llama-3.3-70b-versatile'),
+  
+    const aiResult = await generateText({
+        model: resolveModel(aiModel),
         system: `You are a financial anomaly detection AI. Analyze the following transaction checks and provide a concise risk assessment.
 Return ONLY a JSON array of additional anomaly descriptions (max 3 items).
 If no additional anomalies, return []. Do NOT repeat the already-detected anomalies.`,
@@ -202,7 +204,7 @@ Additional AI-detected anomalies (if any):`,
       organization_id: orgId,
       entity_type: 'transaction',
       suggestion_type: 'duplicate_check',
-      confidence: overallRisk,
+      confidence: overallRisk === 'high' ? 0.95 : overallRisk === 'medium' ? 0.75 : 0.0,
       suggestion_data: {
         amount, vendor_name, reference, transaction_date, transaction_type,
         duplicates, anomalies: allAnomalies, risk_level: overallRisk,
@@ -218,7 +220,7 @@ Additional AI-detected anomalies (if any):`,
 
     await updateAiCostTracking(supabase, user.id, orgId, {
       inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
-      estimatedCostUsd: estimatedCost, model: 'llama-3.3-70b-versatile', latencyMs: totalLatency,
+      estimatedCostUsd: estimatedCost, model: aiModel.modelId, latencyMs: totalLatency,
     });
 
     await logAiAuditEvent(supabase, {
@@ -227,12 +229,12 @@ Additional AI-detected anomalies (if any):`,
       entityType: 'ai_suggestion', entityId: suggestionRecord?.id,
       question: `Duplicate check: PKR ${amount} ${vendor_name || ''}`,
       normalizedIntent: 'duplicate_detection', selectedTool: 'find_possible_duplicates',
-      rowCount: duplicates.length, model: 'llama-3.3-70b-versatile',
+      rowCount: duplicates.length, model: aiModel.modelId,
       latencyMs: totalLatency, costUsd: estimatedCost, inputTokens, outputTokens,
       requestId, ipAddress: requestMetadata.ipAddress, userAgent: requestMetadata.userAgent,
     });
 
-    return NextResponse.json({
+    return NextResponse.json(buildAiResponse({
       suggestion_id: suggestionRecord?.id,
       risk_level: overallRisk,
       duplicates,
@@ -240,7 +242,18 @@ Additional AI-detected anomalies (if any):`,
       duplicate_count: duplicates.length,
       anomaly_count: allAnomalies.length,
       compliance_note: 'AI flag only. No automatic blocking. Authorized user decides action.',
-    });
+    }, {
+      answer: allAnomalies.length || duplicates.length ? `Potential anomalies detected: ${allAnomalies.length + duplicates.length}.` : 'No potential duplicate or anomaly was detected by the configured checks.',
+      metric_or_report: 'find_possible_duplicates',
+      period: transaction_date ? { from: transaction_date, to: transaction_date } : null,
+      currency: 'PKR',
+      filters: [{ field: 'organization_id', value: orgId }],
+      data_as_of: new Date().toISOString(),
+      confidence: overallRisk,
+      warnings: [],
+      source_rows_or_report: 'vendor bills and AI suggestion history',
+      suggested_safe_actions: ['Review flagged records', 'Confirm before taking any financial action'],
+    }));
   } catch (error: any) {
     console.error('Duplicate Detection API error:', error.message);
     return NextResponse.json({ error: 'Failed to check for duplicates.' }, { status: 500 });

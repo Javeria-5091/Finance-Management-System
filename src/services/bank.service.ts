@@ -364,8 +364,15 @@ export const getBankTransfers = async (orgId: string) => {
 export const createBankTransfer = async (payload: Partial<BankTransfer> & { created_by: string }) => {
   // Don't send transfer_number - trigger will auto-generate
   const { transfer_number, ...rest } = payload as any;
-  const orgId = (payload as any).organization_id;
-  if (!orgId) return { data: null as any, error: new Error('organization_id is required') };
+  let orgId = (payload as any).organization_id as string | undefined;
+  if (!orgId) {
+    const { data: { user } } = await browserSupabase.auth.getUser();
+    if (!user) return { data: null as any, error: new Error('Authentication required') };
+    const { data: profile, error: profileError } = await browserSupabase
+      .from('profiles').select('organization_id').eq('user_id', user.id).maybeSingle();
+    if (profileError || !profile?.organization_id) return { data: null as any, error: new Error('Organization context is required') };
+    orgId = profile.organization_id;
+  }
   rest.organization_id = orgId;
 
   // FND-PBV-006 FIX: nothing in the create flow (this service, TransferForm,
@@ -382,6 +389,8 @@ export const createBankTransfer = async (payload: Partial<BankTransfer> & { crea
       .from('financial_accounts')
       .select('requires_dual_approval, min_dual_approval_amount')
       .eq('id', rest.from_account_id)
+      .eq('organization_id', orgId)
+      .eq('is_active', true)
       .maybeSingle();
 
     if (fromAccount) {

@@ -151,9 +151,11 @@ export function extractRequestMetadata(req: Request): {
   ipAddress: string | null;
   userAgent: string | null;
 } {
+  // The application cannot establish a trusted proxy boundary here.
+  // Never persist a client-controlled X-Forwarded-For value as authoritative
+  // audit data; leave IP null unless a trusted platform integration supplies it.
   return {
-    ipAddress:
-      (req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()) || null,
+    ipAddress: null,
     userAgent: req.headers.get('user-agent') || null,
   };
 }

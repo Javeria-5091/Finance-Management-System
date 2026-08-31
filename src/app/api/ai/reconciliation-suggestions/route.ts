@@ -17,6 +17,7 @@ import {
   estimateTokens,
 } from '@/lib/ai-cost-tracking';
 import { z } from 'zod';
+import { buildAiResponse } from '@/lib/ai-response';
 
 const ReconciliationSuggestionRequestSchema = z.object({
   financial_account_id: z.string().uuid(),
@@ -25,7 +26,7 @@ const ReconciliationSuggestionRequestSchema = z.object({
 });
 
 export async function POST(req: Request) {
-  const permissionCheck = await requirePermission('REPORT_READ');
+  const permissionCheck = await requirePermission('BANK_READ');
   if (permissionCheck instanceof Response) return permissionCheck;
   const requestId = generateRequestId();
   const requestMetadata = extractRequestMetadata(req);
@@ -168,7 +169,7 @@ export async function POST(req: Request) {
         organization_id: orgId,
         entity_type: 'reconciliation',
         suggestion_type: 'reconciliation_match',
-        confidence: suggestions[0]?.match_confidence > 0.9 ? 'high' : 'medium',
+        confidence: suggestions[0]?.match_confidence ?? 0,
         suggestion_data: { financial_account_id, statement_date, suggestions_count: suggestions.length },
         status: 'pending',
       });
@@ -194,13 +195,24 @@ export async function POST(req: Request) {
       ipAddress: requestMetadata.ipAddress, userAgent: requestMetadata.userAgent,
     });
 
-    return NextResponse.json({
+    return NextResponse.json(buildAiResponse({
       financial_account_id,
       unreconciled_count: lines.length,
       suggestions,
       suggestions_count: suggestions.length,
       compliance_note: 'These are suggestions only. User must confirm each match before reconciliation is recorded.',
-    });
+    }, {
+      answer: suggestions.length ? `Generated ${suggestions.length} candidate reconciliation match${suggestions.length === 1 ? '' : 'es'} for review.` : 'No reconciliation matches were found.',
+      metric_or_report: 'suggest_reconciliation_matches',
+      period: statement_date ? { from: statement_date, to: statement_date } : null,
+      currency: 'PKR',
+      filters: [{ field: 'financial_account_id', value: financial_account_id }],
+      data_as_of: new Date().toISOString(),
+      confidence: suggestions.length ? (suggestions[0].match_confidence >= 0.9 ? 'high' : suggestions[0].match_confidence >= 0.6 ? 'medium' : 'low') : 'low',
+      warnings: suggestions.length ? ['Human confirmation is required; no match is silently reconciled.'] : [],
+      source_rows_or_report: 'reporting.unreconciled_lines and reporting.general_ledger',
+      suggested_safe_actions: ['Review candidate matches', 'Confirm each match manually'],
+    }));
   } catch (error: any) {
     console.error('Reconciliation Suggestions API error:', error.message);
     return NextResponse.json({ error: 'Failed to generate reconciliation suggestions.' }, { status: 500 });

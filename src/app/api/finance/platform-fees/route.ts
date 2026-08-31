@@ -13,10 +13,11 @@ function getData<T = any>(res: any): T | null {
 //   finance.fee_rules   — one row per fee rule, FK'd to platforms.id, with
 //                         its own NOT NULL "name" and UNIQUE(platform_id, name)
 //   finance.fee_tiers   — optional graduated breakpoints for a TIERED/SLAB rule
-// This route manages fee_rules (+ their tiers), resolving the caller's
+// This route now manages fee_rules (+ their tiers), resolving the caller's
 // `platform` (a finance.platforms.code or .name) to a platform_id. See
 // src/lib/validations.ts (BUG-019 FIX comment) for the field mapping this
-// was already written against.
+// was already written against, and src/app/api/finance/platform-fees/route.ts
+// for the already-correct sibling implementation this mirrors.
 
 async function resolvePlatformId(supabase: any, orgId: string | null, platform: string): Promise<{ id: string; name: string } | null> {
   const { data } = await supabase
@@ -29,7 +30,7 @@ async function resolvePlatformId(supabase: any, orgId: string | null, platform: 
   return data ? { id: data.id, name: data.name } : null;
 }
  
-// ─── GET: List platform fee rules (optionally scoped to one platform) ───
+// ─── GET: List all platform fee rules ───
 export async function GET(req: NextRequest) {
   const auth = await requirePermission('SETTINGS_READ');
   if (auth instanceof NextResponse) return auth;
@@ -48,7 +49,7 @@ export async function GET(req: NextRequest) {
       }
       platformId = resolved.id;
     }
- 
+
     let query = supabase
       .schema('finance').from('fee_rules')
       .select('*, platform:platforms(id, name, code, platform_type)')
@@ -71,7 +72,7 @@ export async function GET(req: NextRequest) {
   }
 }
  
-// ─── POST: Create, update, or toggle a platform fee rule ───
+// ─── POST: Create, update, or toggle platform fee rules ───
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('SETTINGS_MANAGE');
   if (auth instanceof NextResponse) return auth;

@@ -54,7 +54,7 @@ CREATE VIEW reporting.budget_vs_actual AS
   SELECT
     budget_id, budget_name, budget_category, budgeted_amount,
     start_date, end_date, actual_amount, remaining_amount,
-    utilization_pct, project_id, project_name
+    utilization_pct, project_id, project_name, organization_id
   FROM reporting.budget_vs_actual;
 
 -- Budget category summary
@@ -69,6 +69,7 @@ CREATE VIEW reporting.payable_aging AS
   SELECT
     bill_id, bill_number, vendor_id, vendor_name, project_id,
     total_amount, amount_paid, outstanding_amount, due_date, bill_date, status,
+    organization_id,
     current_amount, overdue_1_30_days, overdue_31_60_days,
     overdue_61_90_days, overdue_over_90_days
   FROM reporting.payable_aging;
@@ -80,7 +81,7 @@ CREATE VIEW reporting.receivable_aging AS
     total_amount, total_base_amount, amount_paid, paid_base_amount,
     outstanding_amount, outstanding_base_amount, due_date, issue_date, status,
     current_amount, overdue_1_30_days, overdue_31_60_days,
-    overdue_61_90_days, overdue_over_90_days
+    overdue_61_90_days, overdue_over_90_days, organization_id
   FROM reporting.receivable_aging;
 
 -- Bank reconciliation status
@@ -95,7 +96,7 @@ CREATE VIEW reporting.reconciliation_summary AS
 CREATE VIEW reporting.unreconciled_lines AS
   SELECT
     id, financial_account_id, statement_date, description,
-    amount, type, reference, is_reconciled, matched_journal_line_id
+    amount, type, reference, is_reconciled, matched_journal_line_id, organization_id
   FROM reporting.unreconciled_lines;
 
 -- Asset register with NBV
@@ -111,7 +112,7 @@ CREATE VIEW reporting.v_depreciation_summary AS
   SELECT
     fiscal_year_id, fiscal_year_name, period_id, period_name,
     start_date, end_date, assets_depreciated, total_depreciation,
-    total_opening_nbv, total_closing_nbv, posted_count, pending_count
+    total_opening_nbv, total_closing_nbv, posted_count, pending_count, organization_id
   FROM reporting.v_depreciation_summary;
 
 -- ============================================================

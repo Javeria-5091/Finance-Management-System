@@ -10,7 +10,6 @@
 // suggests extracted rate/fees, explains expected-vs-actual PKR variance.
 // =============================================================================
 
-import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission, enforceAiRequestLimits, isSqlSafe } from '@/lib/api-auth';
@@ -24,8 +23,8 @@ import {
   TokenUsage,
 } from '@/lib/ai-cost-tracking';
 import { z } from 'zod';
-
-const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+import { buildAiResponse } from '@/lib/ai-response';
+import { getActiveModel, resolveModel } from '@/lib/ai-registry';
 
 const BudgetCashAlertRequestSchema = z.object({
   alert_type: z.enum([
@@ -185,8 +184,10 @@ Return JSON:
   "summary": "Overall financial health summary (2-3 sentences)"
 }`;
 
+    const aiModel = await getActiveModel(supabase, 'budget_cash_alerts');
+
     const aiResult = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
+      model: resolveModel(aiModel),
       system: systemPrompt,
       prompt: userPrompt,
     });
@@ -228,7 +229,7 @@ Return JSON:
 
     await updateAiCostTracking(supabase, user.id, orgId, {
       inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
-      estimatedCostUsd: estimatedCost, model: 'llama-3.3-70b-versatile', latencyMs: totalLatency,
+      estimatedCostUsd: estimatedCost, model: aiModel.modelId, latencyMs: totalLatency,
     });
 
     await logAiAuditEvent(supabase, {
@@ -236,12 +237,23 @@ Return JSON:
       status: 'success', severity: 'info',
       question: `${alert_type} alerts for next ${days_ahead} days`,
       normalizedIntent: 'budget_cash_alerts', selectedTool: 'budget_cash_alerts',
-      rowCount: alerts.length, model: 'llama-3.3-70b-versatile',
+      rowCount: alerts.length, model: aiModel.modelId,
       latencyMs: totalLatency, costUsd: estimatedCost, inputTokens, outputTokens,
       requestId, ipAddress: requestMetadata.ipAddress, userAgent: requestMetadata.userAgent,
     });
 
-    return NextResponse.json(responsePayload);
+    return NextResponse.json(buildAiResponse(responsePayload, {
+      answer: responsePayload.summary,
+      metric_or_report: 'budget_cash_alerts',
+      period: { from: new Date().toISOString().slice(0, 10), to: new Date(Date.now() + days_ahead * 86400000).toISOString().slice(0, 10) },
+      currency: 'PKR',
+      filters: [{ field: 'organization_id', value: orgId }, { field: 'alert_type', value: alert_type }],
+      data_as_of: responsePayload.data_as_of,
+      confidence: alerts.length ? 'medium' : 'low',
+      warnings: [responsePayload.compliance_note],
+      source_rows_or_report: 'reporting.v_cash_position, reporting.budget_vs_actual, reporting.payable_aging, reporting.receivable_aging',
+      suggested_safe_actions: ['Review alert details', 'Verify against official reports before taking action'],
+    }));
   } catch (error: any) {
     console.error('Budget Cash Alerts API error:', error.message);
     return NextResponse.json({ error: 'Failed to generate budget/cash alerts.' }, { status: 500 });

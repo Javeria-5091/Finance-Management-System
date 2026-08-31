@@ -186,10 +186,10 @@ export async function fetchEmployeeWithCompensation(employeeId: string) {
 
 export async function createEmployee(employeeData: any) {
   const orgId = await getCurrentOrgId();
-  // Generate employee code
-  const { data: codeData } = await supabase
-    .schema('finance')
+  // Employee-code generator is defined in public schema.
+  const { data: codeData, error: codeError } = await supabase
     .rpc("payroll_generate_employee_code");
+  if (codeError) throw new Error(codeError.message);
   const employeeCode =
     codeData || `EMP-${Date.now().toString().slice(-4)}`;
 
@@ -303,11 +303,15 @@ export async function fetchPayrollLines(runId: string) {
 
 // ─── Payroll Posting ───
 export async function postPayrollRun(payrollRunId: string) {
-  const { data: journalId, error } = await supabase.schema('finance').rpc('post_payroll_run', {
-    p_payroll_run_id: payrollRunId,
+  const response = await fetch('/api/finance/payroll', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ action: 'post', run_id: payrollRunId }),
   });
-  if (error) throw new Error(error.message);
-  return journalId as string;
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'Payroll posting failed');
+  return payload.journal_id as string;
 }
 
 // ─── Advance Services ───

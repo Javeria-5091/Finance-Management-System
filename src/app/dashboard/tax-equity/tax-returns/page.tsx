@@ -32,7 +32,7 @@ const STATUS_STYLES: Record<string, string> = {
 export default function TaxReturnsPage() {
   const { user } = useAuth();
   const { hasPermission } = usePermissions();
-  const canCreate = hasPermission("TAX_CREATE");
+  const canCreate = hasPermission("TAX_MANAGE");
 
   const [returns, setReturns] = useState<TaxReturn[]>([]);
   const [loading, setLoading] = useState(true);

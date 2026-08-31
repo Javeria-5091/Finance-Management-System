@@ -6,7 +6,6 @@
 // and comparative movements. Read-only; accountant completes and closes."
 // =============================================================================
 
-import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
 import { getAuthSupabase, isSqlSafe, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
@@ -20,8 +19,8 @@ import {
   TokenUsage,
 } from '@/lib/ai-cost-tracking';
 import { z } from 'zod';
-
-const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+import { buildAiResponse } from '@/lib/ai-response';
+import { getActiveModel, resolveModel } from '@/lib/ai-registry';
 
 const FiscalCloseRequestSchema = z.object({
   fiscal_year_id: z.string().uuid(),
@@ -142,8 +141,10 @@ Check for: unreconciled accounts, draft journals, missing accruals, unrecorded d
 Highlight significant changes in revenue, expenses, assets, and liabilities.`,
     };
 
+    const aiModel = await getActiveModel(supabase, 'fiscal_close_assistant');
+
     const aiResult = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
+      model: resolveModel(aiModel),
       system: `You are a senior accountant AI assistant for OSYSTIC Finance System.
 You provide read-only fiscal close analysis. You NEVER post, close, or modify any records.
 All amounts are in PKR. Be specific and actionable. Format responses with clear sections.`,
@@ -171,7 +172,7 @@ All amounts are in PKR. Be specific and actionable. Format responses with clear 
 
     await updateAiCostTracking(supabase, user.id, orgId, {
       inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
-      estimatedCostUsd: estimatedCost, model: 'llama-3.3-70b-versatile', latencyMs: totalLatency,
+      estimatedCostUsd: estimatedCost, model: aiModel.modelId, latencyMs: totalLatency,
     });
 
     await logAiAuditEvent(supabase, {
@@ -180,12 +181,27 @@ All amounts are in PKR. Be specific and actionable. Format responses with clear 
       entityType: 'fiscal_year', entityId: fiscal_year_id,
       question: `Fiscal close ${action} for ${fiscalYear.name}`,
       normalizedIntent: 'fiscal_close_assistant', selectedTool: 'fiscal_close_assistant',
-      model: 'llama-3.3-70b-versatile', latencyMs: totalLatency,
+      model: aiModel.modelId, latencyMs: totalLatency,
       costUsd: estimatedCost, inputTokens, outputTokens,
       requestId, ipAddress: requestMetadata.ipAddress, userAgent: requestMetadata.userAgent,
     });
 
-    return NextResponse.json(responsePayload);
+    return NextResponse.json(buildAiResponse(responsePayload, {
+      answer: responsePayload.analysis,
+      metric_or_report: 'fiscal_close_assistant',
+      period: { from: fiscalYear.start_date, to: fiscalYear.end_date },
+      currency: 'PKR',
+      filters: [{ field: 'fiscal_year_id', value: fiscal_year_id }],
+      data_as_of: new Date().toISOString(),
+      confidence: (responsePayload.unreconciled_count + responsePayload.open_periods_count + responsePayload.pending_journals_count) === 0 ? 'high' : 'medium',
+      warnings: [
+        ...(responsePayload.unreconciled_count > 0 ? [`${responsePayload.unreconciled_count} unreconciled account(s) remain.`] : []),
+        ...(responsePayload.open_periods_count > 0 ? [`${responsePayload.open_periods_count} period(s) are not hard closed.`] : []),
+        ...(responsePayload.pending_journals_count > 0 ? [`${responsePayload.pending_journals_count} draft journal(s) remain.`] : []),
+      ],
+      source_rows_or_report: 'reporting.ai_fiscal_close_context',
+      suggested_safe_actions: ['Review blockers', 'Complete accountant close checklist manually'],
+    }));
   } catch (error: any) {
     console.error('Fiscal Close Assistant API error:', error.message);
     return NextResponse.json({ error: 'Failed to generate fiscal close analysis.' }, { status: 500 });

@@ -6,7 +6,6 @@
 // Spec 9.4: "Permission-aware retrieval and source references"
 // =============================================================================
 
-import { createGroq } from '@ai-sdk/groq';
 import { generateText } from 'ai';
 import { NextResponse } from 'next/server';
 import { getAuthSupabase, isSqlSafe, requirePermission, enforceAiRequestLimits } from '@/lib/api-auth';
@@ -20,8 +19,8 @@ import {
   TokenUsage,
 } from '@/lib/ai-cost-tracking';
 import { z } from 'zod';
-
-const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+import { buildAiResponse, type AiResponseContract } from '@/lib/ai-response';
+import { getActiveModel, resolveModel } from '@/lib/ai-registry';
 
 const PolicyQaRequestSchema = z.object({
   question: z.string().min(5).max(2000),
@@ -123,8 +122,10 @@ ${policyContext}
 
 Provide a clear answer with source document citations.`;
 
+    const aiModel = await getActiveModel(supabase, 'policy_qa');
+
     const aiResult = await generateText({
-      model: groq('llama-3.3-70b-versatile'),
+      model: resolveModel(aiModel),
       system: systemPrompt,
       prompt: userPrompt,
     });
@@ -133,10 +134,13 @@ Provide a clear answer with source document citations.`;
     const sourcesCited = extractSources(aiResult.text);
     const totalLatency = Date.now() - startTime;
 
+    const confidence: AiResponseContract['confidence'] =
+      policyContext !== 'No specific policy documents found.' ? 'medium' : 'low';
+
     const responsePayload = {
       answer: aiResult.text,
       sources: sourcesCited,
-      confidence: policyContext !== 'No specific policy documents found.' ? 'medium' : 'low',
+      confidence,
       compliance_note: 'AI-generated policy interpretation. For authoritative decisions, consult the approved policy document or legal counsel.',
       data_as_of: new Date().toISOString(),
     };
@@ -148,19 +152,30 @@ Provide a clear answer with source document citations.`;
 
     await updateAiCostTracking(supabase, user.id, orgId, {
       inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
-      estimatedCostUsd: estimatedCost, model: 'llama-3.3-70b-versatile', latencyMs: totalLatency,
+      estimatedCostUsd: estimatedCost, model: aiModel.modelId, latencyMs: totalLatency,
     });
 
     await logAiAuditEvent(supabase, {
       userId: user.id, userEmail: user.email, action: 'AI_POLICY_QA',
       status: 'success', severity: 'info',
       question, normalizedIntent: 'policy_qa', selectedTool: 'search_finance_policies',
-      rowCount: sourcesCited.length, model: 'llama-3.3-70b-versatile',
+      rowCount: sourcesCited.length, model: aiModel.modelId,
       latencyMs: totalLatency, costUsd: estimatedCost, inputTokens, outputTokens,
       requestId, ipAddress: requestMetadata.ipAddress, userAgent: requestMetadata.userAgent,
     });
 
-    return NextResponse.json(responsePayload);
+    return NextResponse.json(buildAiResponse(responsePayload, {
+      answer: responsePayload.answer,
+      metric_or_report: 'search_finance_policies',
+      period: null,
+      currency: 'PKR',
+      filters: [{ field: 'organization_id', value: orgId }],
+      data_as_of: new Date().toISOString(),
+      confidence: responsePayload.confidence,
+      warnings: responsePayload.sources?.length ? [] : ['No policy source was found; do not rely on an unsourced answer.'],
+      source_rows_or_report: responsePayload.sources?.join('; ') || 'public.policy_documents',
+      suggested_safe_actions: ['Review cited policy source before acting'],
+    }));
   } catch (error: any) {
     console.error('Policy Q&A API error:', error.message);
     return NextResponse.json({ error: 'Failed to answer policy question.' }, { status: 500 });

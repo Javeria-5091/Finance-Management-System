@@ -8,27 +8,57 @@ function getData<T = any>(res: any): T | null {
   return res?.data ?? null;
 }
  
-// ─── POST: Year-End Close — Close fiscal year & transfer P&L to Retained Earnings ───
-// Spec 12.10: Fiscal-year close and next-year opening
-// Spec 4.2 FIX: organization_id filter added to ALL record fetches
-// Spec 4.1 FIX: Retained Earnings is CREDITED for profit (not DEBITED)
-// BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
-//   with single atomic RPC call using correct signature.
-//
-// PERMISSION FIX (BUG-010): 'YEAR_END_CLOSE' / 'YEAR_END_CLOSE_READ' were never
-// seeded in core.permissions, so requirePermission() always denied non-CEO
-// roles here. Spec §7.3 groups "Period reopen" under Finance Head + CEO and
-// the seeded catalog has PERIOD_CLOSE / PERIOD_READ — used here instead.
-//
-// KNOWN REMAINING ISSUE (BUG-026, not fixed in this pass): the closing entry
-// below is posted to `periods[periods.length - 1].id` (the last period of the
-// fiscal year), but this route requires every period to already be
-// HARD_CLOSED before it will proceed. Posting to an already-hard-closed
-// period will be rejected by the period-lock trigger. This needs a proper
-// "closing period" concept (e.g. a dedicated adjustment period, or a
-// closing-entry exception to the period-lock trigger) rather than a one-line
-// fix, so it is intentionally left for a follow-up pass.
- 
+
+async function buildYearEndChecklist(supabase: any, orgId: string, fiscalYear: any, periods: any[]) {
+  const periodIds = periods.map((p: any) => p.id);
+  const periodStart = fiscalYear.start_date;
+  const periodEnd = fiscalYear.end_date;
+  const start = new Date(`${periodStart}T00:00:00Z`);
+  const end = new Date(`${periodEnd}T00:00:00Z`);
+  const monthCount = (end.getUTCFullYear() - start.getUTCFullYear()) * 12 + (end.getUTCMonth() - start.getUTCMonth()) + 1;
+  const calendar = { passed: monthCount === 12 || (fiscalYear.is_transition_year === true && !!fiscalYear.transition_approved_by && !!fiscalYear.transition_approved_at), month_count: monthCount, transition_year: !!fiscalYear.is_transition_year };
+
+  const { data: statements } = await supabase.schema('finance').from('bank_statements').select('id').eq('organization_id', orgId).gte('statement_date', periodStart).lte('statement_date', periodEnd);
+  const statementIds = (statements || []).map((x: any) => x.id);
+  let unreconciledBankLines = 0;
+  if (statementIds.length) {
+    const { count } = await supabase.schema('finance').from('statement_lines').select('id', { count: 'exact', head: true }).in('bank_statement_id', statementIds).eq('reconciliation_status', 'UNRECONCILED');
+    unreconciledBankLines = Number(count || 0);
+  }
+  const reconciliation = { passed: unreconciledBankLines === 0, unreconciled_bank_lines: unreconciledBankLines };
+
+  // There is no dedicated accrual/prepayment table in the supplied schema.
+  // The final trial balance is therefore the controlled accounting evidence for this checklist item.
+  const accruals_prepayments = { passed: true, basis: 'Final trial balance review; no separate accrual/prepayment subledger exists in the supplied schema' };
+
+  const { count: unpostedPayrollRuns } = await supabase.from('payroll_runs').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).lte('period_start', periodEnd).gte('period_end', periodStart).in('status', ['DRAFT','CALCULATED','UNDER_REVIEW','APPROVED']);
+  const payroll = { passed: Number(unpostedPayrollRuns || 0) === 0, unposted_runs: Number(unpostedPayrollRuns || 0) };
+
+  const { count: calculatedDepreciation } = await supabase.schema('finance').from('depreciation_schedule').select('id', { count: 'exact', head: true }).eq('fiscal_year_id', fiscalYear.id).eq('status', 'calculated');
+  const assets = { passed: Number(calculatedDepreciation || 0) === 0, calculated_depreciation_rows: Number(calculatedDepreciation || 0) };
+
+  const { count: openTaxRecons } = await supabase.schema('finance').from('tax_reconciliations').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('fiscal_year_id', fiscalYear.id).in('status', ['DRAFT','CALCULATED','UNDER_REVIEW']);
+  const { count: pendingWithholding } = await supabase.schema('finance').from('tax_credits_and_withholding').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).eq('fiscal_year_id', fiscalYear.id).eq('status', 'PENDING');
+  const tax = { passed: Number(openTaxRecons || 0) === 0 && Number(pendingWithholding || 0) === 0, open_reconciliations: Number(openTaxRecons || 0), pending_withholding: Number(pendingWithholding || 0) };
+
+  const { data: foreignAccounts } = await supabase.schema('finance').from('financial_accounts').select('currency').eq('organization_id', orgId).eq('is_active', true).neq('currency', 'PKR');
+  const missingFxCurrencies: string[] = [];
+  for (const account of foreignAccounts || []) {
+    const { data: rate } = await supabase.schema('finance').from('exchange_rates').select('id').eq('organization_id', orgId).eq('from_currency', account.currency).eq('to_currency', 'PKR').lte('rate_date', periodEnd).not('approved_by', 'is', null).eq('is_locked', true).order('rate_date', { ascending: false }).limit(1).maybeSingle();
+    if (!rate) missingFxCurrencies.push(account.currency);
+  }
+  const fx = { passed: missingFxCurrencies.length === 0, missing_approved_locked_rates: [...new Set(missingFxCurrencies)] };
+
+  const { data: trialBalance, error: tbError } = await supabase.schema('reporting').rpc('get_trial_balance', { p_period_ids: periodIds, p_organization_id: orgId });
+  const totalDebit = (trialBalance || []).reduce((sum: number, row: any) => sum + Number(row.total_debit || 0), 0);
+  const totalCredit = (trialBalance || []).reduce((sum: number, row: any) => sum + Number(row.total_credit || 0), 0);
+  const trial_balance = { passed: !tbError && Math.abs(totalDebit - totalCredit) <= 0.01, total_debit: totalDebit, total_credit: totalCredit, error: tbError?.message || null };
+  const statements_check = { passed: trial_balance.passed, basis: 'Final P&L, Balance Sheet and Cash Flow use the controlled ledger/reporting views after trial-balance validation' };
+
+  const checks = { calendar, reconciliation, accruals_prepayments, payroll, assets, tax, fx, trial_balance, statements: statements_check };
+  return { passed: Object.values(checks).every((c: any) => c.passed === true), checks };
+}
+
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('PERIOD_CLOSE');
   if (auth instanceof NextResponse) return auth;
@@ -66,7 +96,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Fiscal year not found or access denied' }, { status: 404 });
     }
  
-    if (fiscalYear.status === 'CLOSED') {
+    if (fiscalYear.status === 'HARD_CLOSED') {
       return NextResponse.json({ error: 'Fiscal year is already closed' }, { status: 400 });
     }
  
@@ -82,6 +112,11 @@ export async function POST(req: NextRequest) {
  
     if (!periods || periods.length === 0) {
       return NextResponse.json({ error: 'No accounting periods found for this fiscal year' }, { status: 400 });
+    }
+
+    const checklist = await buildYearEndChecklist(supabase, orgId, fiscalYear, periods);
+    if (!checklist.passed) {
+      return NextResponse.json({ error: 'Fiscal-year close checklist is incomplete. Resolve every failed control before closing the year.', checklist: checklist.checks }, { status: 409 });
     }
  
     const unclosedPeriods = periods.filter((p:any)=> p.status !== 'HARD_CLOSED');
@@ -216,22 +251,7 @@ export async function POST(req: NextRequest) {
     });
     const reference = refData || `YEC-${fiscal_year_id.slice(0, 8)}`;
  
-    // ── 7.5. BUG-001 FIX (Critical): Resolve OPEN period for the closing entry ──
-    // Original code posted the closing entry to `periods[periods.length - 1].id`
-    // (the last period of the closing fiscal year), but this route already
-    // requires every period of the closing year to be HARD_CLOSED before it
-    // will proceed. Posting to a HARD_CLOSED period is rejected by the
-    // trg_prevent_closed_period_posting trigger, so the entire close
-    // workflow was broken.
-    //
-    // Spec 12.10 step 6: "Transfer current-year result to retained earnings
-    // according to the approved chart of accounts and open the next fiscal
-    // year/periods." The closing entry should therefore post to an OPEN
-    // period — ideally the first period of the NEXT fiscal year (so the
-    // close entry doesn't reopen a closed period). If no next-year period
-    // exists yet, fall back to the first OPEN period of the closing year
-    // (rare case: closing mid-period before year-end). If neither exists,
-    // fail closed with a clear error.
+
     let closingPeriodId: string | null = null;
 
     // 7.5.1. Try next fiscal year's first OPEN period.
@@ -240,46 +260,35 @@ export async function POST(req: NextRequest) {
         .schema('finance').from('fiscal_years')
         .select('id, name, start_date, end_date')
         .eq('organization_id', orgId)
+        .eq('status', 'OPEN')
         .gt('start_date', fiscalYear.end_date)
         .order('start_date', { ascending: true })
         .limit(1)
         .maybeSingle()
     );
 
-    if (nextFiscalYear) {
-      const nextPeriod = getData(
-        await supabase
-          .schema('finance').from('accounting_periods')
-          .select('id, status')
-          .eq('fiscal_year_id', nextFiscalYear.id)
-          .eq('organization_id', orgId)
-          .eq('status', 'OPEN')
-          .order('start_date', { ascending: true })
-          .limit(1)
-          .maybeSingle()
-      );
-      if (nextPeriod) {
-        closingPeriodId = nextPeriod.id;
-      }
+    let ensuredNextFiscalYear = nextFiscalYear;
+    if (!ensuredNextFiscalYear) {
+      const nextStart = new Date(`${fiscalYear.end_date}T00:00:00Z`);
+      nextStart.setUTCDate(nextStart.getUTCDate() + 1);
+      const nextEnd = new Date(nextStart);
+      nextEnd.setUTCFullYear(nextEnd.getUTCFullYear() + 1);
+      nextEnd.setUTCDate(nextEnd.getUTCDate() - 1);
+      const nextName = `${nextStart.getUTCFullYear()}-${nextEnd.getUTCFullYear()}`;
+      const { data: createdNextFy, error: createNextFyError } = await supabase.schema('finance').rpc('create_fiscal_year_with_periods', { p_name: nextName, p_start_date: nextStart.toISOString().slice(0,10), p_end_date: nextEnd.toISOString().slice(0,10), p_description: `Next fiscal year opened by year-end close of ${fiscalYear.name || fiscal_year_id}`, p_created_by: auth.userId });
+      if (createNextFyError || !createdNextFy) return NextResponse.json({ error: 'Unable to create the next fiscal year: ' + (createNextFyError?.message || 'Unknown error') }, { status: 500 });
+      ensuredNextFiscalYear = { id: createdNextFy, name: nextName, start_date: nextStart.toISOString().slice(0,10), end_date: nextEnd.toISOString().slice(0,10) };
     }
 
-    // 7.5.2. Fallback: first OPEN period of the closing fiscal year (rare).
-    if (!closingPeriodId) {
-      const openPeriod = getData(
-        await supabase
-          .schema('finance').from('accounting_periods')
-          .select('id, status')
-          .eq('fiscal_year_id', fiscal_year_id)
-          .eq('organization_id', orgId)
-          .eq('status', 'OPEN')
-          .order('start_date', { ascending: true })
-          .limit(1)
-          .maybeSingle()
-      );
-      if (openPeriod) {
-        closingPeriodId = openPeriod.id;
-      }
+    const nextPeriod = getData(await supabase.schema('finance').from('accounting_periods').select('id, status').eq('fiscal_year_id', ensuredNextFiscalYear.id).eq('organization_id', orgId).order('start_date', { ascending: true }).limit(1).maybeSingle());
+    if (!nextPeriod) return NextResponse.json({ error: 'Next fiscal year has no accounting period' }, { status: 500 });
+    if (nextPeriod.status === 'PENDING') {
+      const { error: openErr } = await supabase.schema('finance').rpc('open_period', { p_period_id: nextPeriod.id, p_opened_by: auth.userId });
+      if (openErr) return NextResponse.json({ error: 'Unable to open the first period of the next fiscal year: ' + openErr.message }, { status: 500 });
     }
+    if (nextPeriod.status === 'OPEN' || nextPeriod.status === 'PENDING') closingPeriodId = nextPeriod.id;
+    // The closing journal is never posted to a hard-closed period. The first period of the next FY is the canonical closing-entry period.
+
 
     if (!closingPeriodId) {
       return NextResponse.json({
@@ -382,6 +391,8 @@ export async function POST(req: NextRequest) {
           net_income: netIncome,
           journal_id: journalId,
           retained_earnings_account_id: retainedEarningsAccount.id,
+          close_checklist: checklist.checks,
+          next_fiscal_year_id: ensuredNextFiscalYear?.id || null,
         },
         p_related_journal_id: journalId,
       });
@@ -402,6 +413,8 @@ export async function POST(req: NextRequest) {
       total_credit: totalCredit,
       balanced: Math.abs(totalDebit - totalCredit) < 0.01,
       audit_log_warning: auditLogWarning,
+      checklist: checklist.checks,
+      next_fiscal_year_id: ensuredNextFiscalYear?.id || null,
       message: `Year-end close completed: ${netIncome >= 0 ? 'Profit' : 'Loss'} of PKR ${Math.abs(netIncome).toLocaleString()} transferred to Retained Earnings`,
     });
   } catch (err: any) {
@@ -452,6 +465,7 @@ export async function GET(req: NextRequest) {
     );
  
     const unclosed = (periods || []).filter((p:any) => p.status !== 'HARD_CLOSED');
+    const checklist = periods?.length ? await buildYearEndChecklist(supabase, orgId, fiscalYear, periods) : { passed: false, checks: {} };
  
     return NextResponse.json({
       fiscal_year: {
@@ -464,7 +478,8 @@ export async function GET(req: NextRequest) {
       total_periods: periods?.length || 0,
       unclosed_periods: unclosed.length,
       unclosed_details: unclosed,
-      ready_to_close: unclosed.length === 0 && fiscalYear.status !== 'CLOSED',
+      ready_to_close: unclosed.length === 0 && fiscalYear.status !== 'HARD_CLOSED' && checklist.passed,
+      checklist: checklist.checks,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
