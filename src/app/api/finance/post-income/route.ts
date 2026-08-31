@@ -144,58 +144,36 @@ export async function POST(req: NextRequest) {
       },
     ];
 
-    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
-      p_description: `Income: ${income.title}${income.project_id ? ' (Project)' : ''}`,
-      p_transaction_date: income.income_date,
+    // FND-FIN-001 FIX (Spec §11.3): previously this called post_journal_entry
+    // to create the journal, then made a SEPARATE .update() call to mark the
+    // income POSTED — two independent PostgREST round-trips with no DB-level
+    // transaction linking them. If the process died / the connection dropped
+    // between the two calls, the journal committed but the income stayed
+    // status=APPROVED with journal_entry_id=NULL: an orphaned journal that
+    // reverse_income_atomic (which requires status='POSTED' AND
+    // journal_entry_id IS NOT NULL) could never reverse. Both steps now
+    // happen inside a single SECURITY DEFINER RPC (finance.post_income_atomic,
+    // see supabase/migrations/P2/P2_005_atomic_gl_posting_and_profit_distribution_lockdown.sql),
+    // so a failure partway through rolls back the journal insert too instead
+    // of leaving a mismatch — matching how post_payment_receipt_atomic
+    // already behaves.
+    const { data: postResult, error: postErr } = await supabase.schema('finance').rpc('post_income_atomic', {
+      p_income_id: incomeId,
       p_period_id: period.id,
+      p_transaction_date: income.income_date,
+      p_description: `Income: ${income.title}${income.project_id ? ' (Project)' : ''}`,
       p_lines: journalLines,
       p_currency: income.currency || 'PKR',
       p_exchange_rate: income.exchange_rate || 1,
-      p_source_type: 'INCOME',
-      p_source_id: incomeId,
       p_project_id: income.project_id || null,
     });
 
-    if (postErr || !journalId) {
+    if (postErr || !postResult?.journal_id) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
 
-    // Fetch the created journal to get reference number
-    const journal = getData(await supabase
-      .schema('finance').from('journal_entries')
-      .select('id, reference')
-      .eq('id', journalId)
-      .single());
-    // C6 FIX: Null guard
-    if (!journal) {
-      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
-    }
-    const reference = journal.reference || `JE-IN-${journalId}`;
-
-    // P0-01 FIX (Spec §11.3 step 8): mark the source record POSTED. Without
-    // this the income stays status=APPROVED with journal_entry_id=NULL, which
-    // breaks reverse_income_atomic (requires status='POSTED' AND
-    // journal_entry_id IS NOT NULL) and makes GL-posted income invisible to
-    // reports/dashboards that key off status or journal_entry_id.
-    // NOTE: public.incomes has no posted_by column (only posted_at) --
-    // confirmed against schema.sql.
-    const { error: markPostedErr } = await supabase
-      .from('incomes')
-      .update({
-        status: 'POSTED',
-        journal_entry_id: journal.id,
-        posted_at: new Date().toISOString(),
-      })
-      .eq('id', incomeId)
-      .eq('organization_id', auth.orgId);
-
-    if (markPostedErr) {
-      return NextResponse.json({
-        error: 'GL journal was created but the income record could not be marked POSTED: ' + markPostedErr.message,
-        journalId: journal.id,
-        reference,
-      }, { status: 500 });
-    }
+    const journal = { id: postResult.journal_id, reference: postResult.reference };
+    const reference = journal.reference || `JE-IN-${journal.id}`;
 
     // 11. Audit log
     let auditLogFailed = false;

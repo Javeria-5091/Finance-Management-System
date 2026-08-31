@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
-import { supabase, reportingDB } from "@/lib/supabase";
+import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/context/PermissionContext";
 import { Budget, BudgetFormData, Project, Expense } from "@/types";
@@ -67,7 +67,8 @@ export default function BudgetsPage() {
         .select("*")
         .eq("status", "POSTED"),
 
-      reportingDB
+      supabase
+        .schema("reporting")
         .from("budget_gl_actual")
         .select("*")
         .order("account_code"),

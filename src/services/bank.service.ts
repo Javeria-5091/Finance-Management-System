@@ -367,6 +367,32 @@ export const createBankTransfer = async (payload: Partial<BankTransfer> & { crea
   const orgId = (payload as any).organization_id;
   if (!orgId) return { data: null as any, error: new Error('organization_id is required') };
   rest.organization_id = orgId;
+
+  // FND-PBV-006 FIX: nothing in the create flow (this service, TransferForm,
+  // or the banking dashboard page) ever set requires_dual_approval, so it
+  // was always the column default (false) regardless of the source
+  // account's own policy. finance.update_bank_transfer_status()'s entire
+  // second-approval branch is gated on this flag (see schema.sql) — with it
+  // always false, a transfer out of an account flagged
+  // requires_dual_approval, or over its min_dual_approval_amount, only ever
+  // got a single approval, silently skipping the second sign-off spec §5.7
+  // requires for large/sensitive transfers.
+  if (rest.from_account_id && rest.from_amount != null) {
+    const { data: fromAccount } = await db
+      .from('financial_accounts')
+      .select('requires_dual_approval, min_dual_approval_amount')
+      .eq('id', rest.from_account_id)
+      .maybeSingle();
+
+    if (fromAccount) {
+      const overThreshold =
+        fromAccount.min_dual_approval_amount != null &&
+        Number(rest.from_amount) >= Number(fromAccount.min_dual_approval_amount);
+
+      rest.requires_dual_approval = Boolean(fromAccount.requires_dual_approval) || overThreshold;
+    }
+  }
+
   const { data, error } = await db
     .from('bank_transfers')
     .insert(rest)

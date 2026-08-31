@@ -268,60 +268,42 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
-      p_description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${bill.vendor_id || 'Vendor'} - ${bill.description || ''}`,
-      p_transaction_date: bill.bill_date || new Date().toISOString().split('T')[0],
-      p_period_id: period.id,
-      p_lines: rpcLines,
-      p_currency: bill.currency || 'PKR',
-      p_exchange_rate: bill.exchange_rate || 1,
-      p_source_type: 'VENDOR_BILL',
-      p_source_id: vendorBillId,
-      p_project_id: bill.project_id || null,
-    });
-
-    if (postErr || !journalId) {
-      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
-    }
-
-    const journal = getData(await supabase
-      .schema('finance').from('journal_entries')
-      .select('id, reference, total_debit, total_credit')
-      .eq('id', journalId).single());
-    // C6 FIX: Null guard
-    if (!journal) {
-      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
-    }
-    const reference = journal.reference || `JE-VB-${journalId}`;
-    const totalDebit = journal.total_debit || 0;
-    const totalCredit = journal.total_credit || 0;
-
-    // P0-01 FIX (Spec §11.3 step 8): mark the vendor bill POSTED. Without
-    // this it stays status=APPROVED forever, so it's invisible to any AP
-    // report/reconciliation that filters on status='POSTED', and the maker-
-    // checker trail (posted_by/posted_at) is never recorded.
+    // FND-FIN-001 FIX (Spec §11.3): previously post_journal_entry created the
+    // journal and a SEPARATE .update() below marked the vendor bill POSTED —
+    // two independent PostgREST calls with no transactional link. A failure
+    // between them left a committed journal with the bill still
+    // status=APPROVED, invisible to AP reports and un-reversible. Both steps
+    // now happen inside a single SECURITY DEFINER RPC
+    // (finance.post_vendor_bill_atomic, see
+    // supabase/migrations/P2/P2_005_atomic_gl_posting_and_profit_distribution_lockdown.sql),
+    // so a failure partway through rolls back the journal insert too.
     // NOTE: finance.vendor_bills has posted_by/posted_at columns but no
     // journal_entry_id column (confirmed against schema.sql) -- the link to
     // the journal is via journal_entries.source_type='VENDOR_BILL' /
-    // source_id=vendorBillId instead.
-    const { error: markPostedErr } = await supabase
-      .schema('finance')
-      .from('vendor_bills')
-      .update({
-        status: 'POSTED',
-        posted_by: auth.userId,
-        posted_at: new Date().toISOString(),
-      })
-      .eq('id', vendorBillId)
-      .eq('organization_id', orgId);
+    // source_id=vendorBillId instead. posted_by is set from auth.uid() inside
+    // the RPC (the caller's own session), same identity as auth.userId here.
+    const { data: postResult, error: postErr } = await supabase.schema('finance').rpc('post_vendor_bill_atomic', {
+      p_bill_id: vendorBillId,
+      p_period_id: period.id,
+      p_transaction_date: bill.bill_date || new Date().toISOString().split('T')[0],
+      p_description: `Vendor Bill: ${bill.bill_number || 'N/A'} - ${bill.vendor_id || 'Vendor'} - ${bill.description || ''}`,
+      p_lines: rpcLines,
+      p_currency: bill.currency || 'PKR',
+      p_exchange_rate: bill.exchange_rate || 1,
+      p_project_id: bill.project_id || null,
+    });
 
-    if (markPostedErr) {
-      return NextResponse.json({
-        error: 'GL journal was created but the vendor bill could not be marked POSTED: ' + markPostedErr.message,
-        journalId: journal.id,
-        reference,
-      }, { status: 500 });
+    if (postErr || !postResult?.journal_id) {
+      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
+
+    const journal = { id: postResult.journal_id, reference: postResult.reference };
+    const journalId = journal.id;
+    const reference = journal.reference || `JE-VB-${journalId}`;
+    // The GL engine's own balance trigger (trg_check_journal_balance)
+    // guarantees debits === credits === totalAmount for what we submitted.
+    const totalDebit = totalAmount;
+    const totalCredit = totalAmount;
 
     // 11. Audit log
     // BUG-023 FIX: surface a failed audit write via audit_log_warning

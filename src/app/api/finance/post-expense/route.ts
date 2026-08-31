@@ -298,62 +298,33 @@ export async function POST(req: NextRequest) {
     // function then fails with "cannot get array length of a scalar").
     // Pass the array directly, same as the already-correct
     // post-vendor-bill route.
-    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
-      p_description: `Expense: ${expense.title}${expense.category ? ` [${expense.category}]` : ''}`,
-      p_transaction_date: expense.expense_date,
+    // FND-FIN-001 FIX (Spec §11.3): previously post_journal_entry created the
+    // journal and a SEPARATE .update() below marked the expense POSTED — two
+    // independent PostgREST calls with no transactional link. A failure
+    // between them left a committed journal with the expense still
+    // status=APPROVED / journal_entry_id=NULL, which reverse_expense_atomic
+    // (requires status='POSTED' AND journal_entry_id IS NOT NULL) could never
+    // reverse. Both steps now happen inside a single SECURITY DEFINER RPC
+    // (finance.post_expense_atomic, see
+    // supabase/migrations/P2/P2_005_atomic_gl_posting_and_profit_distribution_lockdown.sql),
+    // so a failure partway through rolls back the journal insert too.
+    const { data: postResult, error: postErr } = await supabase.schema('finance').rpc('post_expense_atomic', {
+      p_expense_id: expenseId,
       p_period_id: period.id,
+      p_transaction_date: expense.expense_date,
+      p_description: `Expense: ${expense.title}${expense.category ? ` [${expense.category}]` : ''}`,
       p_lines: journalLines,
       p_currency: expense.currency || 'PKR',
       p_exchange_rate: expense.exchange_rate || 1,
-      p_source_type: 'EXPENSE',
-      p_source_id: expenseId,
       p_project_id: expense.project_id || null,
     });
- 
-    if (postErr || !journalId) {
+
+    if (postErr || !postResult?.journal_id) {
       return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
- 
-    // Fetch the created journal to get reference number
-    const journal = getData(await supabase
-      .schema('finance').from('journal_entries')
-      .select('id, reference')
-      .eq('id', journalId)
-      .single());
-    // C6 FIX: Null guard — journal may not exist if RPC returned bad ID
-    if (!journal) {
-      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
-    }
-    const reference = journal.reference || `JE-EX-${journalId}`;
 
-    // P0-01 FIX (Spec §11.3 step 8): the RPC only creates the journal; it never
-    // touches the source record. Without this, the expense stays status=APPROVED
-    // with journal_entry_id=NULL forever, which breaks reverse_expense_atomic
-    // (requires status='POSTED' AND journal_entry_id IS NOT NULL), makes
-    // budget-check.service.ts's .eq('status','APPROVED') filter never see this
-    // expense as "actual" spend, and undercounts the "posted this month" KPI.
-    const { error: markPostedErr } = await supabase
-      .from('expenses')
-      .update({
-        status: 'POSTED',
-        journal_entry_id: journal.id,
-        // NOTE: public.expenses has no posted_by column (only posted_at) —
-        // confirmed against schema.sql; do not add a non-existent column here.
-        posted_at: new Date().toISOString(),
-      })
-      .eq('id', expenseId)
-      .eq('organization_id', orgId);
-
-    if (markPostedErr) {
-      // The journal is already committed at this point — we cannot silently
-      // pretend posting failed. Surface it loudly so ops can reconcile the
-      // source record with the journal that now exists.
-      return NextResponse.json({
-        error: 'GL journal was created but the expense record could not be marked POSTED: ' + markPostedErr.message,
-        journalId: journal.id,
-        reference,
-      }, { status: 500 });
-    }
+    const journal = { id: postResult.journal_id, reference: postResult.reference };
+    const reference = journal.reference || `JE-EX-${journal.id}`;
  
     // FIX: Use RPC for correct audit columns
     try {

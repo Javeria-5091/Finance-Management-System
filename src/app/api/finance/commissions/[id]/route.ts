@@ -11,6 +11,43 @@ import { enforceMFA } from "@/lib/mfa-middleware";
 import { calculateCommission } from "@/services/commission.service";
 
 /* -------------------------------------------------------------------------- */
+/* FND-PBV-004 FIX: GL posting helpers                                        */
+/* -------------------------------------------------------------------------- */
+// Approve/pay previously just flipped `status` on the commissions row with
+// no accounting impact at all. These helpers post real journal entries,
+// following the same account-resolution style already used by
+// src/app/api/finance/post-expense/route.ts (exact name match first, then a
+// deterministic fallback) rather than inventing a new lookup convention.
+
+async function findAccount(
+  supabase: any,
+  orgId: string,
+  accountType: string,
+  nameLike: string,
+): Promise<{ id: string; code: string; name: string } | null> {
+  const exact = (await supabase
+    .schema('finance').from('chart_of_accounts')
+    .select('id, code, name')
+    .eq('account_type', accountType)
+    .eq('is_active', true)
+    .eq('organization_id', orgId)
+    .ilike('name', nameLike)
+    .order('code', { ascending: true })
+    .limit(1)).data ?? [];
+  if (exact.length) return exact[0];
+
+  const fallback = (await supabase
+    .schema('finance').from('chart_of_accounts')
+    .select('id, code, name')
+    .eq('account_type', accountType)
+    .eq('is_active', true)
+    .eq('organization_id', orgId)
+    .order('code', { ascending: true })
+    .limit(1)).data ?? [];
+  return fallback.length ? fallback[0] : null;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Schemas                                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -100,6 +137,15 @@ const patchSchema = z.object({
     .trim()
     .max(100)
     .nullable()
+    .optional(),
+
+  // FND-PBV-004 FIX: the bank/cash account the payment goes out of, needed
+  // to build the GL payment journal's credit line. Required for action
+  // "pay" (checked below, not here, so the other actions' payloads don't
+  // need it).
+  financial_account_id: z
+    .string()
+    .uuid()
     .optional(),
 });
 
@@ -397,6 +443,68 @@ export async function PATCH(
         );
       }
 
+      // FND-PBV-004 FIX: post the accrual to the GL before (and atomically
+      // with) marking the commission APPROVED — previously nothing here
+      // touched finance.journal_entries at all.
+      if (row.accrual_journal_id) {
+        return NextResponse.json(
+          { error: "This commission was already posted to the GL (accrual)" },
+          { status: 409 }
+        );
+      }
+
+      const commissionAmount = Number(row.commission_amount) || 0;
+      const taxWithheld = Number(row.tax_withheld) || 0;
+      const netAmount = Math.max(commissionAmount - taxWithheld, 0);
+
+      const period = (await supabase
+        .schema('finance').from('accounting_periods')
+        .select('id')
+        .eq('status', 'OPEN')
+        .eq('organization_id', organizationId)
+        .order('start_date', { ascending: false })
+        .limit(1)
+        .maybeSingle()).data;
+      if (!period) {
+        return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
+      }
+
+      const expenseAccount = await findAccount(supabase, organizationId, 'OPERATING_EXPENSE', '%commission%');
+      if (!expenseAccount) {
+        return NextResponse.json({ error: 'No Commission Expense (OPERATING_EXPENSE) account found in Chart of Accounts' }, { status: 400 });
+      }
+      const payableAccount = await findAccount(supabase, organizationId, 'LIABILITY', '%commission%payable%');
+      if (!payableAccount) {
+        return NextResponse.json({ error: 'No Commission Payable (LIABILITY) account found in Chart of Accounts' }, { status: 400 });
+      }
+
+      const lines: any[] = [
+        { account_id: expenseAccount.id, debit_amount: commissionAmount, credit_amount: 0, description: `Commission accrued: ${row.person_name}` },
+        { account_id: payableAccount.id, debit_amount: 0, credit_amount: netAmount, description: `Commission payable: ${row.person_name}` },
+      ];
+      if (taxWithheld > 0) {
+        const whtAccount = await findAccount(supabase, organizationId, 'LIABILITY', '%withholding%');
+        if (!whtAccount) {
+          return NextResponse.json({ error: 'No Withholding Tax Payable (LIABILITY) account found in Chart of Accounts' }, { status: 400 });
+        }
+        lines.push({ account_id: whtAccount.id, debit_amount: 0, credit_amount: taxWithheld, description: `Withholding tax on commission: ${row.person_name}` });
+      }
+
+      const { data: journalId, error: postErr } = await supabase
+        .schema('finance').rpc('post_journal_entry', {
+          p_description: `Commission accrual: ${row.person_name} (${row.commission_type})`,
+          p_transaction_date: new Date().toISOString().slice(0, 10),
+          p_period_id: period.id,
+          p_lines: lines,
+          p_currency: row.currency || 'PKR',
+          p_exchange_rate: 1,
+          p_source_type: 'COMMISSION_ACCRUAL',
+          p_source_id: row.id,
+        });
+      if (postErr || !journalId) {
+        return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
+      }
+
       const {
         data,
         error,
@@ -407,6 +515,7 @@ export async function PATCH(
           approved_by: auth.userId,
           approved_at:
             new Date().toISOString(),
+          accrual_journal_id: journalId,
         })
         .eq(
           "id",
@@ -420,8 +529,28 @@ export async function PATCH(
         .single();
 
       if (error) {
-        throw error;
+        // Journal is already posted at this point; surface that so it isn't
+        // silently lost — mirrors the capital-transactions "partial_success" pattern.
+        return NextResponse.json({
+          error: "Journal posted but commission status update failed: " + error.message,
+          journal_id: journalId,
+          partial_success: true,
+        }, { status: 500 });
       }
+
+      try {
+        await supabase.schema('audit').rpc('log_action', {
+          p_user_id: auth.userId,
+          p_action: 'COMMISSION_APPROVED',
+          p_entity_type: 'commission',
+          p_entity_id: row.id,
+          p_description: `Commission approved and posted to GL: ${row.person_name} (${commissionAmount} ${row.currency || 'PKR'})`,
+          p_source_module: 'commissions',
+          p_severity: 'medium',
+          p_new_values: { journal_id: journalId, commission_amount: commissionAmount, tax_withheld: taxWithheld },
+          p_related_journal_id: journalId,
+        });
+      } catch {}
 
       return NextResponse.json({
         data,
@@ -474,6 +603,73 @@ export async function PATCH(
         );
       }
 
+      // FND-PBV-004 FIX: post the cash settlement to the GL before (and
+      // atomically with) marking the commission PAID — previously nothing
+      // here touched finance.journal_entries at all.
+      if (row.payment_journal_id) {
+        return NextResponse.json(
+          { error: "This commission was already posted to the GL (payment)" },
+          { status: 409 }
+        );
+      }
+      if (!input.financial_account_id) {
+        return NextResponse.json(
+          { error: "financial_account_id is required to pay a commission (the bank/cash account it's paid from)" },
+          { status: 400 }
+        );
+      }
+
+      const financialAccount = (await supabase
+        .schema('finance').from('financial_accounts')
+        .select('id, linked_ledger_account_id')
+        .eq('id', input.financial_account_id)
+        .eq('organization_id', organizationId)
+        .eq('is_active', true)
+        .maybeSingle()).data;
+      if (!financialAccount) {
+        return NextResponse.json({ error: 'Financial account not found or inactive' }, { status: 404 });
+      }
+
+      const netAmountToPay = Math.max(
+        (Number(row.commission_amount) || 0) - (Number(row.tax_withheld) || 0),
+        0
+      );
+
+      const period = (await supabase
+        .schema('finance').from('accounting_periods')
+        .select('id')
+        .eq('status', 'OPEN')
+        .eq('organization_id', organizationId)
+        .order('start_date', { ascending: false })
+        .limit(1)
+        .maybeSingle()).data;
+      if (!period) {
+        return NextResponse.json({ error: 'No OPEN accounting period found' }, { status: 400 });
+      }
+
+      const payableAccount = await findAccount(supabase, organizationId, 'LIABILITY', '%commission%payable%');
+      if (!payableAccount) {
+        return NextResponse.json({ error: 'No Commission Payable (LIABILITY) account found in Chart of Accounts' }, { status: 400 });
+      }
+
+      const { data: journalId, error: postErr } = await supabase
+        .schema('finance').rpc('post_journal_entry', {
+          p_description: `Commission payment: ${row.person_name}`,
+          p_transaction_date: input.payment_date ?? new Date().toISOString().slice(0, 10),
+          p_period_id: period.id,
+          p_lines: [
+            { account_id: payableAccount.id, debit_amount: netAmountToPay, credit_amount: 0, description: `Clear commission payable: ${row.person_name}` },
+            { account_id: financialAccount.linked_ledger_account_id, debit_amount: 0, credit_amount: netAmountToPay, description: `Commission paid: ${row.person_name}` },
+          ],
+          p_currency: row.currency || 'PKR',
+          p_exchange_rate: 1,
+          p_source_type: 'COMMISSION_PAYMENT',
+          p_source_id: row.id,
+        });
+      if (postErr || !journalId) {
+        return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
+      }
+
       const paymentDate =
         input.payment_date ??
         new Date()
@@ -490,6 +686,7 @@ export async function PATCH(
           payment_date: paymentDate,
           payment_ref:
             input.payment_ref ?? null,
+          payment_journal_id: journalId,
         })
         .eq(
           "id",
@@ -503,8 +700,26 @@ export async function PATCH(
         .single();
 
       if (error) {
-        throw error;
+        return NextResponse.json({
+          error: "Journal posted but commission status update failed: " + error.message,
+          journal_id: journalId,
+          partial_success: true,
+        }, { status: 500 });
       }
+
+      try {
+        await supabase.schema('audit').rpc('log_action', {
+          p_user_id: auth.userId,
+          p_action: 'COMMISSION_PAID',
+          p_entity_type: 'commission',
+          p_entity_id: row.id,
+          p_description: `Commission paid and posted to GL: ${row.person_name} (${netAmountToPay} ${row.currency || 'PKR'})`,
+          p_source_module: 'commissions',
+          p_severity: 'medium',
+          p_new_values: { journal_id: journalId, amount: netAmountToPay, financial_account_id: input.financial_account_id },
+          p_related_journal_id: journalId,
+        });
+      } catch {}
 
       return NextResponse.json({
         data,

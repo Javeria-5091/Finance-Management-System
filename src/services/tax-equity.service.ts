@@ -431,9 +431,38 @@ export const saveDistributionLines = async (orgId: string, lines: any[]) => {
   return { data, error };
 };
 
+// FND-ACCT-001 FIX: this used to call db.rpc('post_profit_distribution', ...)
+// directly. That RPC (a) has/had no organization filter on its distribution
+// or chart-of-accounts lookups — a cross-tenant GL-corruption risk — and
+// (b), more fundamentally, is the WRONG posting path entirely: it skips
+// withholding-tax computation (FBR Section 149 dividend WHT), never writes
+// an audit log entry, and never checks that the fiscal period is still
+// open. The correct, atomic, WHT-aware posting flow already exists at
+// POST /api/finance/profit-distribution (distribution-wht.service.ts +
+// finance.post_journal_entry) — route through that instead, the same way
+// closeFiscalYear() in fiscal-year.service.ts calls /api/year-end-close
+// rather than issuing a raw RPC from the browser.
+// `periodId` is accepted for backward compatibility with existing callers
+// (usePostProfitDistribution / the profit-distribution page) but is no
+// longer sent — the API route resolves the correct open period itself.
 export const postProfitDistribution = async (orgId: string, distId: string, periodId: string, date: string) => {
-  const { data, error } = await db.rpc('post_profit_distribution', { p_distribution_id: distId, p_period_id: periodId, p_transaction_date: date });
-  return { data, error };
+  const res = await fetch('/api/finance/profit-distribution', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      distribution_id: distId,
+      distribution_date: date,
+    }),
+  });
+
+  const body = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    return { data: null, error: { message: body.error || 'Failed to post profit distribution to GL' } };
+  }
+
+  return { data: body, error: null };
 };
 
 // ==================== DROPDOWNS ====================

@@ -196,64 +196,42 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // BUG-001 FIX: pass the jsonb array directly — JSON.stringify()
-    // double-encodes it into a jsonb scalar string, which crashes
-    // jsonb_array_length(p_lines) inside post_journal_entry.
-    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
-      p_description: `Invoice: ${invoice.invoice_number || 'N/A'} - ${invoice.description || 'Sales Invoice'}`,
-      p_transaction_date: invoice.issue_date || new Date().toISOString().split('T')[0],
-      p_period_id: period.id,
-      p_lines: rpcLines,
-      p_currency: invoice.currency || 'PKR',
-      p_exchange_rate: invoice.exchange_rate || 1,
-      p_source_type: 'INVOICE',
-      p_source_id: invoiceId,
-      p_project_id: invoice.project_id || null,
-    });
-
-    if (postErr || !journalId) {
-      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
-    }
-
-    // Fetch the created journal to get reference and totals
-    const journal = getData(await supabase
-      .schema('finance').from('journal_entries')
-      .select('id, reference, total_debit, total_credit')
-      .eq('id', journalId)
-      .single());
-    // C6 FIX: Null guard
-    if (!journal) {
-      return NextResponse.json({ error: 'Journal created but fetch failed. Check journal ID: ' + journalId }, { status: 500 });
-    }
-    const reference = journal.reference || `JE-INV-${journalId}`;
-    const totalDebit = journal.total_debit || totalAmount;
-    const totalCredit = journal.total_credit || totalAmount;
-
-    // P0-01 FIX (Spec §11.3 step 8): link the invoice to its GL journal so
-    // reversal/reporting logic can find it via journal_entry_id instead of
-    // relying solely on a journal_entries.source_id lookup.
+    // FND-FIN-001 FIX (Spec §11.3): previously post_journal_entry created the
+    // journal and a SEPARATE .update() below linked journal_entry_id/period_id
+    // on the invoice — two independent PostgREST calls with no transactional
+    // link. A failure between them left a committed journal with the invoice
+    // never linked to it. Both steps now happen inside a single SECURITY
+    // DEFINER RPC (finance.post_invoice_atomic, see
+    // supabase/migrations/P2/P2_005_atomic_gl_posting_and_profit_distribution_lockdown.sql),
+    // so a failure partway through rolls back the journal insert too.
     // NOTE: public.invoices' status CHECK constraint does not include a
     // 'POSTED' value (its lifecycle is DRAFT/.../ISSUED/PARTIALLY_PAID/PAID/...)
     // and the table has no posted_by/posted_at columns (confirmed against
-    // schema.sql) -- so unlike expense/income/vendor_bill/credit_note we do
-    // NOT set status here; GL-posted state for invoices is tracked via
-    // journal_entry_id being non-null while status remains ISSUED/APPROVED.
-    const { error: markPostedErr } = await supabase
-      .from('invoices')
-      .update({
-        journal_entry_id: journal.id,
-        period_id: period.id,
-      })
-      .eq('id', invoiceId)
-      .eq('organization_id', orgId);
+    // schema.sql) -- so, matching pre-existing (correct) behavior,
+    // post_invoice_atomic does NOT set status; GL-posted state for invoices
+    // is tracked via journal_entry_id being non-null while status remains
+    // ISSUED/APPROVED.
+    const { data: postResult, error: postErr } = await supabase.schema('finance').rpc('post_invoice_atomic', {
+      p_invoice_id: invoiceId,
+      p_period_id: period.id,
+      p_transaction_date: invoice.issue_date || new Date().toISOString().split('T')[0],
+      p_description: `Invoice: ${invoice.invoice_number || 'N/A'} - ${invoice.description || 'Sales Invoice'}`,
+      p_lines: rpcLines,
+      p_currency: invoice.currency || 'PKR',
+      p_exchange_rate: invoice.exchange_rate || 1,
+      p_project_id: invoice.project_id || null,
+    });
 
-    if (markPostedErr) {
-      return NextResponse.json({
-        error: 'GL journal was created but the invoice record could not be linked to it: ' + markPostedErr.message,
-        journalId: journal.id,
-        reference,
-      }, { status: 500 });
+    if (postErr || !postResult?.journal_id) {
+      return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
     }
+
+    const journal = { id: postResult.journal_id, reference: postResult.reference };
+    const reference = journal.reference || `JE-INV-${journal.id}`;
+    // The GL engine's own balance trigger (trg_check_journal_balance)
+    // guarantees debits === credits === totalAmount for what we submitted.
+    const totalDebit = totalAmount;
+    const totalCredit = totalAmount;
 
     // 11. Audit log
     let auditLogFailed = false;

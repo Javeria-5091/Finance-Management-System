@@ -8,7 +8,14 @@ function getData<T = any>(res: any): T | null {
  
 // ─── GET: List exchange rates ───
 export async function GET(req: NextRequest) {
-  const auth = await requirePermission('SETTINGS_READ');
+  // FND-ADMIN-PERM-001 FIX: 'SETTINGS_READ' was seeded, but the route's
+  // sibling POST action required 'SETTINGS_UPDATE', which was never seeded
+  // anywhere (see migration P1_076, BUG-017 FIX §4) — only the CEO bypass in
+  // requirePermission() could ever reach it. P1_076 seeded dedicated
+  // FX_RATE_READ/FX_RATE_CREATE/FX_RATE_APPROVE permissions for exactly this
+  // route (and mapped them to CEO/FINANCE_HEAD/ACCOUNTANT/VIEWER as
+  // appropriate); switch to those instead of the generic SETTINGS_* codes.
+  const auth = await requirePermission('FX_RATE_READ');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
  
@@ -54,17 +61,91 @@ export async function GET(req: NextRequest) {
   }
 }
  
-// ─── POST: Create or manage exchange rates ───
+// ─── POST: Propose ("upsert") or approve exchange rates ───
+//
+// FND-ADMIN-PERM-001 / FND-ADMIN-FX-002 FIX: this endpoint now enforces the
+// maker-checker workflow spec §5.12 requires, instead of auto-approving
+// every rate on insert with no way to ever approve one:
+//   - action 'upsert' proposes a rate (entered_by = caller, approved_by =
+//     null, is_locked = false) and requires FX_RATE_CREATE.
+//   - action 'approve' is a NEW action that locks a proposed rate
+//     (approved_by/approved_at set, is_locked = true) and requires
+//     FX_RATE_APPROVE. finance.trg_maker_checker (migration P1_076) rejects
+//     the update at the database level if the approver is the same user who
+//     entered the rate, and the fx_approve RLS policy restricts the update
+//     to Finance Head/CEO regardless of what the application layer allows —
+//     this route's checks are a first line of defense, not the only one.
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('SETTINGS_UPDATE');
-  if (auth instanceof NextResponse) return auth;
-  const { supabase } = await getAuthSupabase(req);
- 
   try {
     const body = await req.json();
-    const { action, rates } = body;
- 
+    const { action } = body;
+
+    if (action === 'approve') {
+      const auth = await requirePermission('FX_RATE_APPROVE');
+      if (auth instanceof NextResponse) return auth;
+      const { supabase } = await getAuthSupabase(req);
+
+      const { id } = body;
+      if (!id) {
+        return NextResponse.json({ error: 'id is required' }, { status: 400 });
+      }
+
+      const existing = getData(await supabase
+        .schema('finance').from('exchange_rates')
+        .select('id, entered_by, is_locked, from_currency, to_currency, rate_date')
+        .eq('id', id)
+        .eq('organization_id', auth.orgId)
+        .single());
+
+      if (!existing) {
+        return NextResponse.json({ error: 'Exchange rate not found' }, { status: 404 });
+      }
+      if (existing.is_locked) {
+        return NextResponse.json({ error: 'This rate is already approved and locked' }, { status: 409 });
+      }
+      if (existing.entered_by === auth.userId) {
+        return NextResponse.json({ error: 'You entered this rate and cannot approve it yourself (maker-checker rule)' }, { status: 409 });
+      }
+
+      const { data, error } = await supabase
+        .schema('finance').from('exchange_rates')
+        .update({ approved_by: auth.userId, approved_at: new Date().toISOString(), is_locked: true })
+        .eq('id', id)
+        .eq('organization_id', auth.orgId)
+        .select()
+        .single();
+
+      if (error) {
+        const isMakerChecker = error.message?.includes('MAKER_CHECKER_VIOLATION');
+        return NextResponse.json({
+          error: isMakerChecker
+            ? 'You entered this rate and cannot approve it yourself (maker-checker rule)'
+            : error.message,
+        }, { status: isMakerChecker ? 409 : 500 });
+      }
+
+      try {
+        await supabase.schema('audit').rpc('log_action', {
+          p_user_id: auth.userId,
+          p_action: 'EXCHANGE_RATE_APPROVED',
+          p_entity_type: 'exchange_rate',
+          p_entity_id: id,
+          p_description: `Exchange rate approved: ${existing.from_currency}/${existing.to_currency} (${existing.rate_date})`,
+          p_source_module: 'settings',
+          p_severity: 'medium',
+          p_new_values: { id },
+        });
+      } catch {}
+
+      return NextResponse.json({ success: true, rate: data });
+    }
+
     if (action === 'upsert') {
+      const auth = await requirePermission('FX_RATE_CREATE');
+      if (auth instanceof NextResponse) return auth;
+      const { supabase } = await getAuthSupabase(req);
+
+      const { rates } = body;
       if (!rates || !Array.isArray(rates) || rates.length === 0) {
         return NextResponse.json({ error: 'rates array is required' }, { status: 400 });
       }
@@ -116,6 +197,9 @@ export async function POST(req: NextRequest) {
           continue;
         }
 
+        // FND-ADMIN-FX-002 FIX: a newly proposed rate is never auto-approved
+        // — approved_by/approved_at/is_locked are only ever set via the
+        // 'approve' action above, by someone other than entered_by.
         const { data, error } = await supabase
           .schema('finance').from('exchange_rates')
           .insert({
@@ -144,7 +228,7 @@ export async function POST(req: NextRequest) {
           p_action: 'EXCHANGE_RATES_UPDATED',
           p_entity_type: 'exchange_rate',
           p_entity_id: null,
-          p_description: `Exchange rates updated: ${rates.length} rates entered`,
+          p_description: `Exchange rates proposed: ${rates.length} rates entered, pending approval`,
           p_source_module: 'settings',
           p_severity: 'medium',
           p_new_values: { count: rates.length, currencies: rates.map((r: any) => `${r.from_currency}/${r.to_currency}`) },
@@ -158,7 +242,7 @@ export async function POST(req: NextRequest) {
       });
     }
  
-    return NextResponse.json({ error: 'Invalid action. Use: upsert' }, { status: 400 });
+    return NextResponse.json({ error: 'Invalid action. Use: upsert or approve' }, { status: 400 });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }

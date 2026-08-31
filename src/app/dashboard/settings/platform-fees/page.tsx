@@ -12,6 +12,11 @@ const APPLIES_TO = ['EXPENSE', 'INVOICE', 'VENDOR_BILL', 'PAYMENT_RECEIPT', 'ALL
 
 export default function PlatformFeesPage() {
   const { hasPermission } = usePermissions();
+  // FND-ADMIN-PLATFEE-002 FIX: finance.platforms and finance.fee_rules both
+  // CHECK (organization_id IS NOT NULL). This page inserts directly via the
+  // Supabase client (bypassing the API route), so it must supply
+  // organization_id itself — it never did, so every insert here failed.
+  const { profile } = useAuth();
   const [platforms, setPlatforms] = useState<any[]>([]);
   const [feeRules, setFeeRules] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -51,7 +56,7 @@ export default function PlatformFeesPage() {
         const { error } = await supabase.schema('finance').from('platforms').update(platForm).eq('id', editingPlatform.id);
         if (error) throw error;
       } else {
-        const { error } = await supabase.schema('finance').from('platforms').insert(platForm);
+        const { error } = await supabase.schema('finance').from('platforms').insert({ ...platForm, organization_id: profile?.organization_id });
         if (error) throw error;
       }
       toast.success(editingPlatform ? 'Platform updated' : 'Platform created');
@@ -74,7 +79,7 @@ export default function PlatformFeesPage() {
         const { error } = await supabase.schema('finance').from('fee_rules').update(payload).eq('id', editingFee.id);
         if (error) throw error;
       } else {
-        const { error } = await supabase.schema('finance').from('fee_rules').insert(payload);
+        const { error } = await supabase.schema('finance').from('fee_rules').insert({ ...payload, organization_id: profile?.organization_id });
         if (error) throw error;
       }
       toast.success(editingFee ? 'Fee rule updated' : 'Fee rule created');

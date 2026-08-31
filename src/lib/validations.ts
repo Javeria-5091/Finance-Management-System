@@ -187,15 +187,15 @@ export const projectCreateSchema = z.object({
   client_id: uuidSchema.nullable().optional(),
   manager_id: uuidSchema.nullable().optional(),
   platform: z.string().max(100).nullable().optional(),
-  contract_value: nonNegativeAmount.optional(),
+  contract_value: nonNegativeAmount.optional().default(0),
   currency: currencyCode.optional().default('PKR'),
   start_date: isoDate.nullable().optional(),
   end_date: isoDate.nullable().optional(),
   description: z.string().max(5000).nullable().optional(),
-  budget_amount: nonNegativeAmount.optional(),
+  budget_amount: nonNegativeAmount.optional().default(0),
   department: z.string().max(100).nullable().optional(),
   cost_center: z.string().max(100).nullable().optional(),
-  is_confidential: z.boolean().optional(),
+  is_confidential: z.boolean().optional().default(false),
 }).strict();
 
 export const projectUpdateSchema = z.object({
@@ -214,7 +214,6 @@ export const projectUpdateSchema = z.object({
   is_confidential: z.boolean().optional(),
   status: z.enum(['ACTIVE', 'ON_HOLD', 'CLOSED', 'CANCELLED']).optional(),
   closure_reason: z.string().max(1000).nullable().optional(),
-  override_reason: z.string().trim().min(1).max(1000).optional(),
 }).strict();
 
 // ─── Client Update ─────────────────────────────────────────────────────────
@@ -320,11 +319,18 @@ const feeTierSchema = z.object({
 });
 const platformFeeFields = {
   platform: z.string().trim().min(1).max(200), // finance.platforms.code or .name
+  // fee_rules.name is NOT NULL + UNIQUE(platform_id, name). Optional here —
+  // if omitted, route.ts derives a default from platform + fee_type so the
+  // insert never fails on a missing name.
+  name: z.string().trim().min(1).max(200).optional(),
   fee_type: feeType,
   applies_to: appliesTo.optional(),
   priority: z.number().int().min(0).max(1000).optional(),
   fee_rate: feeNumber.nullable().optional(),
   fee_fixed_amount: feeNumber.nullable().optional(),
+  // description/currency have no equivalent column on finance.fee_rules.
+  // Accepted for API backward-compatibility and echoed into the audit log,
+  // but not persisted to the row — see route.ts.
   description: z.string().max(2000).nullable().optional(),
   currency: currencyCode.optional(),
   min_amount: feeNumber.nullable().optional(),
@@ -335,6 +341,7 @@ export const platformFeeCreateSchema = z.object({ action: z.literal('create'), .
 export const platformFeeUpdateSchema = z.object({
   action: z.literal('update'),
   id: uuidSchema,
+  name: z.string().trim().min(1).max(200).optional(),
   fee_rate: feeNumber.nullable().optional(),
   fee_fixed_amount: feeNumber.nullable().optional(),
   description: z.string().max(2000).nullable().optional(),

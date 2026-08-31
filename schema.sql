@@ -3891,6 +3891,152 @@ COMMENT ON FUNCTION "finance"."post_existing_journal_entry"("p_journal_id" "uuid
 
 
 
+CREATE OR REPLACE FUNCTION "finance"."post_expense_atomic"("p_expense_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text" DEFAULT 'PKR'::"text", "p_exchange_rate" numeric DEFAULT 1.0000, "p_project_id" "uuid" DEFAULT NULL::"uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_expense record;
+  v_journal_id uuid;
+  v_ref text;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Access denied: no organization context for caller';
+  END IF;
+
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to post an expense to the general ledger';
+  END IF;
+
+  SELECT * INTO v_expense
+  FROM public.expenses
+  WHERE id = p_expense_id AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Expense not found in your organization';
+  END IF;
+
+  IF v_expense.status <> 'APPROVED' THEN
+    RAISE EXCEPTION 'Only APPROVED expenses can be posted. Current: %', v_expense.status;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM finance.journal_entries
+    WHERE source_type = 'EXPENSE' AND source_id = p_expense_id
+  ) THEN
+    RAISE EXCEPTION 'Already posted to GL';
+  END IF;
+
+  v_journal_id := finance.post_journal_entry(
+    p_description, p_transaction_date, p_period_id, p_lines,
+    COALESCE(p_currency, 'PKR'), COALESCE(p_exchange_rate, 1),
+    'EXPENSE', p_expense_id, p_project_id, NULL
+  );
+
+  UPDATE public.expenses
+  SET status = 'POSTED',
+      journal_entry_id = v_journal_id,
+      posted_at = now()
+  WHERE id = p_expense_id
+    AND organization_id = v_org
+    AND status = 'APPROVED';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Expense status update failed while posting to GL';
+  END IF;
+
+  SELECT reference INTO v_ref FROM finance.journal_entries WHERE id = v_journal_id;
+
+  RETURN jsonb_build_object('journal_id', v_journal_id, 'reference', v_ref);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_expense_atomic"("p_expense_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_expense_atomic"("p_expense_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") IS 'FND-FIN-001 fix: atomic replacement for the previous post_journal_entry-then-separate-UPDATE two-step in src/app/api/finance/post-expense/route.ts. Creates the journal via finance.post_journal_entry() and marks the expense POSTED in the same DB transaction.';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_income_atomic"("p_income_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text" DEFAULT 'PKR'::"text", "p_exchange_rate" numeric DEFAULT 1.0000, "p_project_id" "uuid" DEFAULT NULL::"uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_income record;
+  v_journal_id uuid;
+  v_ref text;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Access denied: no organization context for caller';
+  END IF;
+
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to post income to the general ledger';
+  END IF;
+
+  SELECT * INTO v_income
+  FROM public.incomes
+  WHERE id = p_income_id AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Income not found in your organization';
+  END IF;
+
+  IF v_income.status <> 'APPROVED' THEN
+    RAISE EXCEPTION 'Only APPROVED incomes can be posted. Current: %', v_income.status;
+  END IF;
+
+  -- Idempotency guard re-checked under the row lock above, closing the
+  -- race between the caller's earlier check and this call.
+  IF EXISTS (
+    SELECT 1 FROM finance.journal_entries
+    WHERE source_type = 'INCOME' AND source_id = p_income_id
+  ) THEN
+    RAISE EXCEPTION 'Already posted to GL';
+  END IF;
+
+  -- Same-transaction journal creation: if post_journal_entry raises for
+  -- any reason, the whole function aborts and nothing below runs.
+  v_journal_id := finance.post_journal_entry(
+    p_description, p_transaction_date, p_period_id, p_lines,
+    COALESCE(p_currency, 'PKR'), COALESCE(p_exchange_rate, 1),
+    'INCOME', p_income_id, p_project_id, NULL
+  );
+
+  UPDATE public.incomes
+  SET status = 'POSTED',
+      journal_entry_id = v_journal_id,
+      posted_at = now()
+  WHERE id = p_income_id
+    AND organization_id = v_org
+    AND status = 'APPROVED';
+
+  IF NOT FOUND THEN
+    -- Row changed under us since the lock was taken; abort so the journal
+    -- insert above rolls back too instead of leaving an orphan.
+    RAISE EXCEPTION 'Income status update failed while posting to GL';
+  END IF;
+
+  SELECT reference INTO v_ref FROM finance.journal_entries WHERE id = v_journal_id;
+
+  RETURN jsonb_build_object('journal_id', v_journal_id, 'reference', v_ref);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_income_atomic"("p_income_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_income_atomic"("p_income_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") IS 'FND-FIN-001 fix: atomic replacement for the previous post_journal_entry-then-separate-UPDATE two-step in src/app/api/finance/post-income/route.ts. Creates the journal via finance.post_journal_entry() and marks the income POSTED in the same DB transaction, so a failure partway through cannot leave an orphaned journal / un-postable income behind.';
+
+
+
 CREATE OR REPLACE FUNCTION "finance"."post_invoice_ar"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
@@ -3974,6 +4120,75 @@ ALTER FUNCTION "finance"."post_invoice_ar"("p_invoice_id" "uuid", "p_period_id" 
 
 
 COMMENT ON FUNCTION "finance"."post_invoice_ar"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'P1_060 SECURITY FIX (ISS-02, Critical): added in-function role check (Finance Head/CEO/Accountant) and organization-match check against the invoice being posted. Previously contained only existence checks (IF NOT FOUND), no authorization of any kind.';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_invoice_atomic"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text" DEFAULT 'PKR'::"text", "p_exchange_rate" numeric DEFAULT 1.0000, "p_project_id" "uuid" DEFAULT NULL::"uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_invoice record;
+  v_journal_id uuid;
+  v_ref text;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Access denied: no organization context for caller';
+  END IF;
+
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to post an invoice to the general ledger';
+  END IF;
+
+  SELECT * INTO v_invoice
+  FROM public.invoices
+  WHERE id = p_invoice_id AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Invoice not found in your organization';
+  END IF;
+
+  IF v_invoice.status NOT IN ('ISSUED', 'APPROVED') THEN
+    RAISE EXCEPTION 'Only ISSUED or APPROVED invoices can be posted. Current: %', v_invoice.status;
+  END IF;
+
+  IF v_invoice.journal_entry_id IS NOT NULL OR EXISTS (
+    SELECT 1 FROM finance.journal_entries
+    WHERE source_type = 'INVOICE' AND source_id = p_invoice_id
+  ) THEN
+    RAISE EXCEPTION 'Already posted to GL';
+  END IF;
+
+  v_journal_id := finance.post_journal_entry(
+    p_description, p_transaction_date, p_period_id, p_lines,
+    COALESCE(p_currency, 'PKR'), COALESCE(p_exchange_rate, 1),
+    'INVOICE', p_invoice_id, p_project_id, NULL
+  );
+
+  UPDATE public.invoices
+  SET journal_entry_id = v_journal_id,
+      period_id = p_period_id
+  WHERE id = p_invoice_id
+    AND organization_id = v_org
+    AND journal_entry_id IS NULL;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Invoice could not be linked to its GL journal';
+  END IF;
+
+  SELECT reference INTO v_ref FROM finance.journal_entries WHERE id = v_journal_id;
+
+  RETURN jsonb_build_object('journal_id', v_journal_id, 'reference', v_ref);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_invoice_atomic"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_invoice_atomic"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") IS 'FND-FIN-001 fix: atomic replacement for the previous post_journal_entry-then-separate-UPDATE two-step in src/app/api/finance/post-invoice/route.ts. Creates the journal via finance.post_journal_entry() and links journal_entry_id/period_id on the invoice in the same DB transaction.';
 
 
 
@@ -4299,35 +4514,82 @@ ALTER FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_
 
 CREATE OR REPLACE FUNCTION "finance"."post_profit_distribution"("p_distribution_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ DECLARE
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+    v_org uuid := core.current_user_org_id();
     v_dist RECORD; v_lines JSONB := '[]'::JSONB;
     v_pnl UUID; v_reserve UUID; v_payable UUID;
+    v_period_org uuid;
 BEGIN
-    SELECT * INTO v_dist FROM finance.profit_distributions WHERE id = p_distribution_id;
-    IF NOT FOUND THEN RAISE EXCEPTION 'Distribution not found'; END IF;
+    -- FND-ACCT-001 FIX: this function was never locked down like its
+    -- sibling posting RPCs (no REVOKE ... FROM PUBLIC anywhere in the
+    -- schema), so it was directly callable via PostgREST by any
+    -- authenticated user with none of the checks below. It is now also
+    -- revoked from PUBLIC at the grant level (below); these in-function
+    -- checks are defense in depth so it fails closed even if EXECUTE is
+    -- ever mistakenly re-granted in the future.
+    IF v_org IS NULL THEN
+        RAISE EXCEPTION 'Access denied: no organization context for caller';
+    END IF;
+
+    IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+        RAISE EXCEPTION 'Insufficient privileges to post a profit distribution to the general ledger';
+    END IF;
+
+    -- FND-ACCT-001 FIX: previously `WHERE id = p_distribution_id` with no
+    -- organization filter -- a caller in any organization could post any
+    -- other organization's distribution. Now scoped + row-locked.
+    SELECT * INTO v_dist
+    FROM finance.profit_distributions
+    WHERE id = p_distribution_id AND organization_id = v_org
+    FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Distribution not found in your organization'; END IF;
     IF v_dist.status != 'APPROVED' THEN RAISE EXCEPTION 'Must be APPROVED'; END IF;
 
-    SELECT id INTO v_pnl FROM finance.chart_of_accounts WHERE code = '3400' LIMIT 1;
-    SELECT id INTO v_reserve FROM finance.chart_of_accounts WHERE code = '3310' LIMIT 1;
-    SELECT id INTO v_payable FROM finance.chart_of_accounts WHERE code = '2410' LIMIT 1;
+    SELECT organization_id INTO v_period_org FROM finance.accounting_periods WHERE id = p_period_id;
+    IF v_period_org IS NULL OR v_period_org <> v_org THEN
+        RAISE EXCEPTION 'Access denied: accounting period % does not belong to your organization', p_period_id;
+    END IF;
+
+    IF EXISTS (
+      SELECT 1 FROM finance.journal_entries
+      WHERE source_type = 'PROFIT_DISTRIBUTION' AND source_id = p_distribution_id
+    ) THEN
+      RAISE EXCEPTION 'Already posted to GL';
+    END IF;
+
+    -- FND-ACCT-001 FIX: previously `WHERE code = 'xxxx' LIMIT 1` with no
+    -- organization filter on all three lookups -- could resolve to
+    -- another organization's chart of accounts.
+    SELECT id INTO v_pnl FROM finance.chart_of_accounts WHERE code = '3400' AND organization_id = v_org LIMIT 1;
+    SELECT id INTO v_reserve FROM finance.chart_of_accounts WHERE code = '3310' AND organization_id = v_org LIMIT 1;
+    SELECT id INTO v_payable FROM finance.chart_of_accounts WHERE code = '2410' AND organization_id = v_org LIMIT 1;
+
+    IF v_pnl IS NULL THEN RAISE EXCEPTION 'Retained earnings account 3400 not found in your organization'; END IF;
 
     v_lines := v_lines || jsonb_build_object('account_id', v_pnl, 'debit_amount', v_dist.total_available_profit, 'credit_amount', 0, 'description', 'Close P&L & Transfer to Reserves/Distributions');
 
     IF v_dist.reserve_amount > 0 THEN
+        IF v_reserve IS NULL THEN RAISE EXCEPTION 'Reserve account 3310 not found in your organization'; END IF;
         v_lines := v_lines || jsonb_build_object('account_id', v_reserve, 'debit_amount', 0, 'credit_amount', v_dist.reserve_amount, 'description', 'Transfer to Reserves');
     END IF;
 
     IF v_dist.distributable_amount > 0 THEN
+        IF v_payable IS NULL THEN RAISE EXCEPTION 'Distribution payable account 2410 not found in your organization'; END IF;
         v_lines := v_lines || jsonb_build_object('account_id', v_payable, 'debit_amount', 0, 'credit_amount', v_dist.distributable_amount, 'description', 'Profit Distribution Payable');
     END IF;
 
     RETURN finance.post_journal_entry('Profit Distribution', p_transaction_date, p_period_id, v_lines, 'PKR', 1.0, 'PROFIT_DISTRIBUTION', p_distribution_id, NULL, NULL);
 END;
- $$;
+$$;
 
 
 ALTER FUNCTION "finance"."post_profit_distribution"("p_distribution_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_profit_distribution"("p_distribution_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'FND-ACCT-001 FIX: added org-scoping (distribution lookup + all three chart-of-accounts lookups + period ownership) and the role check every sibling post_* RPC already has. Also REVOKEd from PUBLIC (see grants below) -- this function has no legitimate direct caller; it was never routed through by the real posting flow at /api/finance/profit-distribution, which computes WHT via distribution-wht.service.ts and posts via finance.post_journal_entry directly. The only previous caller, src/services/tax-equity.service.ts postProfitDistribution(), has been changed in this same fix to call that atomic, WHT-aware, audited route instead.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
@@ -4374,6 +4636,76 @@ ALTER FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "u
 
 
 COMMENT ON FUNCTION "finance"."post_vendor_bill"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'BUG-006 fix (database audit): posts using vendor_bills.currency / vendor_bills.exchange_rate instead of hard-coded PKR/1.0, so foreign-currency bills carry correct FX information into the journal. Retains the P1_060 role/org-ownership checks.';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_vendor_bill_atomic"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text" DEFAULT 'PKR'::"text", "p_exchange_rate" numeric DEFAULT 1.0000, "p_project_id" "uuid" DEFAULT NULL::"uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_bill record;
+  v_journal_id uuid;
+  v_ref text;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Access denied: no organization context for caller';
+  END IF;
+
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to post a vendor bill to the general ledger';
+  END IF;
+
+  SELECT * INTO v_bill
+  FROM finance.vendor_bills
+  WHERE id = p_bill_id AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Vendor bill not found in your organization';
+  END IF;
+
+  IF v_bill.status <> 'APPROVED' THEN
+    RAISE EXCEPTION 'Only APPROVED vendor bills can be posted. Current: %', v_bill.status;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM finance.journal_entries
+    WHERE source_type = 'VENDOR_BILL' AND source_id = p_bill_id
+  ) THEN
+    RAISE EXCEPTION 'Already posted to GL';
+  END IF;
+
+  v_journal_id := finance.post_journal_entry(
+    p_description, p_transaction_date, p_period_id, p_lines,
+    COALESCE(p_currency, 'PKR'), COALESCE(p_exchange_rate, 1),
+    'VENDOR_BILL', p_bill_id, p_project_id, NULL
+  );
+
+  UPDATE finance.vendor_bills
+  SET status = 'POSTED',
+      posted_by = auth.uid(),
+      posted_at = now()
+  WHERE id = p_bill_id
+    AND organization_id = v_org
+    AND status = 'APPROVED';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Vendor bill status update failed while posting to GL';
+  END IF;
+
+  SELECT reference INTO v_ref FROM finance.journal_entries WHERE id = v_journal_id;
+
+  RETURN jsonb_build_object('journal_id', v_journal_id, 'reference', v_ref);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_vendor_bill_atomic"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_vendor_bill_atomic"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") IS 'FND-FIN-001 fix: atomic replacement for the previous post_journal_entry-then-separate-UPDATE two-step in src/app/api/finance/post-vendor-bill/route.ts. Creates the journal via finance.post_journal_entry() and marks the vendor bill POSTED in the same DB transaction.';
 
 
 
@@ -10737,6 +11069,8 @@ END) STORED,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
+    "accrual_journal_id" "uuid",
+    "payment_journal_id" "uuid",
     CONSTRAINT "commissions_base_amount_check" CHECK (("base_amount" >= (0)::numeric)),
     CONSTRAINT "commissions_calculation_basis_check" CHECK ((("calculation_basis")::"text" = ANY ((ARRAY['PROJECT_REVENUE'::character varying, 'INVOICE_AMOUNT'::character varying, 'MILESTONE_VALUE'::character varying, 'CLIENT_PAYMENT'::character varying, 'SALES_TARGET'::character varying, 'FIXED_AMOUNT'::character varying])::"text"[]))),
     CONSTRAINT "commissions_commission_amount_check" CHECK (("commission_amount" >= (0)::numeric)),
@@ -10754,6 +11088,14 @@ ALTER TABLE "public"."commissions" OWNER TO "postgres";
 
 
 COMMENT ON TABLE "public"."commissions" IS 'Commission earnings for contractors and employees, linked to projects, invoices, or milestones with full payment tracking.';
+
+
+
+COMMENT ON COLUMN "public"."commissions"."accrual_journal_id" IS 'FND-PBV-004 FIX: GL journal entry posted when this commission was approved (Dr Commission Expense / Cr Commission Payable [/ Cr Withholding Tax Payable]). Set once by PATCH .../commissions/[id] action=approve; null means never approved or approved before this fix.';
+
+
+
+COMMENT ON COLUMN "public"."commissions"."payment_journal_id" IS 'FND-PBV-004 FIX: GL journal entry posted when this commission was paid (Dr Commission Payable / Cr the paying financial account''s linked ledger account). Set once by PATCH .../commissions/[id] action=pay.';
 
 
 
@@ -17349,6 +17691,11 @@ ALTER TABLE ONLY "public"."clients"
 
 
 ALTER TABLE ONLY "public"."commissions"
+    ADD CONSTRAINT "commissions_accrual_journal_id_fkey" FOREIGN KEY ("accrual_journal_id") REFERENCES "finance"."journal_entries"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."commissions"
     ADD CONSTRAINT "commissions_approved_by_fkey" FOREIGN KEY ("approved_by") REFERENCES "auth"."users"("id");
 
 
@@ -17360,6 +17707,11 @@ ALTER TABLE ONLY "public"."commissions"
 
 ALTER TABLE ONLY "public"."commissions"
     ADD CONSTRAINT "commissions_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "public"."commissions"
+    ADD CONSTRAINT "commissions_payment_journal_id_fkey" FOREIGN KEY ("payment_journal_id") REFERENCES "finance"."journal_entries"("id") ON DELETE SET NULL;
 
 
 
@@ -20175,8 +20527,32 @@ GRANT ALL ON FUNCTION "finance"."post_existing_journal_entry"("p_journal_id" "uu
 
 
 
+REVOKE ALL ON FUNCTION "finance"."post_expense_atomic"("p_expense_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_expense_atomic"("p_expense_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_income_atomic"("p_income_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_income_atomic"("p_income_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_invoice_atomic"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_invoice_atomic"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_profit_distribution"("p_distribution_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") FROM PUBLIC;
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_vendor_bill_atomic"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_vendor_bill_atomic"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") TO "authenticated";
 
 
 
