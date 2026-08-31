@@ -14,6 +14,8 @@ export default function ProjectsPage() {
   const { hasPermission } = usePermissions();
   const [projects, setProjects] = useState<Project[]>([]);
   const [budgets, setBudgets] = useState<Budget[]>([]);
+  const [clients, setClients] = useState<{ id: string; name: string }[]>([]);
+  const [managers, setManagers] = useState<{ user_id: string; full_name: string }[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [loading, setLoading] = useState(true);
   const [formLoading, setFormLoading] = useState(false);
@@ -26,6 +28,7 @@ export default function ProjectsPage() {
   const canCreate = hasPermission("PROJECT_CREATE");
   const canUpdate = hasPermission("PROJECT_UPDATE");
   const canDelete = hasPermission("PROJECT_DELETE");
+  const canViewRates = hasPermission("PROJECT_RATE_VIEW");
   const canModify = canCreate || canUpdate || canDelete;
 
   const fetchProjects = useCallback(async () => {
@@ -33,16 +36,20 @@ export default function ProjectsPage() {
     setLoading(true);
     
     try {
-      const [projRes, budRes, expRes] = await Promise.all([
+      const [projRes, budRes, expRes, clientsRes, managersRes] = await Promise.all([
         fetch("/api/projects?page=1&pageSize=100"),
         fetch("/api/finance/budgets").then(async r => { const j = await r.json(); if (!r.ok) throw new Error(j.error || "Failed to load budgets"); return { data: j.data || [] }; }),
-        supabase.from("expenses").select("*").eq("status", "POSTED")
+        supabase.from("expenses").select("*").eq("status", "POSTED"),
+        supabase.from("clients").select("id,name").eq("status", "ACTIVE").order("name"),
+        supabase.from("profiles").select("user_id,full_name").order("full_name")
       ]);
       const projectJson = await projRes.json();
       if (!projRes.ok) throw new Error(projectJson.error || "Failed to load projects");
       setProjects((projectJson.data || []) as Project[]);
       if (budRes.data) setBudgets(budRes.data);
       if (expRes.data) setExpenses(expRes.data);
+      if (clientsRes.data) setClients(clientsRes.data);
+      if (managersRes.data) setManagers(managersRes.data);
     } catch (err: any) {
       toast.error("Failed to load projects: " + (err.message || "Unknown error"));
     } finally {
@@ -126,8 +133,9 @@ export default function ProjectsPage() {
   }
   
   function getStatusColor(status: string) {
-    if (status === "Active") return "bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400";
-    if (status === "Completed") return "bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400";
+    if (status === "Active" || status === "ACTIVE") return "bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400";
+    if (status === "Completed" || status === "CLOSED") return "bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400";
+    if (status === "CANCELLED") return "bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400";
     return "bg-yellow-100 text-yellow-700 dark:bg-yellow-500/20 dark:text-yellow-400";
   }
 
@@ -173,7 +181,8 @@ export default function ProjectsPage() {
                     <h3 className="text-lg font-bold text-gray-900 dark:text-white">{p.name}</h3>
                     <span className={`text-xs px-2 py-1 rounded font-medium ${getStatusColor(p.status)}`}>{p.status}</span>
                   </div>
-                  <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Client: {p.client_name}</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Client: {p.client_name || p.client?.name || "—"}</p>
+                  {canViewRates && <p className="text-xs text-gray-400 mt-1">Contract: {p.currency || "PKR"} {Number(p.contract_value || 0).toLocaleString()}</p>}
                 </div>
                 {(canUpdate || canDelete) ? (
                   <div className="flex gap-2 ml-4">
@@ -213,13 +222,13 @@ export default function ProjectsPage() {
         })}
       </div>
 
-      {showForm && <ProjectForm initialData={editingData} onSubmit={handleSubmit} onClose={() => { setShowForm(false); setEditingData(null); }} loading={formLoading} budgets={budgets} />}
+      {showForm && <ProjectForm initialData={editingData} onSubmit={handleSubmit} onClose={() => { setShowForm(false); setEditingData(null); }} loading={formLoading} budgets={budgets} clients={clients} managers={managers} canViewRates={canViewRates} />}
 
       {deleteId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
           <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-6 w-full max-w-sm text-center shadow-xl">
             <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">Delete Project?</h3>
-            <p className="text-gray-500 dark:text-gray-400 text-sm mb-6 text-red-500">Warning: This will permanently delete all related incomes and expenses.</p>
+            <p className="text-gray-500 dark:text-gray-400 text-sm mb-6 text-red-500">This will deactivate the project. Related financial records will be preserved.</p>
             <div className="flex gap-3">
               <button onClick={() => setDeleteId(null)} className="flex-1 px-4 py-2.5 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-800 dark:text-white rounded-lg transition-colors font-medium">Cancel</button>
               <button onClick={handleDelete} className="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors font-medium">Delete</button>

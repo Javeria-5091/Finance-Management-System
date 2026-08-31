@@ -59,9 +59,20 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     return NextResponse.json({success:true,revision:data});
   }
 
-  const { error: updateBudgetError } = await supabase.from('budgets').update({ total_amount: revision.revised_amount, updated_at:new Date().toISOString() }).eq('id',params.id).eq('organization_id',auth.orgId);
-  if(updateBudgetError) return NextResponse.json({error:updateBudgetError.message},{status:500});
-  const { data, error } = await supabase.from('budget_revisions').update({ status:'APPROVED', approved_by:auth.userId, approved_at:new Date().toISOString() }).eq('id',revision.id).select().single();
-  if(error) return NextResponse.json({error:error.message},{status:500});
-  return NextResponse.json({success:true,revision:data});
+  const { data: atomicResult, error: atomicError } = await supabase
+    .schema('finance')
+    .rpc('approve_budget_revision_atomic', {
+      p_budget_id: params.id,
+      p_revision_id: revision.id,
+    });
+  if (atomicError) return NextResponse.json({ error: atomicError.message }, { status: 500 });
+
+  const { data, error } = await supabase
+    .from('budget_revisions')
+    .select('*')
+    .eq('id', revision.id)
+    .eq('organization_id', auth.orgId)
+    .single();
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ success: true, revision: data, result: atomicResult });
 }

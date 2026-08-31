@@ -19,6 +19,12 @@ export async function GET(req: NextRequest) {
   const { supabase } = await getAuthSupabase(req);
 
   try {
+    // FND-PO-001 FIX: core.user_permission_overrides has no organization_id
+    // column (org-scoping is enforced at the RLS layer instead, via a join
+    // from user_id -> public.profiles.organization_id -- see policies
+    // upo_select_own_org_scoped / upo_manage_org_scoped). Filtering on
+    // organization_id here threw "column ... does not exist" on every
+    // request. RLS already guarantees only same-org rows come back.
     const { data, error } = await supabase
       .schema('core')
       .from('user_permission_overrides')
@@ -27,7 +33,6 @@ export async function GET(req: NextRequest) {
         effective_from, effective_to, created_at,
         permissions:permission_id ( code, name, module )
       `)
-      .eq('organization_id', auth.orgId)
       .order('created_at', { ascending: false });
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -91,7 +96,6 @@ export async function POST(req: NextRequest) {
         data_scope: data_scope || null,
         effective_from: effective_from || new Date().toISOString().slice(0, 10),
         effective_to: effective_to || null,
-        organization_id: auth.orgId,
         created_by: auth.userId,
       })
       .select()
@@ -133,14 +137,16 @@ export async function DELETE(req: NextRequest) {
     const id = searchParams.get('id');
     if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 });
 
-    const { error } = await supabase
+    const { data: deleted, error } = await supabase
       .schema('core')
       .from('user_permission_overrides')
       .delete()
       .eq('id', id)
-      .eq('organization_id', auth.orgId);
+      .select()
+      .maybeSingle();
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (!deleted) return NextResponse.json({ error: 'Override not found or not in your organization' }, { status: 404 });
 
     try {
       await supabase.schema('audit').rpc('log_action', {

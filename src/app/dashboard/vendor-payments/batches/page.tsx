@@ -64,11 +64,11 @@ export default function VendorPaymentBatchesPage(){
     load()
   }
   return <div className="p-6 space-y-6">
-    <Link href="/dashboard/vendor-payments" className="inline-flex gap-2 items-center text-sm text-blue-600">
+    <Link href="/dashboard/vendor-payments" className="inline-flex gap-2 items-center text-sm text-blue-600 dark:text-blue-400">
     <ArrowLeft size={16}/> Back to Vendor Payments</Link>
     <div>
-        <h1 className="text-2xl font-bold flex gap-2 items-center"><Layers3/> Payment Batches</h1>
-        <p className="text-sm text-gray-500">Build one approval-controlled proposal from multiple outstanding vendor bills.</p>
+        <h1 className="text-2xl font-bold flex gap-2 items-center text-gray-900 dark:text-white"><Layers3/> Payment Batches</h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400">Build one approval-controlled proposal from multiple outstanding vendor bills.</p>
     </div>
   {hasPermission('VENDOR_PAYMENT_CREATE')&&<div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-5 space-y-4">
     <div className="grid md:grid-cols-2 gap-3">
@@ -78,16 +78,16 @@ export default function VendorPaymentBatchesPage(){
             <option value="">Payment method</option>
             {['BANK_TRANSFER','CHEQUE','CASH','JAZZCASH','EASYPAISA','PLATFORM','OTHER'].map(m=><option key={m} value={m}>{m.replace('_',' ')}</option>)}
         </select>
-            <button onClick={create} className="bg-blue-600 text-white rounded-lg px-4 py-2">Create Payment Proposal ({selected.length})</button>
+            <button onClick={create} className="bg-blue-600 text-white rounded-lg px-4 py-2 hover:bg-blue-700 transition-colors">Create Payment Proposal ({selected.length})</button>
             </div>
-            <div className="max-h-72 overflow-auto border rounded-lg">
+            <div className="max-h-72 overflow-auto border dark:border-gray-700 rounded-lg">
                 <table className="w-full text-sm">
                     <thead>
-                        <tr className="bg-gray-50"><th className="p-2"></th>
+                        <tr className="bg-gray-50 dark:bg-gray-900 text-gray-500 dark:text-gray-400"><th className="p-2"></th>
                         <th className="p-2 text-left">Bill</th><th className="p-2 text-left">Vendor</th>
                         <th className="p-2 text-right">Outstanding</th>
                         <th className="p-2">Due</th>
-                        </tr></thead><tbody>{bills.map(b=><tr key={b.id} className="border-t"><td className="p-2 text-center">
+                        </tr></thead><tbody>{bills.map(b=><tr key={b.id} className="border-t dark:border-gray-700 text-gray-700 dark:text-gray-300"><td className="p-2 text-center">
                             <input type="checkbox" checked={selected.includes(b.id)} onChange={e=>setSelected(s=>e.target.checked?[...s,b.id]:s.filter(x=>x!==b.id))}/></td>
                         <td className="p-2">{b.bill_number}</td>
                         <td className="p-2">{b.vendors?.name}</td>
@@ -108,19 +108,24 @@ export default function VendorPaymentBatchesPage(){
             <th className="p-3 text-right">Total</th>
             <th className="p-3">Status</th>
             <th className="p-3"></th>
-            </tr></thead><tbody>{loading?<tr>
-                <td colSpan={5} className="p-8 text-center"><Loader2 className="animate-spin mx-auto"/></td>
-                </tr>:batches.map(b=><tr key={b.id} className="border-t">
+            </tr></thead><tbody className="divide-y dark:divide-gray-700">{loading?<tr>
+                <td colSpan={5} className="p-8 text-center"><Loader2 className="animate-spin mx-auto text-gray-400"/></td>
+                </tr>:batches.map(b=><tr key={b.id} className="border-t dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
                     <td className="p-3 font-mono">{b.batch_number}</td>
                 <td className="p-3 text-center">{b.payment_count}</td>
                 <td className="p-3 text-right">{Number(b.total_amount).toLocaleString()}</td>
                 <td className="p-3 text-center">{b.status}</td>
-                <td className="p-3 text-right space-x-3">{b.status==='DRAFT'&&<button onClick={()=>action(b.id,'submit')} className="text-blue-600 inline-flex gap-1"><Send size={14}/> Submit</button>}{b.status==='SUBMITTED'&&hasPermission('APPROVE_PAYMENT')&&
-                <button onClick={()=>action(b.id,'approve')} className="text-green-600 inline-flex gap-1"><CheckCircle size={14}/> Approve</button>}</td>
+                <td className="p-3 text-right space-x-3">{b.status==='DRAFT'&&<button onClick={()=>action(b.id,'submit')} className="text-blue-600 dark:text-blue-400 inline-flex gap-1"><Send size={14}/> Submit</button>}{b.status==='SUBMITTED'&&hasPermission('APPROVE_PAYMENT')&&
+                <button onClick={()=>action(b.id,'approve')} className="text-green-600 dark:text-green-400 inline-flex gap-1"><CheckCircle size={14}/> Approve</button>}</td>
                 </tr>
                 )}
                 </tbody>
                 </table>
                 </div>
-                <style jsx>{`.input{width:100%;padding:.65rem .8rem;border:1px solid #d1d5db;border-radius:.5rem;background:transparent}`}</style></div>
+                <style jsx>{`
+                  .input{width:100%;padding:.65rem .8rem;border:1px solid #d1d5db;border-radius:.5rem;background:transparent;color:inherit}
+                  :global(.dark) .input{border-color:#4b5563}
+                  .input option{color:#111827;background:#fff}
+                  :global(.dark) .input option{color:#f3f4f6;background:#1f2937}
+                `}</style></div>
 }

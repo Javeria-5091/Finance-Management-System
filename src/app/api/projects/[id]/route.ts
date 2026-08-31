@@ -15,13 +15,16 @@ export async function GET(
   const auth = await requirePermission('PROJECT_READ');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
+  const ratePermission = await requirePermission('PROJECT_RATE_VIEW');
+  const canViewRates = !(ratePermission instanceof NextResponse);
  
   try {
     const { id } = params;
- 
+    // Fetch the base row directly. Relations are resolved separately because
+    // the generated Supabase select parser rejects the nested relation string.
     const { data: project, error } = await supabase
       .from('projects')
-      .select('*, client:clients(id, name, client_code), manager:profiles!manager_id(id, full_name, email)')
+      .select('*')
       .eq('id', id)
       .eq('organization_id', auth.orgId)
       .single();
@@ -60,8 +63,26 @@ export async function GET(
       .eq('status', 'APPROVED')
       .maybeSingle();
  
+    let client: { id: string; name: string } | null = null;
+    if (project.client_id) {
+      const { data: clientData } = await supabase
+        .from('clients')
+        .select('id, name')
+        .eq('id', project.client_id)
+        .maybeSingle();
+      client = clientData;
+    }
+
+    const safeProject = canViewRates
+      ? project
+      : Object.fromEntries(
+          Object.entries(project).filter(
+            ([key]) => !['contract_value', 'budget_amount', 'is_confidential'].includes(key)
+          )
+        );
+
     return NextResponse.json({
-      project,
+      project: { ...safeProject, client, client_name: client?.name ?? project.client_name ?? null },
       profitability: profitability || null,
       invoices: invoices || [],
       expenses: expenses || [],
@@ -88,6 +109,11 @@ export async function PATCH(
       return NextResponse.json({ error: parsed.error.issues[0]?.message || 'Invalid project update' }, { status: 400 });
     }
     const body = parsed.data;
+    const ratePermission = await requirePermission('PROJECT_RATE_VIEW');
+    const canViewRates = !(ratePermission instanceof NextResponse);
+    if (!canViewRates && (body.contract_value !== undefined || body.budget_amount !== undefined || body.is_confidential !== undefined)) {
+      return NextResponse.json({ error: 'Confidential project rate fields require PROJECT_RATE_VIEW permission' }, { status: 403 });
+    }
  
     const existing = getData(await supabase
       .from('projects')
@@ -100,7 +126,8 @@ export async function PATCH(
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
  
-    // If closing project, check for unresolved items
+    // If closing project, check for unresolved items. A FINANCE_HEAD/CEO may
+    // explicitly override the guard, but the reason must be recorded.
     if (body.status === 'CLOSED' && existing.status !== 'CLOSED') {
       const { count: outstandingInvoices } = await supabase
         .from('invoices')
@@ -114,20 +141,39 @@ export async function PATCH(
         .eq('project_id', id)
         .in('status', ['DRAFT', 'SUBMITTED', 'VERIFIED', 'APPROVED']);
  
-      if ((outstandingInvoices || 0) > 0 || (pendingExpenses || 0) > 0) {
+      const hasUnresolvedItems = (outstandingInvoices || 0) > 0 || (pendingExpenses || 0) > 0;
+      const overrideReason = body.override_reason?.trim();
+      const canOverrideClosure = auth.role === 'CEO' || auth.role === 'FINANCE_HEAD';
+
+      if (hasUnresolvedItems && (!overrideReason || !canOverrideClosure)) {
         return NextResponse.json({
-          error: 'Cannot close project with unresolved receivables or pending expenses. Provide an override reason.',
+          error: canOverrideClosure
+            ? 'Cannot close project with unresolved receivables or pending expenses without an override reason.'
+            : 'Cannot override unresolved project items. Only CEO or FINANCE_HEAD can approve a closure override.',
           outstandingInvoices,
           pendingExpenses,
+          override_required: true,
         }, { status: 400 });
       }
     }
- 
+
+    // Keep closure metadata consistent whenever status becomes CLOSED.
+    const updates = {
+      ...body,
+      ...(body.status === 'CLOSED'
+        ? {
+            is_active: false,
+            closure_reason: body.override_reason?.trim() || body.closure_reason || 'Project closed',
+            closed_by: auth.userId,
+            closed_at: new Date().toISOString(),
+          }
+        : {}),
+    };
+    delete (updates as any).override_reason;
+
     // The schema already whitelists mutable project fields. Protected fields
     // such as project_code, organization_id, created_by and id cannot enter
     // the update payload at all.
-    const updates = body;
- 
         const { data: updated, error } = await supabase
       .from('projects')
       .update(updates)
@@ -159,7 +205,9 @@ export async function PATCH(
  
     return NextResponse.json({
       success: true,
-      project: updated,
+      project: canViewRates
+        ? updated
+        : Object.fromEntries(Object.entries(updated).filter(([key]) => !['contract_value', 'budget_amount', 'is_confidential'].includes(key))),
       message: 'Project updated successfully',
     });
   } catch (err: any) {
@@ -184,6 +232,15 @@ export async function DELETE(
       return NextResponse.json({ error: 'Reason is required for project deactivation' }, { status: 400 });
     }
  
+    const { data: existing } = await supabase
+      .from('projects')
+      .select('id, name, status, project_code')
+      .eq('id', id)
+      .eq('organization_id', auth.orgId)
+      .maybeSingle();
+
+    if (!existing) return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+
     const { data: project, error } = await supabase
       .from('projects')
       .update({
@@ -209,7 +266,7 @@ await       supabase.schema('audit').rpc('log_action', {
         p_entity_type: 'project',
         p_entity_id: id,
         p_description: `Project deactivated: ${project.name}. Reason: ${reason}`,
-        p_previous_status: project.status,
+        p_previous_status: existing.status,
         p_new_status: 'CLOSED',
         p_source_module: 'project',
         p_severity: 'high',

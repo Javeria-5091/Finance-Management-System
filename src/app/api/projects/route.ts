@@ -12,6 +12,8 @@ export async function GET(req: NextRequest) {
   const auth = await requirePermission('PROJECT_READ');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
+  const ratePermission = await requirePermission('PROJECT_RATE_VIEW');
+  const canViewRates = !(ratePermission instanceof NextResponse);
  
   try {
     const { searchParams } = new URL(req.url);
@@ -22,9 +24,12 @@ export async function GET(req: NextRequest) {
     const clientId = searchParams.get('client_id') || '';
     const managerId = searchParams.get('manager_id') || '';
  
+    // Fetch the base project rows only. Nested PostgREST relation selects are
+    // not accepted by the generated Supabase select parser in this project,
+    // so clients/managers are resolved separately below.
     let query = supabase
       .from('projects')
-      .select('*, client:clients(id, name, client_code), manager:profiles!manager_id(id, full_name)', { count: 'exact' })
+      .select('*', { count: 'exact' })
       .eq('organization_id', auth.orgId);
  
     if (search) {
@@ -53,22 +58,53 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
  
-    // Enrich with profitability data for each project
+    // Resolve relations separately. The canonical clients table has no
+    // client_code column and the typed nested select parser rejects the
+    // relation syntax used by the old query.
+    const projects = data || [];
+    const clientIds = [...new Set(projects.map((p: any) => p.client_id).filter(Boolean))];
+    const managerIds = [...new Set(projects.map((p: any) => p.manager_id).filter(Boolean))];
+
+    const [{ data: clients }, { data: managers }] = await Promise.all([
+      clientIds.length
+        ? supabase.from('clients').select('id, name').in('id', clientIds)
+        : Promise.resolve({ data: [] as any[] }),
+      managerIds.length
+        ? supabase.from('profiles').select('user_id, full_name').in('user_id', managerIds)
+        : Promise.resolve({ data: [] as any[] }),
+    ]);
+
+    const clientMap = new Map((clients || []).map((c: any) => [c.id, c]));
+    const managerMap = new Map((managers || []).map((m: any) => [m.user_id, m]));
+
     const enrichedData = await Promise.all(
-      (data || []).map(async (project) => {
+      projects.map(async (project: any) => {
         const { data: profitability } = await supabase
-          .schema('reporting').from('v_project_profitability')
+          .schema('reporting')
+          .from('v_project_profitability')
           .select('*')
           .eq('project_id', project.id)
           .maybeSingle();
- 
+
+        const client = project.client_id ? clientMap.get(project.client_id) : null;
+        const manager = project.manager_id ? managerMap.get(project.manager_id) : null;
+        const safeProject = canViewRates
+          ? project
+          : Object.fromEntries(
+              Object.entries(project).filter(
+                ([key]) => !['contract_value', 'budget_amount', 'is_confidential'].includes(key)
+              )
+            );
+
         return {
-          ...project,
+          ...safeProject,
+          client,
+          manager,
+          client_name: client?.name ?? project.client_name ?? null,
           profitability: profitability || null,
         };
       })
     );
- 
     return NextResponse.json({
       data: enrichedData,
       total: count || 0,
@@ -85,6 +121,8 @@ export async function POST(req: NextRequest) {
   const auth = await requirePermission('PROJECT_CREATE');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
+  const ratePermission = await requirePermission('PROJECT_RATE_VIEW');
+  const canViewRates = !(ratePermission instanceof NextResponse);
  
   try {
     const parsed = projectCreateSchema.safeParse(await req.json());
@@ -96,7 +134,24 @@ export async function POST(req: NextRequest) {
       currency, start_date, end_date, description, budget_amount,
       department, cost_center, is_confidential,
     } = parsed.data;
+
+    if (!canViewRates && (contract_value !== undefined || budget_amount !== undefined || is_confidential !== undefined)) {
+      return NextResponse.json({ error: 'Confidential project rate fields require PROJECT_RATE_VIEW permission' }, { status: 403 });
+    }
  
+    let clientName: string | null = null;
+    if (client_id) {
+      const { data: client, error: clientError } = await supabase
+        .from('clients')
+        .select('id, name')
+        .eq('id', client_id)
+        .eq('organization_id', auth.orgId)
+        .maybeSingle();
+      if (clientError) return NextResponse.json({ error: clientError.message }, { status: 500 });
+      if (!client) return NextResponse.json({ error: 'Selected client was not found in your organization' }, { status: 400 });
+      clientName = client.name;
+    }
+
     // Generate project code
     const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'PRJ' });
     const projectCode = numData || `PRJ-${Date.now().toString().slice(-6)}`;
@@ -106,18 +161,19 @@ export async function POST(req: NextRequest) {
       .insert({
         project_code: projectCode,
         name,
+        client_name: clientName,
         client_id: client_id || null,
         manager_id: manager_id || auth.userId,
         platform: platform || null,
-        contract_value: contract_value || 0,
+        contract_value: contract_value ?? 0,
         currency: currency || 'PKR',
         start_date: start_date || null,
         end_date: end_date || null,
         description: description || null,
-        budget_amount: budget_amount || 0,
+        budget_amount: budget_amount ?? 0,
         department: department || null,
         cost_center: cost_center || null,
-        is_confidential: is_confidential || false,
+        is_confidential: is_confidential ?? false,
         status: 'ACTIVE',
         is_active: true,
         organization_id: auth.orgId,

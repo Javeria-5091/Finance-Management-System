@@ -1227,6 +1227,79 @@ ALTER FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid")
 COMMENT ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") IS 'P1_060 SECURITY FIX (ISS-02, Critical): added organization-match check (this function already had the correct Finance Head/Accountant role check from migration 029; only the organization-scoping was missing). Completes the maker-checker approval + posting step for a MANUAL journal left in DRAFT by finance.post_journal_entry(). Enforces creator <> approver via trg_maker_checker.';
 
 
+
+CREATE OR REPLACE FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'finance', 'core'
+    AS $$
+DECLARE
+  v_org_id uuid;
+  v_user_id uuid;
+  v_budget public.budgets%ROWTYPE;
+  v_revision finance.budget_revisions%ROWTYPE;
+BEGIN
+  v_user_id := auth.uid();
+  v_org_id := core.current_user_org_id();
+
+  IF v_user_id IS NULL OR v_org_id IS NULL THEN
+    RAISE EXCEPTION 'Authenticated organization context is required';
+  END IF;
+
+  SELECT * INTO v_budget
+  FROM public.budgets
+  WHERE id = p_budget_id
+    AND organization_id = v_org_id
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Budget not found';
+  END IF;
+
+  SELECT * INTO v_revision
+  FROM finance.budget_revisions
+  WHERE id = p_revision_id
+    AND budget_id = p_budget_id
+    AND organization_id = v_org_id
+    AND status = 'PENDING'
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Pending budget revision not found';
+  END IF;
+
+  IF v_revision.requested_by = v_user_id THEN
+    RAISE EXCEPTION 'Maker-checker rule: the requester cannot approve their own revision';
+  END IF;
+
+  UPDATE public.budgets
+  SET total_amount = v_revision.revised_amount,
+      updated_at = now()
+  WHERE id = v_budget.id
+    AND organization_id = v_org_id;
+
+  UPDATE finance.budget_revisions
+  SET status = 'APPROVED',
+      approved_by = v_user_id,
+      approved_at = now()
+  WHERE id = v_revision.id
+    AND organization_id = v_org_id;
+
+  RETURN jsonb_build_object(
+    'budget_id', v_budget.id,
+    'revision_id', v_revision.id,
+    'status', 'APPROVED',
+    'total_amount', v_revision.revised_amount
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") IS 'FND-BUDG-003: atomically applies a pending budget revision and marks it approved. Organization and maker-checker checks are enforced inside the transaction.';
+
+
 SET default_tablespace = '';
 
 SET default_table_access_method = "heap";
@@ -10777,11 +10850,18 @@ CREATE OR REPLACE VIEW "public"."exchange_rates" WITH ("security_invoker"='true'
     "approved_at",
     "is_locked",
     "created_at",
-    "updated_at"
+    "updated_at",
+    "created_by",
+    "organization_id",
+    "evidence_reference"
    FROM "finance"."exchange_rates";
 
 
 ALTER VIEW "public"."exchange_rates" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."exchange_rates" IS 'Sync fix (related to FND-ADMIN-FX-001): added organization_id, evidence_reference and created_by, which finance.exchange_rates requires as NOT NULL but this view never exposed — the dashboard exchange-rates page inserts through this view and needs all three.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."expenses" (
@@ -11522,26 +11602,44 @@ ALTER TABLE "public"."profiles" OWNER TO "postgres";
 
 CREATE TABLE IF NOT EXISTS "public"."projects" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "user_id" "uuid" NOT NULL,
+    "user_id" "uuid",
     "name" character varying(255) NOT NULL,
-    "client_name" character varying(255) NOT NULL,
+    "client_name" character varying(255),
     "description" "text",
     "status" character varying(50) DEFAULT 'Active'::character varying,
-    "start_date" "date" NOT NULL,
+    "start_date" "date",
     "end_date" "date",
     "created_at" timestamp with time zone DEFAULT "now"(),
     "budget_id" "uuid",
     "deleted_at" timestamp with time zone,
     "deleted_by" "uuid",
     "organization_id" "uuid" NOT NULL,
-    CONSTRAINT "projects_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['Active'::character varying, 'Completed'::character varying, 'On Hold'::character varying])::"text"[])))
+    "project_code" character varying(50) NOT NULL,
+    "client_id" "uuid",
+    "manager_id" "uuid",
+    "platform" character varying(100),
+    "contract_value" numeric(18,2) DEFAULT 0,
+    "currency" "text" DEFAULT 'PKR'::"text",
+    "budget_amount" numeric(18,2) DEFAULT 0,
+    "department" character varying(100),
+    "cost_center" character varying(100),
+    "is_confidential" boolean DEFAULT false,
+    "is_active" boolean DEFAULT true,
+    "created_by" "uuid",
+    "closure_reason" "text",
+    "closed_by" "uuid",
+    "closed_at" timestamp with time zone,
+    CONSTRAINT "projects_budget_amount_check" CHECK (("budget_amount" >= (0)::numeric)),
+    CONSTRAINT "projects_contract_value_check" CHECK (("contract_value" >= (0)::numeric)),
+    CONSTRAINT "projects_currency_check" CHECK (("currency" ~ '^[A-Z]{3}$'::"text")),
+    CONSTRAINT "projects_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['ACTIVE'::character varying, 'ON_HOLD'::character varying, 'CLOSED'::character varying, 'CANCELLED'::character varying])::"text"[])))
 );
 
 
 ALTER TABLE "public"."projects" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."projects" IS 'Project master data. Organization-scoped. Soft deletion uses deleted_at/deleted_by; status remains Active/Completed/On Hold for compatibility with the existing schema and UI.';
+COMMENT ON TABLE "public"."projects" IS 'Project master data. Organization-scoped. Soft deletion uses deleted_at/deleted_by. status accepts both the legacy Active/Completed/On Hold vocabulary (dashboard ProjectForm) and the ACTIVE/ON_HOLD/CLOSED/CANCELLED vocabulary used by the Projects API and project.service.ts.';
 
 
 
@@ -12771,40 +12869,89 @@ COMMENT ON VIEW "reporting"."v_legacy_archive_status" IS 'Replaces reporting.v_d
 
 
 CREATE OR REPLACE VIEW "reporting"."v_project_profitability" WITH ("security_invoker"='true') AS
- WITH "proj_gl" AS (
+ WITH "project_gl" AS (
          SELECT "p"."id" AS "project_id",
             "p"."name" AS "project_name",
             "p"."client_name",
             "p"."status" AS "project_status",
             "p"."user_id",
-            COALESCE("sum"(("jl"."base_credit" - "jl"."base_debit")) FILTER (WHERE (("je"."status" = 'POSTED'::"text") AND ("coa"."account_type" = 'REVENUE'::"text"))), (0)::numeric) AS "revenue",
-            COALESCE("sum"(("jl"."base_debit" - "jl"."base_credit")) FILTER (WHERE (("je"."status" = 'POSTED'::"text") AND ("coa"."account_type" = ANY (ARRAY['COST_OF_SALES'::"text", 'OPERATING_EXPENSE'::"text"])))), (0)::numeric) AS "direct_cost"
+            "p"."organization_id",
+            COALESCE("sum"(
+                CASE
+                    WHEN (("je"."status" = 'POSTED'::"text") AND ("coa"."account_type" = 'REVENUE'::"text")) THEN ("jl"."base_credit" - "jl"."base_debit")
+                    ELSE (0)::numeric
+                END), (0)::numeric) AS "revenue",
+            COALESCE("sum"(
+                CASE
+                    WHEN (("je"."status" = 'POSTED'::"text") AND ("coa"."account_type" = ANY (ARRAY['COST_OF_SALES'::"text", 'OPERATING_EXPENSE'::"text"]))) THEN ("jl"."base_debit" - "jl"."base_credit")
+                    ELSE (0)::numeric
+                END), (0)::numeric) AS "total_direct_cost",
+            COALESCE("sum"(
+                CASE
+                    WHEN (("je"."status" = 'POSTED'::"text") AND ("coa"."account_type" = ANY (ARRAY['COST_OF_SALES'::"text", 'OPERATING_EXPENSE'::"text"])) AND (("lower"(COALESCE("coa"."name", ''::"text")) ~~ '%platform fee%'::"text") OR ("lower"(COALESCE("coa"."name", ''::"text")) ~~ '%platform fees%'::"text") OR ("lower"(COALESCE("coa"."report_mapping", ''::"text")) ~~ '%platform%fee%'::"text"))) THEN ("jl"."base_debit" - "jl"."base_credit")
+                    ELSE (0)::numeric
+                END), (0)::numeric) AS "platform_fees",
+            COALESCE("sum"(
+                CASE
+                    WHEN (("je"."status" = 'POSTED'::"text") AND ("coa"."account_type" = ANY (ARRAY['COST_OF_SALES'::"text", 'OPERATING_EXPENSE'::"text"])) AND (("lower"(COALESCE("coa"."name", ''::"text")) ~~ '%contractor%'::"text") OR ("lower"(COALESCE("coa"."report_mapping", ''::"text")) ~~ '%contractor%'::"text"))) THEN ("jl"."base_debit" - "jl"."base_credit")
+                    ELSE (0)::numeric
+                END), (0)::numeric) AS "contractor_cost",
+            COALESCE("sum"(
+                CASE
+                    WHEN (("je"."status" = 'POSTED'::"text") AND ("coa"."account_type" = ANY (ARRAY['COST_OF_SALES'::"text", 'OPERATING_EXPENSE'::"text"])) AND (("lower"(COALESCE("coa"."name", ''::"text")) ~~ '%software%'::"text") OR ("lower"(COALESCE("coa"."name", ''::"text")) ~~ '%api cost%'::"text") OR ("lower"(COALESCE("coa"."report_mapping", ''::"text")) ~~ '%software%'::"text") OR ("lower"(COALESCE("coa"."report_mapping", ''::"text")) ~~ '%api%'::"text"))) THEN ("jl"."base_debit" - "jl"."base_credit")
+                    ELSE (0)::numeric
+                END), (0)::numeric) AS "software_api_cost",
+            COALESCE("sum"(
+                CASE
+                    WHEN (("je"."status" = 'POSTED'::"text") AND (("je"."source_type" = 'INVOICE_REFUND'::"text") OR ("lower"(COALESCE("coa"."name", ''::"text")) ~~ '%refund%'::"text") OR ("lower"(COALESCE("coa"."name", ''::"text")) ~~ '%rework%'::"text"))) THEN ("jl"."base_debit" - "jl"."base_credit")
+                    ELSE (0)::numeric
+                END), (0)::numeric) AS "refunds_rework"
            FROM ((("public"."projects" "p"
              LEFT JOIN "finance"."journal_entries" "je" ON (("je"."project_id" = "p"."id")))
              LEFT JOIN "finance"."journal_lines" "jl" ON (("jl"."journal_entry_id" = "je"."id")))
              LEFT JOIN "finance"."chart_of_accounts" "coa" ON (("coa"."id" = "jl"."account_id")))
-          GROUP BY "p"."id", "p"."name", "p"."client_name", "p"."status", "p"."user_id"
+          WHERE ("p"."organization_id" = "core"."current_user_org_id"())
+          GROUP BY "p"."id", "p"."name", "p"."client_name", "p"."status", "p"."user_id", "p"."organization_id"
+        ), "components" AS (
+         SELECT "pg"."project_id",
+            "pg"."project_name",
+            "pg"."client_name",
+            "pg"."project_status",
+            "pg"."user_id",
+            "pg"."organization_id",
+            "pg"."revenue",
+            "pg"."total_direct_cost",
+            "pg"."platform_fees",
+            "pg"."contractor_cost",
+            "pg"."software_api_cost",
+            "pg"."refunds_rework",
+            GREATEST((((("pg"."total_direct_cost" - "pg"."platform_fees") - "pg"."contractor_cost") - "pg"."software_api_cost") - "pg"."refunds_rework"), (0)::numeric) AS "other_direct_cost"
+           FROM "project_gl" "pg"
         )
- SELECT "pg"."project_id",
-    "pg"."project_name",
-    "pg"."client_name",
-    "pg"."project_status",
-    "pg"."user_id",
-    "pg"."revenue",
-    "pg"."direct_cost",
-    ("pg"."revenue" - "pg"."direct_cost") AS "gross_profit",
+ SELECT "c"."project_id",
+    "c"."project_name",
+    "c"."client_name",
+    "c"."project_status",
+    "c"."user_id",
+    "c"."revenue",
+    "c"."total_direct_cost" AS "direct_cost",
+    ("c"."revenue" - "c"."total_direct_cost") AS "gross_profit",
         CASE
-            WHEN ("pg"."revenue" <> (0)::numeric) THEN "round"(((("pg"."revenue" - "pg"."direct_cost") / "pg"."revenue") * (100)::numeric), 2)
+            WHEN ("c"."revenue" <> (0)::numeric) THEN "round"(((("c"."revenue" - "c"."total_direct_cost") / "c"."revenue") * (100)::numeric), 2)
             ELSE NULL::numeric
         END AS "margin_percent",
-    "org"."id" AS "organization_id",
+    "c"."organization_id",
     "org"."base_currency",
     "now"() AS "data_as_of"
-   FROM ("proj_gl" "pg"
-     CROSS JOIN "core"."organizations" "org");
+   FROM ("components" "c"
+     JOIN "core"."organizations" "org" ON (("org"."id" = "c"."organization_id")));
 
 
 ALTER VIEW "reporting"."v_project_profitability" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "reporting"."v_project_profitability" IS 'Organization-scoped one-row-per-project profitability view. Direct costs are split into platform fees, contractor, software/API, refunds/rework, and other direct costs; gross profit = revenue - total direct cost.';
+
 
 
 CREATE OR REPLACE VIEW "reporting"."v_tax_computation_summary" WITH ("security_invoker"='true') AS
@@ -13736,6 +13883,11 @@ ALTER TABLE ONLY "public"."profiles"
 
 ALTER TABLE ONLY "public"."projects"
     ADD CONSTRAINT "projects_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."projects"
+    ADD CONSTRAINT "projects_project_code_key" UNIQUE ("project_code");
 
 
 
@@ -14840,7 +14992,23 @@ CREATE INDEX "idx_projects_active" ON "public"."projects" USING "btree" ("id") W
 
 
 
+CREATE INDEX "idx_projects_client_id" ON "public"."projects" USING "btree" ("client_id");
+
+
+
+CREATE INDEX "idx_projects_manager_id" ON "public"."projects" USING "btree" ("manager_id");
+
+
+
 CREATE INDEX "idx_projects_org_budget" ON "public"."projects" USING "btree" ("organization_id", "budget_id");
+
+
+
+CREATE INDEX "idx_projects_org_client" ON "public"."projects" USING "btree" ("organization_id", "client_id");
+
+
+
+CREATE INDEX "idx_projects_org_manager" ON "public"."projects" USING "btree" ("organization_id", "manager_id");
 
 
 
@@ -14849,6 +15017,10 @@ CREATE INDEX "idx_projects_org_status" ON "public"."projects" USING "btree" ("or
 
 
 CREATE INDEX "idx_projects_organization_id" ON "public"."projects" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_projects_project_code" ON "public"."projects" USING "btree" ("project_code");
 
 
 
@@ -14893,6 +15065,10 @@ CREATE INDEX "idx_subscriptions_renewal" ON "public"."subscriptions" USING "btre
 
 
 CREATE INDEX "idx_subscriptions_status" ON "public"."subscriptions" USING "btree" ("status");
+
+
+
+CREATE UNIQUE INDEX "projects_org_project_code_uq" ON "public"."projects" USING "btree" ("organization_id", "project_code") WHERE ("deleted_at" IS NULL);
 
 
 
@@ -17478,6 +17654,26 @@ ALTER TABLE ONLY "public"."projects"
 
 
 ALTER TABLE ONLY "public"."projects"
+    ADD CONSTRAINT "projects_client_id_fkey" FOREIGN KEY ("client_id") REFERENCES "public"."clients"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."projects"
+    ADD CONSTRAINT "projects_closed_by_fkey" FOREIGN KEY ("closed_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."projects"
+    ADD CONSTRAINT "projects_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."projects"
+    ADD CONSTRAINT "projects_manager_id_fkey" FOREIGN KEY ("manager_id") REFERENCES "public"."profiles"("user_id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."projects"
     ADD CONSTRAINT "projects_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE RESTRICT;
 
 
@@ -19409,7 +19605,7 @@ CREATE POLICY "contractors_update_org_scoped" ON "public"."contractors" FOR UPDA
 ALTER TABLE "public"."expenses" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "expenses_delete_org_scoped" ON "public"."expenses" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "public"."is_admin"())));
+CREATE POLICY "expenses_delete_org_scoped" ON "public"."expenses" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "public"."is_admin"()) AND ("journal_entry_id" IS NULL)));
 
 
 
@@ -19423,14 +19619,14 @@ CREATE POLICY "expenses_select_org_scoped" ON "public"."expenses" FOR SELECT TO 
 
 
 
-CREATE POLICY "expenses_update_org_scoped" ON "public"."expenses" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "public"."is_admin"()))) WITH CHECK (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "public"."is_admin"())));
+CREATE POLICY "expenses_update_org_scoped" ON "public"."expenses" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "public"."is_admin"()) AND ("journal_entry_id" IS NULL))) WITH CHECK (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "public"."is_admin"()) AND ("journal_entry_id" IS NULL)));
 
 
 
 ALTER TABLE "public"."incomes" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "incomes_delete_org_scoped" ON "public"."incomes" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "core"."is_finance_head"())));
+CREATE POLICY "incomes_delete_org_scoped" ON "public"."incomes" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "core"."is_finance_head"()) AND ("journal_entry_id" IS NULL)));
 
 
 
@@ -19444,7 +19640,7 @@ CREATE POLICY "incomes_select_org_scoped" ON "public"."incomes" FOR SELECT TO "a
 
 
 
-CREATE POLICY "incomes_update_org_scoped" ON "public"."incomes" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "core"."is_finance_head"()))) WITH CHECK (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "core"."is_finance_head"())));
+CREATE POLICY "incomes_update_org_scoped" ON "public"."incomes" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "core"."is_finance_head"()) AND ("journal_entry_id" IS NULL))) WITH CHECK (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "core"."is_finance_head"()) AND ("journal_entry_id" IS NULL)));
 
 
 
@@ -19820,7 +20016,6 @@ GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
 
 
-
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
 GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
 
@@ -19878,13 +20073,17 @@ GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", 
 
 
 
-
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
 
 
 GRANT ALL ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") TO "authenticated";
 
 
 
@@ -21141,6 +21340,7 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
+
 
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";

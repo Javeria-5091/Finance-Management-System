@@ -149,15 +149,14 @@ function checkSingleBudget(
   budget: any,
   transactionAmount: number,
   type: BudgetCheckResult['type'],
-  policy: BudgetPolicyConfig
+  policy: BudgetPolicyConfig,
+  amounts?: { committed?: number; actual?: number }
 ): BudgetCheckResult {
   const totalBudget = Number(budget.total_amount) || 0;
-  const committed = Number(budget.committed_amount) || 0;
-  const actual = Number(budget.actual_amount) || 0;
+  const committed = Number(amounts?.committed ?? 0);
+  const actual = Number(amounts?.actual ?? 0);
   const available = totalBudget - committed - actual;
 
-  // BUG-061 FIX: When total_budget is 0, utilization would be NaN (0/0).
-  // Return 0 utilization instead of NaN to prevent downstream errors.
   const utilizationBefore = totalBudget > 0
     ? ((committed + actual) / totalBudget) * 100
     : 0;
@@ -182,6 +181,36 @@ function checkSingleBudget(
     utilization_after: Math.min(Math.round(utilizationAfter * 10) / 10, 99999.9),
     warning_level: computeWarningLevel(utilizationAfter, policy),
   };
+}
+
+async function getBudgetAmounts(
+  supabase: SClient,
+  budgetId: string,
+  organizationId: string
+): Promise<{ committed: number; actual: number }> {
+  // The parent public.budgets table intentionally stores only the allocation.
+  // Committed is maintained on canonical finance.budget_lines and actuals come
+  // from canonical reporting.budget_gl_actual.
+  const [{ data: lines, error: linesError }, { data: actualRows, error: actualError }] = await Promise.all([
+    supabase
+      .schema('finance')
+      .from('budget_lines')
+      .select('committed_amount')
+      .eq('budget_id', budgetId)
+      .eq('organization_id', organizationId),
+    supabase
+      .schema('reporting')
+      .from('budget_gl_actual')
+      .select('actual_spent')
+      .eq('budget_id', budgetId),
+  ]);
+
+  if (linesError) throw new Error(`Budget commitment lookup failed: ${linesError.message}`);
+  if (actualError) throw new Error(`Budget GL actual lookup failed: ${actualError.message}`);
+
+  const committed = (lines || []).reduce((sum: number, row: any) => sum + Number(row.committed_amount || 0), 0);
+  const actual = (actualRows || []).reduce((sum: number, row: any) => sum + Number(row.actual_spent || 0), 0);
+  return { committed, actual };
 }
 
 // ─── Build Alert Notifications (Spec 13.4) ──────────────────────────────────
@@ -278,7 +307,7 @@ export async function checkBudgetForTransaction(
     }
 
     if (budget) {
-      results.push(checkSingleBudget(budget, transactionAmount, 'PROJECT_BUDGET', policy));
+      results.push(checkSingleBudget(budget, transactionAmount, 'PROJECT_BUDGET', policy, await getBudgetAmounts(supabase, budget.id, organization_id)));
     }
   }
 
@@ -311,7 +340,7 @@ export async function checkBudgetForTransaction(
     if (catBudgets && catBudgets.length > 0) {
       for (const budget of catBudgets) {
         const type: BudgetCheckResult['type'] = category ? 'CATEGORY_BUDGET' : 'DEPARTMENT_BUDGET';
-        results.push(checkSingleBudget(budget, transactionAmount, type, policy));
+        results.push(checkSingleBudget(budget, transactionAmount, type, policy, await getBudgetAmounts(supabase, budget.id, organization_id)));
       }
     }
   }
@@ -331,7 +360,7 @@ export async function checkBudgetForTransaction(
     }
 
     if (budget) {
-      results.push(checkSingleBudget(budget, transactionAmount, 'DIRECT_BUDGET', policy));
+      results.push(checkSingleBudget(budget, transactionAmount, 'DIRECT_BUDGET', policy, await getBudgetAmounts(supabase, budget.id, organization_id)));
     }
   }
 

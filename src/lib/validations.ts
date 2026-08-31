@@ -187,15 +187,15 @@ export const projectCreateSchema = z.object({
   client_id: uuidSchema.nullable().optional(),
   manager_id: uuidSchema.nullable().optional(),
   platform: z.string().max(100).nullable().optional(),
-  contract_value: nonNegativeAmount.optional().default(0),
+  contract_value: nonNegativeAmount.optional(),
   currency: currencyCode.optional().default('PKR'),
   start_date: isoDate.nullable().optional(),
   end_date: isoDate.nullable().optional(),
   description: z.string().max(5000).nullable().optional(),
-  budget_amount: nonNegativeAmount.optional().default(0),
+  budget_amount: nonNegativeAmount.optional(),
   department: z.string().max(100).nullable().optional(),
   cost_center: z.string().max(100).nullable().optional(),
-  is_confidential: z.boolean().optional().default(false),
+  is_confidential: z.boolean().optional(),
 }).strict();
 
 export const projectUpdateSchema = z.object({
@@ -214,6 +214,7 @@ export const projectUpdateSchema = z.object({
   is_confidential: z.boolean().optional(),
   status: z.enum(['ACTIVE', 'ON_HOLD', 'CLOSED', 'CANCELLED']).optional(),
   closure_reason: z.string().max(1000).nullable().optional(),
+  override_reason: z.string().trim().min(1).max(1000).optional(),
 }).strict();
 
 // ─── Client Update ─────────────────────────────────────────────────────────

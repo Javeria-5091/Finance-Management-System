@@ -16,24 +16,32 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const fromCurrency = searchParams.get('from_currency') || '';
     const toCurrency = searchParams.get('to_currency') || '';
+    const rateType = searchParams.get('rate_type') || '';
+    // FND-ADMIN-FX-001 FIX: there is no core.exchange_rates table, and the
+    // real table (finance.exchange_rates) has no effective_date/valid_until
+    // columns — it just stores one dated row per (currency pair, rate_date,
+    // rate_type, source_platform). "As of this date" now means "the latest
+    // rate_date on or before the requested date", so we keep the query
+    // param name for API-compatibility but filter/order on rate_date.
     const effectiveDate = searchParams.get('effective_date') || '';
     const page = parseInt(searchParams.get('page') || '1');
     const pageSize = parseInt(searchParams.get('pageSize') || '50');
  
     let query = supabase
-      .schema('core').from('exchange_rates')
+      .schema('finance').from('exchange_rates')
       .select('*', { count: 'exact' })
       .eq('organization_id', auth.orgId);
  
     if (fromCurrency) query = query.eq('from_currency', fromCurrency);
     if (toCurrency) query = query.eq('to_currency', toCurrency);
-    if (effectiveDate) query = query.lte('effective_date', effectiveDate).gte('valid_until', effectiveDate);
+    if (rateType) query = query.eq('rate_type', rateType);
+    if (effectiveDate) query = query.lte('rate_date', effectiveDate);
  
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
  
     const { data, error, count } = await query
-      .order('effective_date', { ascending: false })
+      .order('rate_date', { ascending: false })
       .range(from, to);
  
     if (error) {
@@ -61,6 +69,13 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'rates array is required' }, { status: 400 });
       }
  
+      // FND-ADMIN-FX-001 FIX: finance.exchange_rates has no
+      // effective_date/source/valid_until/notes/is_active columns and no
+      // "deactivate the previous row" concept — every manual entry is its
+      // own dated, typed row (unique on from/to/rate_date/rate_type/
+      // source_platform). rate_type and evidence_reference are NOT NULL
+      // (evidence_reference also has a non-blank CHECK) on the real table.
+      const ALLOWED_RATE_TYPES = ['PLATFORM', 'BANK', 'MANUAL', 'PAYMENT_CHANNEL'];
       const results: any[] = [];
  
       for (const rate of rates) {
@@ -76,12 +91,22 @@ export async function POST(req: NextRequest) {
         // Fix: rename the destructured property to `rateValue` and use that
         // consistently for both the truthiness check and the insert.
         const {
-          from_currency, to_currency, rate: rateValue, effective_date,
-          source, valid_until, notes,
+          from_currency, to_currency, rate: rateValue, rate_date,
+          rate_type, source_platform, evidence_reference,
         } = rate;
 
-        if (!from_currency || !to_currency || rateValue === undefined || rateValue === null || !effective_date) {
-          results.push({ error: 'from_currency, to_currency, rate, and effective_date are required', rate });
+        if (!from_currency || !to_currency || rateValue === undefined || rateValue === null || !rate_date) {
+          results.push({ error: 'from_currency, to_currency, rate, and rate_date are required', rate });
+          continue;
+        }
+
+        if (!rate_type || !ALLOWED_RATE_TYPES.includes(rate_type)) {
+          results.push({ error: `rate_type is required and must be one of: ${ALLOWED_RATE_TYPES.join(', ')}`, rate });
+          continue;
+        }
+
+        if (!evidence_reference || !String(evidence_reference).trim()) {
+          results.push({ error: 'evidence_reference is required (e.g. bank/platform screenshot reference, source URL, or invoice number)', rate });
           continue;
         }
 
@@ -91,27 +116,19 @@ export async function POST(req: NextRequest) {
           continue;
         }
 
-        // Spec: Exchange rates are entered manually by authorized user
-        // Deactivate previous rates for same currency pair
-        await supabase
-          .schema('core').from('exchange_rates')
-          .update({ is_active: false, valid_until: effective_date })
-          .eq('from_currency', from_currency)
-          .eq('to_currency', to_currency)
-          .eq('is_active', true)
-          .eq('organization_id', auth.orgId);
-
         const { data, error } = await supabase
-          .schema('core').from('exchange_rates')
+          .schema('finance').from('exchange_rates')
           .insert({
             from_currency,
             to_currency,
             rate: numericRate,
-            effective_date,
-            source: source || 'MANUAL',
-            valid_until: valid_until || null,
-            notes: notes || null,
-            is_active: true,
+            rate_date,
+            rate_type,
+            source_platform: source_platform || null,
+            evidence_reference: String(evidence_reference).trim(),
+            is_locked: false,
+            approved_by: null,
+            approved_at: null,
             organization_id: auth.orgId,
             entered_by: auth.userId,
           })
@@ -146,4 +163,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
- 

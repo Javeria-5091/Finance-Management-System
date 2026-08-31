@@ -374,21 +374,7 @@ export default function ReportsLandingPage() {
           </section>
         );
       })}
- 
-      {/* Spec Compliance Notice */}
-      <div className="bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30 rounded-xl p-4">
-        <div className="flex items-start gap-3">
-          <AlertTriangle className="w-5 h-5 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
-          <div>
-            <p className="text-sm font-semibold text-blue-800 dark:text-blue-300">Spec v1.3 Section 13.3 - Report Controls</p>
-            <p className="text-xs text-blue-700 dark:text-blue-400 mt-1 leading-relaxed">
-              Every report displays organization, basis, period, currency, data-as-of timestamp, and active filters.
-              Reports reconcile to the ledger or are clearly labeled as operational/forecast. Exports are permission-gated and audit-logged.
-              PKR is the default consolidated reporting currency; multi-currency views are available where applicable.
-            </p>
-          </div>
-        </div>
-      </div>
+
     </div>
   );
 }

@@ -33,7 +33,7 @@ export const projectService = {
   }) {
     let query = supabase
       .from('projects')
-      .select('*, client:clients(id, name, client_code), manager:profiles!manager_id(id, full_name)', { count: 'exact' });
+      .select('*', { count: 'exact' });
 
     if (filters?.is_active !== undefined) query = query.eq('is_active', filters.is_active);
     if (filters?.status) query = query.eq('status', filters.status);
@@ -60,7 +60,7 @@ export const projectService = {
   async fetchProjectById(id: string) {
     const { data, error } = await supabase
       .from('projects')
-      .select('*, client:clients(id, name, client_code), manager:profiles!manager_id(id, full_name, email)')
+      .select('*')
       .eq('id', id)
       .single();
     if (error) throw error;

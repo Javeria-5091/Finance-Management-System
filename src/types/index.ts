@@ -3,21 +3,40 @@
 // ==========================================
 export interface Project {
   id: string;
-  user_id: string;
+  user_id: string | null;
   organization_id: string;
   name: string;
-  client_name: string;
+  client_name: string | null;
+  client_id?: string | null;
+  manager_id?: string | null;
+  platform?: string | null;
+  contract_value?: number | null;
+  currency?: string | null;
   description: string | null;
-  status: "Active" | "Completed" | "On Hold";
-  start_date: string;
+  status: "Active" | "Completed" | "On Hold" | "ACTIVE" | "ON_HOLD" | "CLOSED" | "CANCELLED";
+  start_date: string | null;
   end_date: string | null;
   budget_id: string | null;
+  budget_amount?: number | null;
+  department?: string | null;
+  cost_center?: string | null;
+  is_confidential?: boolean;
+  is_active?: boolean;
+  created_by?: string | null;
+  closure_reason?: string | null;
+  closed_by?: string | null;
+  closed_at?: string | null;
   deleted_at?: string | null;
   deleted_by?: string | null;
   created_at: string;
+  client?: { id: string; name: string } | null;
+  manager?: { user_id: string; full_name: string; email?: string } | null;
+  profitability?: Record<string, any> | null;
 }
-export type ProjectFormData = Omit<Project, "id" | "user_id" | "organization_id" | "created_at" | "deleted_at" | "deleted_by">;
-export const PROJECT_STATUSES = ["Active", "Completed", "On Hold"] as const;
+export type ProjectFormData = Omit<Project, "id" | "user_id" | "organization_id" | "created_at" | "deleted_at" | "deleted_by" | "created_by" | "closed_by" | "closed_at" | "client" | "manager" | "profitability"> & {
+  override_reason?: string;
+};
+export const PROJECT_STATUSES = ["ACTIVE", "ON_HOLD", "CLOSED", "CANCELLED"] as const;
 
 // ==========================================
 // 2. INCOME TYPES (PHASE 2 UPDATED)
