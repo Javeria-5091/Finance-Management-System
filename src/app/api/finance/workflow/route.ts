@@ -9,7 +9,7 @@ const MODULES: Record<string, {
   transitions: Record<string, { from: string[]; perm: string }>;
 }> = {
   expense: {
-    table: 'expenses', permPrefix: 'EXPENSE', amountField: 'amount', creatorField: 'created_by',
+    table: 'expenses', permPrefix: 'EXPENSE', amountField: 'amount', creatorField: 'user_id',
     periodIdField: 'period_id', periodDateField: 'expense_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'EXPENSE_UPDATE' },
@@ -88,6 +88,7 @@ const MODULES: Record<string, {
     transitions: {
       approve: { from: ['DRAFT'], perm: 'APPROVE_INVOICE' },
       reject:  { from: ['DRAFT'], perm: 'INVOICE_UPDATE' },
+      reverse: { from: ['POSTED'], perm: 'INVOICE_UPDATE' },
       reopen:  { from: ['REJECTED'], perm: 'INVOICE_UPDATE' },
     },
   },
@@ -231,27 +232,40 @@ export async function POST(req: NextRequest) {
         ? 'reverse_expense_atomic'
         : module === 'income'
           ? 'reverse_income_atomic'
-          : null;
+          : module === 'vendor_bill'
+            ? 'reverse_vendor_bill_atomic'
+            : module === 'credit_note'
+              ? 'reverse_credit_note_atomic'
+              : null;
 
-      if (!reversalRpc) {
-        return NextResponse.json({ error: `Reversal is not supported for ${module}` }, { status: 400 });
-      }
-
-      // Reverse the GL and source record in one database transaction.
-      const { data: revId, error: revErr } = await supabase
-        .schema('finance')
-        .rpc(reversalRpc, {
-          [module === 'expense' ? 'p_expense_id' : 'p_income_id']: recordId,
+      // Journal entries already have their own canonical reversal RPC.
+      if (module === 'journal_entry') {
+        const { data: revId, error: revErr } = await supabase.schema('finance').rpc('reverse_journal_entry', {
+          p_journal_id: recordId,
           p_reversal_date: reversalDate,
           p_reason: reversalReason,
         });
-
-      if (revErr || !revId) {
-        return NextResponse.json({
-          error: `Reversal failed: ${revErr?.message || 'Unknown error'}. The GL and source record were rolled back together.`,
-        }, { status: 500 });
+        if (revErr || !revId) {
+          return NextResponse.json({ error: `Reversal failed: ${revErr?.message || 'Unknown error'}.` }, { status: 500 });
+        }
+        reversalJournalId = revId;
+      } else {
+        if (!reversalRpc) {
+          return NextResponse.json({ error: `Reversal is not supported for ${module}` }, { status: 400 });
+        }
+        const rpcArgs = module === 'expense'
+          ? { p_expense_id: recordId, p_reversal_date: reversalDate, p_reason: reversalReason }
+          : module === 'income'
+            ? { p_income_id: recordId, p_reversal_date: reversalDate, p_reason: reversalReason }
+            : module === 'vendor_bill'
+              ? { p_vendor_bill_id: recordId, p_reversal_date: reversalDate, p_reason: reversalReason }
+              : { p_credit_note_id: recordId, p_reversal_date: reversalDate, p_reason: reversalReason };
+        const { data: revId, error: revErr } = await supabase.schema('finance').rpc(reversalRpc, rpcArgs);
+        if (revErr || !revId) {
+          return NextResponse.json({ error: `Reversal failed: ${revErr?.message || 'Unknown error'}. The GL and source record were rolled back together.` }, { status: 500 });
+        }
+        reversalJournalId = revId;
       }
-      reversalJournalId = revId;
     }
 
     const updateData: Record<string, any> = {};
@@ -277,7 +291,7 @@ export async function POST(req: NextRequest) {
         const updateQuery = ['journal_entry', 'vendor_bill', 'credit_note'].includes(module)
       ? supabase.schema('finance').from(config.table)
       : supabase.from(config.table);
-    const isAtomicBusinessReversal = action === 'reverse' && (module === 'expense' || module === 'income');
+    const isAtomicBusinessReversal = action === 'reverse' && ['expense', 'income', 'vendor_bill', 'journal_entry', 'credit_note'].includes(module);
     let count = 1;
     if (!isAtomicBusinessReversal) {
       const { count: updatedCount, error: updateErr } = await updateQuery

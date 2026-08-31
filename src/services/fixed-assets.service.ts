@@ -135,49 +135,14 @@ export const getFixedAssetById = async (id: string): Promise<FixedAsset | null> 
   return data ? mapAssetJoins(data) : null;
 };
 
-export const createFixedAsset = async (input: FixedAssetFormInput, userId: string): Promise<FixedAsset> => {
-  const orgId = await getCurrentOrgId();
-  // If no override accounts, get from category
-  let assetAccountId = input.linked_asset_account_id;
-  let depAccountId = input.linked_depreciation_account_id;
-  let expAccountId = input.linked_expense_account_id;
-
-  if (!assetAccountId || !depAccountId || !expAccountId) {
-    const { data: cat } = await financeDB
-      .from('asset_categories')
-      .select('linked_asset_account_id, linked_depreciation_account_id, linked_expense_account_id')
-      .eq('id', input.category_id)
-      .eq('organization_id', orgId)
-      .single();
-
-    if (cat) {
-      assetAccountId = assetAccountId || cat.linked_asset_account_id;
-      depAccountId = depAccountId || cat.linked_depreciation_account_id;
-      expAccountId = expAccountId || cat.linked_expense_account_id;
-    }
-  }
-
-  // Convert empty strings to null for date columns (PostgreSQL rejects "" for DATE type)
-  const insertPayload = {
-    ...input,
-    warranty_start: input.warranty_start || null,
-    warranty_end: input.warranty_end || null,
-    linked_asset_account_id: assetAccountId,
-    linked_depreciation_account_id: depAccountId,
-    linked_expense_account_id: expAccountId,
-    status: 'pending_capitalization',
-    created_by: userId,
-    organization_id: orgId
-  };
-
-  const { data, error } = await financeDB
-    .from('fixed_assets')
-    .insert(insertPayload)
-    .select()
-    .single();
-
-  if (error) throw new Error(`Failed to create fixed asset: ${error.message}`);
-  return data;
+export const createFixedAsset = async (input: FixedAssetFormInput, _userId: string): Promise<FixedAsset> => {
+  const response = await fetch('/api/finance/assets', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+    body: JSON.stringify(input),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'Failed to create fixed asset');
+  return payload.data as FixedAsset;
 };
 
 export const updateFixedAsset = async (id: string, input: Partial<FixedAssetFormInput & { status?: AssetStatus }>): Promise<FixedAsset> => {
@@ -199,32 +164,38 @@ export const updateFixedAsset = async (id: string, input: Partial<FixedAssetForm
   return data;
 };
 
-export const capitalizeAsset = async (id: string, userId: string): Promise<FixedAsset> => {
-  const { data, error } = await financeDB.rpc('post_asset_capitalization', {
-    p_asset_id: id,
-    p_posted_by: userId,
+async function callAssetAction<T>(body: Record<string, unknown>): Promise<T> {
+  const response = await fetch('/api/finance/assets/actions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(body),
   });
-  if (error) throw new Error(`Failed to capitalize asset: ${error.message}`);
-  return data as FixedAsset;
-};
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'Fixed asset operation failed');
+  return payload.data as T;
+}
+
+export const capitalizeAsset = async (id: string, _userId: string): Promise<FixedAsset> =>
+  callAssetAction<FixedAsset>({ action: 'capitalize', asset_id: id });
 
 export const disposeAsset = async (
-  id: string,
-  disposalDate: string,
-  disposalValue: number,
-  disposalCurrencyId: string,
-  disposalMethod: string
-): Promise<FixedAsset> => {
-  const { data, error } = await financeDB.rpc('post_asset_disposal', {
-    p_asset_id: id,
-    p_disposal_date: disposalDate,
-    p_disposal_value: disposalValue,
-    p_disposal_currency: disposalCurrencyId,
-    p_disposal_method: disposalMethod,
+  id: string, disposalDate: string, disposalValue: number, disposalCurrencyId: string, disposalMethod: string
+): Promise<FixedAsset> =>
+  callAssetAction<FixedAsset>({ action: 'dispose', asset_id: id, disposal_date: disposalDate, disposal_value: disposalValue, disposal_currency: disposalCurrencyId, disposal_method: disposalMethod });
+
+export const impairAsset = async (id: string, adjustmentDate: string, amount: number, reason: string): Promise<FixedAsset> =>
+  callAssetAction<FixedAsset>({ action: 'impair', asset_id: id, adjustment_date: adjustmentDate, amount, reason });
+
+export const transferAsset = async (params: {
+  id: string; date: string; location: string | null; assigned_user_id: string | null;
+  project_id: string | null; department_id: string | null; cost_center_id: string | null; reason: string;
+}): Promise<FixedAsset> =>
+  callAssetAction<FixedAsset>({
+    action: 'transfer', asset_id: params.id, transfer_date: params.date, location: params.location,
+    assigned_user_id: params.assigned_user_id, project_id: params.project_id,
+    department_id: params.department_id, cost_center_id: params.cost_center_id, reason: params.reason,
   });
-  if (error) throw new Error(`Failed to dispose asset: ${error.message}`);
-  return data as FixedAsset;
-};
 
 // ─── Depreciation ────────────────────────────────────────────────────────────
 
@@ -254,61 +225,15 @@ export const getDepreciationSchedule = async (filters?: {
   return (data || []).map(mapDepreciationJoins);
 };
 
-export const generateDepreciationForPeriod = async (periodId: string, userId: string): Promise<{
-  generated: number;
-  total_amount: number;
-  details: { asset_id: string; asset_code: string; asset_name: string; depreciation_amount: number; status: string }[];
-}> => {
-  const { data, error } = await financeDB.rpc('fn_generate_depreciation_for_period', {
-    p_period_id: periodId,
-    p_created_by: userId
-  });
+export const generateDepreciationForPeriod = async (periodId: string, _userId: string): Promise<{
+  generated: number; total_amount: number; details: { asset_id: string; asset_code: string; asset_name: string; depreciation_amount: number; status: string }[];
+}> => callAssetAction({ action: 'generate_depreciation', period_id: periodId });
 
-  if (error) throw new Error(`Failed to generate depreciation: ${error.message}`);
-
-  const details = (data || []).map((row: Record<string, unknown>) => ({
-    asset_id: row.asset_id as string,
-    asset_code: row.asset_code as string,
-    asset_name: row.asset_name as string,
-    depreciation_amount: Number(row.depreciation_amount),
-    status: row.status as string
-  }));
-
-  return {
-    generated: details.length,
-    total_amount: details.reduce((sum:any, d:any) => sum + d.depreciation_amount, 0),
-    details
-  };
-};
-
-export const postDepreciationForPeriod = async (periodId: string): Promise<{
-  posted: number;
-  total_amount: number;
-}> => {
-  const { data: schedule, error: fetchError } = await financeDB
-    .from('depreciation_schedule')
-    .select('id, asset_id, depreciation_amount')
-    .eq('period_id', periodId)
-    .eq('status', 'calculated');
-
-  if (fetchError) throw new Error(`Failed to fetch depreciation: ${fetchError.message}`);
-  if (!schedule || schedule.length === 0) throw new Error('No calculated depreciation found for this period');
-
-  const totalAmount = schedule.reduce((sum, s) => sum + Number(s.depreciation_amount), 0);
-
-  // Post the depreciation journal and mark all schedule rows in one DB transaction.
-  const { data: postedCount, error: postError } = await financeDB.rpc('post_depreciation_for_period', {
-    p_period_id: periodId,
-    p_created_by: (await financeDB.auth.getUser()).data.user?.id || null,
-  });
-  if (postError) throw new Error(`Failed to post depreciation: ${postError.message}`);
-
-  return { posted: Number(postedCount || 0), total_amount: totalAmount };
-};
-
-// ─── Asset Verifications ─────────────────────────────────────────────────────
+export const postDepreciationForPeriod = async (periodId: string): Promise<{ posted: number; total_amount: number }> =>
+  callAssetAction({ action: 'post_depreciation', period_id: periodId });
 
 export const getAssetVerifications = async (): Promise<AssetVerification[]> => {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await financeDB
     .from('asset_verifications')
     .select(`
@@ -318,13 +243,16 @@ export const getAssetVerifications = async (): Promise<AssetVerification[]> => {
         asset:fixed_assets(code, name, location, status)
       )
     `)
-    .order('verification_date', { ascending: false });
+    .eq('organization_id', orgId)
+    .order('verification_date', { ascending: false })
+    .order('created_at', { ascending: false });
 
   if (error) throw new Error(`Failed to fetch asset verifications: ${error.message}`);
-  return (data || []).map(mapVerificationJoins);
+  return (data || []).map((row) => mapVerificationJoins(row as Record<string, unknown>));
 };
- 
+
 export const getAssetVerificationById = async (id: string): Promise<AssetVerification | null> => {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await financeDB
     .from('asset_verifications')
     .select(`
@@ -335,13 +263,12 @@ export const getAssetVerificationById = async (id: string): Promise<AssetVerific
       )
     `)
     .eq('id', id)
-    .single();
+    .eq('organization_id', orgId)
+    .maybeSingle();
 
-  if (error) throw new Error(`Failed to fetch verification: ${error.message}`);
-  return data ? mapVerificationJoins(data) : null;
+  if (error) throw new Error(`Failed to fetch asset verification: ${error.message}`);
+  return data ? mapVerificationJoins(data as Record<string, unknown>) : null;
 };
-
-// ─── Update Verification Line ───────────────────────────────────────────────
 
 export const updateVerificationLine = async (
   lineId: string,
@@ -351,77 +278,62 @@ export const updateVerificationLine = async (
     physical_condition?: string;
     discrepancy_notes?: string;
   }
-): Promise<void> => {
-  const { error } = await financeDB
-    .from('asset_verification_lines')
-    .update({ ...updates, updated_at: new Date().toISOString() })
-    .eq('id', lineId);
+): Promise<AssetVerificationLine> => {
+  const response = await fetch('/api/finance/assets/verifications', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      action: 'update_line',
+      line_id: lineId,
+      ...updates,
+    }),
+  });
 
-  if (error) throw new Error(`Failed to update verification line: ${error.message}`);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'Failed to update verification line');
+  return payload.data as AssetVerificationLine;
 };
 
-// ─── Get Accounting Periods (for depreciation page) ─────────────────────────
-
-export const getAccountingPeriods = async () => {
+export const getAccountingPeriods = async (): Promise<Array<{
+  id: string;
+  fiscal_year_id: string;
+  period_number: number;
+  name: string;
+  start_date: string;
+  end_date: string;
+  status: string;
+}>> => {
+  const orgId = await getCurrentOrgId();
   const { data, error } = await financeDB
     .from('accounting_periods')
-    .select('id, name, start_date, end_date')
+    .select('id, fiscal_year_id, period_number, name, start_date, end_date, status')
+    .eq('organization_id', orgId)
+    .in('status', ['OPEN', 'PENDING'])
     .order('start_date', { ascending: false });
 
   if (error) throw new Error(`Failed to fetch accounting periods: ${error.message}`);
   return data || [];
 };
 
-export const createAssetVerification = async (verificationDate: string, userId: string): Promise<AssetVerification> => {
-  const code = `VER-${verificationDate.replace(/-/g, '').slice(0, 8)}-${Date.now().toString(36).toUpperCase()}`;
-
-  const { data: assets } = await financeDB
-    .from('fixed_assets')
-    .select('id')
-    .in('status', ['active', 'fully_depreciated', 'under_repair']);
-
-  const { data: verification, error } = await financeDB
-    .from('asset_verifications')
-    .insert({
-      verification_code: code,
-      verification_date: verificationDate,
-      verified_by: userId,
-      status: 'in_progress',
-      created_by: userId
-    })
-    .select()
-    .single();
-
-  if (error) throw new Error(`Failed to create verification: ${error.message}`);
-
-  if (assets && assets.length > 0) {
-    const lines = assets.map(a => ({ verification_id: verification.id, asset_id: a.id, is_verified: false }));
-    await financeDB.from('asset_verification_lines').insert(lines);
-  }
-
-  return verification;
+export const createAssetVerification = async (verificationDate: string, _userId: string): Promise<AssetVerification> => {
+  const response = await fetch('/api/finance/assets/verifications', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+    body: JSON.stringify({ action: 'create', verification_date: verificationDate }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'Failed to create verification');
+  return payload.data as AssetVerification;
 };
 
 export const completeVerification = async (verificationId: string, notes: string): Promise<AssetVerification> => {
-  const { data: lines } = await financeDB
-    .from('asset_verification_lines')
-    .select('id, is_verified, discrepancy_notes')
-    .eq('verification_id', verificationId);
-
-  const hasDiscrepancies = lines?.some((l: { is_verified: boolean; discrepancy_notes?: string }) => !l.is_verified || !!l.discrepancy_notes);
-
-  const { data, error } = await financeDB
-    .from('asset_verifications')
-    .update({
-      status: hasDiscrepancies ? 'discrepancy_found' : 'completed',
-      notes
-    })
-    .eq('id', verificationId)
-    .select()
-    .single();
-
-  if (error) throw new Error(`Failed to complete verification: ${error.message}`);
-  return data;
+  const response = await fetch('/api/finance/assets/verifications', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+    body: JSON.stringify({ action: 'complete', verification_id: verificationId, notes }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'Failed to complete verification');
+  return payload.data as AssetVerification;
 };
 
 // ─── Asset Register (Reporting View) ─────────────────────────────────────────
@@ -471,20 +383,10 @@ export const getAssetKPIs = async (): Promise<AssetKPIs> => {
 // ─── Next Asset Code Generator ───────────────────────────────────────────────
 
 export const generateNextAssetCode = async (): Promise<string> => {
-  const { data, error } = await financeDB
-    .from('fixed_assets')
-    .select('code')
-    .order('code', { ascending: false })
-    .limit(1);
-
-  if (error || !data || data.length === 0) return 'AST-0001';
-
-  const lastCode = data[0].code;
-  const match = lastCode.match(/AST-(\d+)/);
-  if (!match) return 'AST-0001';
-
-  const nextNum = parseInt(match[1], 10) + 1;
-  return `AST-${nextNum.toString().padStart(4, '0')}`;
+  const response = await fetch('/api/finance/assets/next-code', { credentials: 'include' });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'Failed to generate asset code');
+  return payload.data as string;
 };
 
 // ─── Mapping Helpers ─────────────────────────────────────────────────────────

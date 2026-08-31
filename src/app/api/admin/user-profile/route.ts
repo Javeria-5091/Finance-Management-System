@@ -11,6 +11,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission } from '@/lib/api-auth';
+import { enforceMFA } from '@/lib/mfa-middleware';
 
 export async function GET(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
@@ -19,7 +20,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const [{ data: users, error: usersError }, { data: departments, error: deptError }] = await Promise.all([
-      supabase.rpc('admin_list_users'),
+      supabase.schema('core').rpc('admin_list_users'),
       supabase.schema('finance').from('dimensions').select('id, name, type').eq('type', 'DEPARTMENT').eq('is_active', true).order('name'),
     ]);
 
@@ -35,6 +36,8 @@ export async function GET(req: NextRequest) {
 export async function PATCH(req: NextRequest) {
   const auth = await requirePermission('ADMIN_USERS');
   if (auth instanceof NextResponse) return auth;
+  const mfaCheck = await enforceMFA(auth);
+  if (mfaCheck) return mfaCheck;
   const { supabase } = await getAuthSupabase(req);
 
   try {
@@ -43,7 +46,7 @@ export async function PATCH(req: NextRequest) {
 
     if (!user_id) return NextResponse.json({ error: 'user_id is required' }, { status: 400 });
 
-    const { data, error } = await supabase.rpc('admin_update_user_profile', {
+    const { data, error } = await supabase.schema('core').rpc('admin_update_user_profile', {
       p_user_id: user_id,
       p_department_id: department_id || null,
       p_manager_id: manager_id || null,

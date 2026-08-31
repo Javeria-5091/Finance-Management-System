@@ -90,6 +90,25 @@ export const useDisposeAsset = () => {
   });
 };
 
+
+export const useImpairAsset = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, date, amount, reason }: { id: string; date: string; amount: number; reason: string }) =>
+      S.impairAsset(id, date, amount, reason),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['fixed-assets'] }); qc.invalidateQueries({ queryKey: ['asset-kpis'] }); },
+  });
+};
+
+export const useTransferAsset = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { id: string; date: string; location: string | null; assigned_user_id: string | null; project_id: string | null; department_id: string | null; cost_center_id: string | null; reason: string }) =>
+      S.transferAsset(params),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['fixed-assets'] }); qc.invalidateQueries({ queryKey: ['asset-kpis'] }); },
+  });
+};
+
 export const useGenerateDepreciation = () => {
   const qc = useQueryClient();
   return useMutation({

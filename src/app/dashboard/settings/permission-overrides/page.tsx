@@ -121,10 +121,6 @@ export default function PermissionOverridesPage() {
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
             <KeyRound size={22} className="text-purple-500" /> Permission Overrides
           </h2>
-          <p className="text-gray-500 text-sm">
-            One-off ALLOW or DENY grants for an individual user, independent of their role (spec 7.2).
-            A DENY always wins over anything their role grants.
-          </p>
         </div>
         {canManage && (
           <button onClick={openCreateModal} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium">

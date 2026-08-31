@@ -567,6 +567,170 @@ COMMENT ON FUNCTION "audit"."trigger_audit_log"() IS 'Migration 039: now populat
 
 
 
+CREATE OR REPLACE FUNCTION "core"."admin_list_users"() RETURNS TABLE("user_id" "uuid", "email" "text", "full_name" "text", "profile_role" "text", "department_id" "uuid", "department_name" "text", "manager_id" "uuid", "manager_name" "text", "employment_status" "text", "has_profile" boolean)
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'core', 'finance'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+BEGIN
+  IF v_org IS NULL OR NOT core.has_permission(auth.uid(), 'ADMIN_USERS') THEN
+    RAISE EXCEPTION 'Access denied: ADMIN_USERS permission required';
+  END IF;
+
+  RETURN QUERY
+  SELECT
+    u.id,
+    u.email::text,
+    COALESCE(p.full_name, '')::text,
+    p.role,
+    p.department_id,
+    d.name,
+    p.manager_id,
+    m.full_name,
+    COALESCE(p.employment_status, 'ACTIVE'),
+    (p.id IS NOT NULL)
+  FROM auth.users u
+  JOIN public.profiles p ON p.user_id = u.id
+  LEFT JOIN finance.dimensions d
+    ON d.id = p.department_id
+   AND d.organization_id = v_org
+   AND d.type = 'DEPARTMENT'
+  LEFT JOIN public.profiles m
+    ON m.user_id = p.manager_id
+   AND m.organization_id = v_org
+  WHERE p.organization_id = v_org
+  ORDER BY COALESCE(p.full_name, u.email);
+END;
+$$;
+
+
+ALTER FUNCTION "core"."admin_list_users"() OWNER TO "postgres";
+
+SET default_tablespace = '';
+
+SET default_table_access_method = "heap";
+
+
+CREATE TABLE IF NOT EXISTS "public"."profiles" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "full_name" "text" DEFAULT ''::"text",
+    "role" "text" DEFAULT 'VIEWER'::"text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "email" "text" DEFAULT ''::"text",
+    "can_create_project" boolean DEFAULT false,
+    "can_delete_project" boolean DEFAULT false,
+    "can_add_income" boolean DEFAULT false,
+    "can_add_expense" boolean DEFAULT false,
+    "can_create_invoice" boolean DEFAULT false,
+    "can_delete_invoice" boolean DEFAULT false,
+    "can_edit_project" boolean DEFAULT false,
+    "can_edit_income" boolean DEFAULT false,
+    "can_edit_expense" boolean DEFAULT false,
+    "can_edit_invoice" boolean DEFAULT false,
+    "can_delete_income" boolean DEFAULT false,
+    "can_delete_expense" boolean DEFAULT false,
+    "can_manage_budgets" boolean DEFAULT false,
+    "mfa_required" boolean DEFAULT false NOT NULL,
+    "organization_id" "uuid",
+    "department_id" "uuid",
+    "manager_id" "uuid",
+    "employment_status" "text" DEFAULT 'ACTIVE'::"text" NOT NULL,
+    CONSTRAINT "profiles_employment_status_check" CHECK (("employment_status" = ANY (ARRAY['ACTIVE'::"text", 'INACTIVE'::"text", 'TERMINATED'::"text"]))),
+    CONSTRAINT "profiles_role_check" CHECK (("role" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'ACCOUNTANT'::"text", 'PROJECT_MANAGER'::"text", 'EMPLOYEE'::"text", 'VIEWER'::"text", 'Admin'::"text", 'AUDITOR'::"text", 'HOD'::"text", 'TECHNICAL_ADMIN'::"text"])))
+);
+
+
+ALTER TABLE "public"."profiles" OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "core"."admin_update_user_profile"("p_user_id" "uuid", "p_department_id" "uuid" DEFAULT NULL::"uuid", "p_manager_id" "uuid" DEFAULT NULL::"uuid", "p_employment_status" "text" DEFAULT NULL::"text", "p_clear_department" boolean DEFAULT false, "p_clear_manager" boolean DEFAULT false) RETURNS "public"."profiles"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'core', 'finance', 'audit'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_target public.profiles;
+  v_status text;
+BEGIN
+  IF v_org IS NULL OR NOT core.has_permission(auth.uid(), 'ADMIN_USERS') THEN
+    RAISE EXCEPTION 'Access denied: ADMIN_USERS permission required';
+  END IF;
+
+  SELECT * INTO v_target
+  FROM public.profiles
+  WHERE user_id = p_user_id
+    AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Target user is not in the current organization';
+  END IF;
+
+  IF p_manager_id IS NOT NULL AND p_manager_id = p_user_id THEN
+    RAISE EXCEPTION 'A user cannot be their own manager';
+  END IF;
+
+  IF p_department_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM finance.dimensions d
+    WHERE d.id = p_department_id
+      AND d.organization_id = v_org
+      AND d.type = 'DEPARTMENT'
+      AND d.is_active = true
+  ) THEN
+    RAISE EXCEPTION 'Department is not active or does not belong to the organization';
+  END IF;
+
+  IF p_manager_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.profiles m
+    WHERE m.user_id = p_manager_id
+      AND m.organization_id = v_org
+  ) THEN
+    RAISE EXCEPTION 'Manager is not in the current organization';
+  END IF;
+
+  v_status := COALESCE(p_employment_status, v_target.employment_status, 'ACTIVE');
+  IF v_status NOT IN ('ACTIVE','INACTIVE','TERMINATED') THEN
+    RAISE EXCEPTION 'employment_status must be ACTIVE, INACTIVE, or TERMINATED';
+  END IF;
+
+  UPDATE public.profiles
+  SET department_id = CASE WHEN p_clear_department THEN NULL ELSE COALESCE(p_department_id, department_id) END,
+      manager_id = CASE WHEN p_clear_manager THEN NULL ELSE COALESCE(p_manager_id, manager_id) END,
+      employment_status = v_status
+  WHERE user_id = p_user_id
+    AND organization_id = v_org
+  RETURNING * INTO v_target;
+
+  PERFORM audit.log_action(
+    p_user_id := auth.uid(),
+    p_action := 'ADMIN_USER_PROFILE_UPDATED',
+    p_entity_type := 'public.profiles',
+    p_entity_id := v_target.id,
+    p_description := 'Admin updated user department, manager, or employment status',
+    p_old_values := jsonb_build_object(
+      'department_id', CASE WHEN p_clear_department THEN v_target.department_id ELSE NULL END,
+      'manager_id', CASE WHEN p_clear_manager THEN v_target.manager_id ELSE NULL END
+    ),
+    p_new_values := jsonb_build_object(
+      'department_id', v_target.department_id,
+      'manager_id', v_target.manager_id,
+      'employment_status', v_target.employment_status
+    ),
+    p_source_module := 'admin.user_profile',
+    p_status := 'success',
+    p_severity := 'medium'
+  );
+
+  RETURN v_target;
+END;
+$$;
+
+
+ALTER FUNCTION "core"."admin_update_user_profile"("p_user_id" "uuid", "p_department_id" "uuid", "p_manager_id" "uuid", "p_employment_status" "text", "p_clear_department" boolean, "p_clear_manager" boolean) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "core"."block_legacy_table_write"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'pg_catalog', 'public'
@@ -819,27 +983,48 @@ ALTER FUNCTION "core"."get_user_permissions"("p_user_id" "uuid") OWNER TO "postg
 
 
 CREATE OR REPLACE FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permission_code" "text") RETURNS boolean
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'core', 'public'
-    AS $$ DECLARE
-  v_result BOOLEAN;
-BEGIN
-  SELECT EXISTS (
-    SELECT 1
-    FROM core.user_roles ur
-    JOIN core.role_permissions rp ON rp.role_id = ur.role_id
-    JOIN core.permissions p ON p.id = rp.permission_id
-    WHERE ur.user_id = p_user_id
-      AND p.code = p_permission_code
-      AND ur.is_active = true
-      AND (ur.effective_to IS NULL OR ur.effective_to >= CURRENT_DATE)
-      AND CURRENT_DATE >= rp.effective_from
-      AND (rp.effective_to IS NULL OR rp.effective_to >= CURRENT_DATE)
-  ) INTO v_result;
-  
-  RETURN v_result;
-END;
- $$;
+    AS $$
+  SELECT
+    NOT EXISTS (
+      SELECT 1
+      FROM core.user_permission_overrides upo
+      JOIN core.permissions p ON p.id = upo.permission_id
+      WHERE upo.user_id = p_user_id
+        AND p.code = p_permission_code
+        AND upo.override_type = 'DENY'
+        AND CURRENT_DATE >= upo.effective_from
+        AND (upo.effective_to IS NULL OR upo.effective_to >= CURRENT_DATE)
+    )
+    AND (
+      EXISTS (
+        SELECT 1
+        FROM core.user_roles ur
+        JOIN core.role_permissions rp ON rp.role_id = ur.role_id
+        JOIN core.permissions p ON p.id = rp.permission_id
+        WHERE ur.user_id = p_user_id
+          AND p.code = p_permission_code
+          AND ur.is_active = true
+          AND CURRENT_DATE >= ur.effective_from
+          AND (ur.effective_to IS NULL OR ur.effective_to >= CURRENT_DATE)
+          AND CURRENT_DATE >= rp.effective_from
+          AND (rp.effective_to IS NULL OR rp.effective_to >= CURRENT_DATE)
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM core.user_permission_overrides upo
+        JOIN core.permissions p ON p.id = upo.permission_id
+        JOIN public.profiles pr ON pr.user_id = upo.user_id
+        WHERE upo.user_id = p_user_id
+          AND p.code = p_permission_code
+          AND upo.override_type = 'ALLOW'
+          AND CURRENT_DATE >= upo.effective_from
+          AND (upo.effective_to IS NULL OR upo.effective_to >= CURRENT_DATE)
+          AND pr.organization_id = core.current_user_org_id()
+      )
+    );
+$$;
 
 
 ALTER FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permission_code" "text") OWNER TO "postgres";
@@ -1319,10 +1504,6 @@ ALTER FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", 
 
 COMMENT ON FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") IS 'FND-BUDG-003: atomically applies a pending budget revision and marks it approved. Organization and maker-checker checks are enforced inside the transaction.';
 
-
-SET default_tablespace = '';
-
-SET default_table_access_method = "heap";
 
 
 CREATE TABLE IF NOT EXISTS "finance"."tax_reconciliations" (
@@ -1957,6 +2138,108 @@ $$;
 
 
 ALTER FUNCTION "finance"."create_fiscal_year_with_periods"("p_name" "text", "p_start_date" "date", "p_end_date" "date", "p_description" "text", "p_created_by" "uuid") OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."fixed_assets" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "code" character varying(50) NOT NULL,
+    "name" character varying(300) NOT NULL,
+    "category_id" "uuid" NOT NULL,
+    "description" "text",
+    "vendor_id" "uuid",
+    "purchase_date" "date" NOT NULL,
+    "purchase_cost" numeric(18,2) NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "base_cost" numeric(18,2) NOT NULL,
+    "exchange_rate_id" "uuid",
+    "serial_number" character varying(200),
+    "warranty_start" "date",
+    "warranty_end" "date",
+    "location" character varying(200),
+    "assigned_user_id" "uuid",
+    "useful_life_months" integer,
+    "residual_value_pct" numeric(5,2),
+    "depreciation_method" character varying(50),
+    "residual_value_amount" numeric(18,2),
+    "accumulated_depreciation" numeric(18,2) DEFAULT 0 NOT NULL,
+    "net_book_value" numeric(18,2) DEFAULT 0 NOT NULL,
+    "linked_asset_account_id" "uuid",
+    "linked_depreciation_account_id" "uuid",
+    "linked_expense_account_id" "uuid",
+    "project_id" "uuid",
+    "department_id" "uuid",
+    "cost_center_id" "uuid",
+    "status" character varying(50) DEFAULT 'pending_capitalization'::character varying NOT NULL,
+    "disposal_date" "date",
+    "disposal_value" numeric(18,2),
+    "disposal_currency" "text",
+    "disposal_method" character varying(100),
+    "gain_loss_amount" numeric(18,2),
+    "disposal_journal_id" "uuid",
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "created_by" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "organization_id" "uuid",
+    "financial_account_id" "uuid",
+    "capitalization_journal_id" "uuid",
+    CONSTRAINT "fixed_assets_base_cost_check" CHECK (("base_cost" >= (0)::numeric)),
+    CONSTRAINT "fixed_assets_depreciation_method_check" CHECK ((("depreciation_method" IS NULL) OR (("depreciation_method")::"text" = ANY ((ARRAY['straight_line'::character varying, 'declining_balance'::character varying, 'units_of_production'::character varying])::"text"[])))),
+    CONSTRAINT "fixed_assets_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
+    CONSTRAINT "fixed_assets_purchase_cost_check" CHECK (("purchase_cost" >= (0)::numeric)),
+    CONSTRAINT "fixed_assets_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['pending_capitalization'::character varying, 'active'::character varying, 'fully_depreciated'::character varying, 'under_repair'::character varying, 'disposed'::character varying, 'sold'::character varying])::"text"[])))
+);
+
+
+ALTER TABLE "finance"."fixed_assets" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "finance"."fixed_assets"."financial_account_id" IS 'BUG-024 FIX: the bank/cash account that funded this asset''s purchase (used as the capitalization credit leg when the asset was not bought on vendor credit) and/or that receives disposal proceeds.';
+
+
+
+COMMENT ON COLUMN "finance"."fixed_assets"."capitalization_journal_id" IS 'BUG-024 FIX: the journal entry that recorded this asset''s initial capitalization, for register-to-ledger reconciliation (spec 5.10). Mirrors disposal_journal_id.';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."create_fixed_asset"("p_input" "jsonb", "p_created_by" "uuid") RETURNS "finance"."fixed_assets"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id(); v_code text; v_cat finance.asset_categories%ROWTYPE; v_asset finance.fixed_assets%ROWTYPE;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN RAISE EXCEPTION 'Authentication and organization context are required'; END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Insufficient privileges to create fixed assets'; END IF;
+  IF p_input->>'name' IS NULL OR btrim(p_input->>'name')='' THEN RAISE EXCEPTION 'Asset name is required'; END IF;
+  SELECT * INTO v_cat FROM finance.asset_categories WHERE id=(p_input->>'category_id')::uuid AND organization_id=v_org AND active=true;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Asset category not found or inactive'; END IF;
+  v_code := finance.generate_next_asset_code();
+  INSERT INTO finance.fixed_assets(
+    code,name,category_id,description,vendor_id,purchase_date,purchase_cost,currency,base_cost,
+    serial_number,warranty_start,warranty_end,location,assigned_user_id,useful_life_months,residual_value_pct,
+    depreciation_method,residual_value_amount,linked_asset_account_id,linked_depreciation_account_id,linked_expense_account_id,
+    project_id,department_id,cost_center_id,status,created_by,organization_id,financial_account_id
+  ) VALUES (
+    v_code,p_input->>'name',(p_input->>'category_id')::uuid,p_input->>'description',NULLIF(p_input->>'vendor_id','')::uuid,
+    (p_input->>'purchase_date')::date,(p_input->>'purchase_cost')::numeric,upper(coalesce(p_input->>'currency','PKR')),
+    (p_input->>'base_cost')::numeric,NULLIF(p_input->>'serial_number',''),NULLIF(p_input->>'warranty_start','')::date,NULLIF(p_input->>'warranty_end','')::date,
+    NULLIF(p_input->>'location',''),NULLIF(p_input->>'assigned_user_id','')::uuid,
+    coalesce((p_input->>'useful_life_months')::integer,v_cat.useful_life_months),coalesce((p_input->>'residual_value_pct')::numeric,v_cat.residual_value_pct),
+    coalesce(NULLIF(p_input->>'depreciation_method',''),v_cat.depreciation_method),coalesce((p_input->>'residual_value_amount')::numeric,0),
+    coalesce(NULLIF(p_input->>'linked_asset_account_id','')::uuid,v_cat.linked_asset_account_id),
+    coalesce(NULLIF(p_input->>'linked_depreciation_account_id','')::uuid,v_cat.linked_depreciation_account_id),
+    coalesce(NULLIF(p_input->>'linked_expense_account_id','')::uuid,v_cat.linked_expense_account_id),
+    NULLIF(p_input->>'project_id','')::uuid,NULLIF(p_input->>'department_id','')::uuid,NULLIF(p_input->>'cost_center_id','')::uuid,
+    'pending_capitalization',p_created_by,v_org,NULLIF(p_input->>'financial_account_id','')::uuid
+  ) RETURNING * INTO v_asset;
+  RETURN v_asset;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."create_fixed_asset"("p_input" "jsonb", "p_created_by" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") RETURNS integer
@@ -2904,6 +3187,33 @@ END;
 ALTER FUNCTION "finance"."fn_validate_fa_ledger"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."generate_next_asset_code"() RETURNS "text"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $_$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_next integer;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN
+    RAISE EXCEPTION 'Authentication and organization context are required';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(v_org::text || ':fixed_asset_code', 0));
+
+  SELECT COALESCE(MAX((substring(code FROM '^AST-([0-9]+)$'))::integer), 0) + 1
+    INTO v_next
+  FROM finance.fixed_assets
+  WHERE organization_id = v_org;
+
+  RETURN 'AST-' || lpad(v_next::text, 4, '0');
+END;
+$_$;
+
+
+ALTER FUNCTION "finance"."generate_next_asset_code"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."get_current_open_period_id"() RETURNS "uuid"
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
@@ -3265,69 +3575,6 @@ END;
 ALTER FUNCTION "finance"."peek_next_number"("p_type" "text") OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "finance"."fixed_assets" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "code" character varying(50) NOT NULL,
-    "name" character varying(300) NOT NULL,
-    "category_id" "uuid" NOT NULL,
-    "description" "text",
-    "vendor_id" "uuid",
-    "purchase_date" "date" NOT NULL,
-    "purchase_cost" numeric(18,2) NOT NULL,
-    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
-    "base_cost" numeric(18,2) NOT NULL,
-    "exchange_rate_id" "uuid",
-    "serial_number" character varying(200),
-    "warranty_start" "date",
-    "warranty_end" "date",
-    "location" character varying(200),
-    "assigned_user_id" "uuid",
-    "useful_life_months" integer,
-    "residual_value_pct" numeric(5,2),
-    "depreciation_method" character varying(50),
-    "residual_value_amount" numeric(18,2),
-    "accumulated_depreciation" numeric(18,2) DEFAULT 0 NOT NULL,
-    "net_book_value" numeric(18,2) DEFAULT 0 NOT NULL,
-    "linked_asset_account_id" "uuid",
-    "linked_depreciation_account_id" "uuid",
-    "linked_expense_account_id" "uuid",
-    "project_id" "uuid",
-    "department_id" "uuid",
-    "cost_center_id" "uuid",
-    "status" character varying(50) DEFAULT 'pending_capitalization'::character varying NOT NULL,
-    "disposal_date" "date",
-    "disposal_value" numeric(18,2),
-    "disposal_currency" "text",
-    "disposal_method" character varying(100),
-    "gain_loss_amount" numeric(18,2),
-    "disposal_journal_id" "uuid",
-    "approved_by" "uuid",
-    "approved_at" timestamp with time zone,
-    "created_by" "uuid" NOT NULL,
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "organization_id" "uuid",
-    "financial_account_id" "uuid",
-    "capitalization_journal_id" "uuid",
-    CONSTRAINT "fixed_assets_base_cost_check" CHECK (("base_cost" >= (0)::numeric)),
-    CONSTRAINT "fixed_assets_depreciation_method_check" CHECK ((("depreciation_method" IS NULL) OR (("depreciation_method")::"text" = ANY ((ARRAY['straight_line'::character varying, 'declining_balance'::character varying, 'units_of_production'::character varying])::"text"[])))),
-    CONSTRAINT "fixed_assets_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
-    CONSTRAINT "fixed_assets_purchase_cost_check" CHECK (("purchase_cost" >= (0)::numeric)),
-    CONSTRAINT "fixed_assets_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['pending_capitalization'::character varying, 'active'::character varying, 'fully_depreciated'::character varying, 'under_repair'::character varying, 'disposed'::character varying, 'sold'::character varying])::"text"[])))
-);
-
-
-ALTER TABLE "finance"."fixed_assets" OWNER TO "postgres";
-
-
-COMMENT ON COLUMN "finance"."fixed_assets"."financial_account_id" IS 'BUG-024 FIX: the bank/cash account that funded this asset''s purchase (used as the capitalization credit leg when the asset was not bought on vendor credit) and/or that receives disposal proceeds.';
-
-
-
-COMMENT ON COLUMN "finance"."fixed_assets"."capitalization_journal_id" IS 'BUG-024 FIX: the journal entry that recorded this asset''s initial capitalization, for register-to-ledger reconciliation (spec 5.10). Mirrors disposal_journal_id.';
-
-
-
 CREATE OR REPLACE FUNCTION "finance"."post_asset_capitalization"("p_asset_id" "uuid", "p_posted_by" "uuid") RETURNS "finance"."fixed_assets"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
@@ -3440,137 +3687,110 @@ CREATE OR REPLACE FUNCTION "finance"."post_asset_disposal"("p_asset_id" "uuid", 
     AS $$
 DECLARE
   v_asset finance.fixed_assets%ROWTYPE;
-  v_org UUID;
-  v_period_id UUID;
-  v_nbv NUMERIC(18,2);
-  v_gain_loss NUMERIC(18,2);
-  v_cash_ledger_account_id UUID;
-  v_gain_account_id UUID;
-  v_loss_account_id UUID;
-  v_journal_id UUID;
-  v_lines JSONB := '[]'::jsonb;
+  v_org uuid;
+  v_period_id uuid;
+  v_nbv numeric(18,2);
+  v_proceeds_base numeric(18,2);
+  v_gain_loss numeric(18,2);
+  v_rate numeric(18,6) := 1;
+  v_cash_ledger_account_id uuid;
+  v_gain_account_id uuid;
+  v_loss_account_id uuid;
+  v_journal_id uuid;
+  v_lines jsonb := '[]'::jsonb;
+  v_currency text := upper(coalesce(nullif(trim(p_disposal_currency), ''), 'PKR'));
 BEGIN
   IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
     RAISE EXCEPTION 'Insufficient privileges to dispose a fixed asset. Requires Finance Head, CEO, or Accountant.';
   END IF;
-
   IF p_disposal_value IS NULL OR p_disposal_value < 0 THEN
     RAISE EXCEPTION 'Disposal value must be zero or a positive number';
   END IF;
+  IF p_disposal_date IS NULL OR p_disposal_method IS NULL OR btrim(p_disposal_method) = '' THEN
+    RAISE EXCEPTION 'Disposal date and method are required';
+  END IF;
 
   SELECT * INTO v_asset FROM finance.fixed_assets WHERE id = p_asset_id FOR UPDATE;
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'Fixed asset not found: %', p_asset_id;
-  END IF;
-
+  IF NOT FOUND THEN RAISE EXCEPTION 'Fixed asset not found: %', p_asset_id; END IF;
   v_org := v_asset.organization_id;
-  IF v_org IS DISTINCT FROM core.current_user_org_id() THEN
-    RAISE EXCEPTION 'Access denied: asset belongs to another organization';
-  END IF;
-
-  IF v_asset.status NOT IN ('active', 'fully_depreciated', 'under_repair') THEN
+  IF NOT core.same_org(v_org) THEN RAISE EXCEPTION 'Access denied: asset belongs to another organization'; END IF;
+  IF v_asset.status NOT IN ('active','fully_depreciated','under_repair') THEN
     RAISE EXCEPTION 'Only active, fully_depreciated, or under_repair assets can be disposed. Current status: %', v_asset.status;
   END IF;
 
-  IF v_asset.linked_asset_account_id IS NULL THEN
-    RAISE EXCEPTION 'Asset % has no linked_asset_account_id configured', v_asset.code;
+  IF p_disposal_value > 0 AND v_currency <> 'PKR' THEN
+    SELECT er.rate INTO v_rate
+    FROM finance.exchange_rates er
+    WHERE er.organization_id = v_org
+      AND er.from_currency = v_currency
+      AND er.to_currency = 'PKR'
+      AND er.rate_date <= p_disposal_date
+      AND er.approved_by IS NOT NULL
+      AND er.is_locked = true
+    ORDER BY er.rate_date DESC, er.rate_time DESC NULLS LAST, er.created_at DESC
+    LIMIT 1;
+    IF v_rate IS NULL OR v_rate <= 0 THEN
+      RAISE EXCEPTION 'No approved and locked % to PKR exchange rate exists on or before %', v_currency, p_disposal_date;
+    END IF;
+  ELSIF p_disposal_value > 0 THEN
+    v_rate := 1;
   END IF;
+
+  v_proceeds_base := round(p_disposal_value * v_rate, 2);
+  v_nbv := v_asset.base_cost - v_asset.accumulated_depreciation;
+  v_gain_loss := v_proceeds_base - v_nbv;
+
+  IF v_asset.linked_asset_account_id IS NULL THEN RAISE EXCEPTION 'Asset % has no linked_asset_account_id configured', v_asset.code; END IF;
   IF v_asset.accumulated_depreciation > 0 AND v_asset.linked_depreciation_account_id IS NULL THEN
     RAISE EXCEPTION 'Asset % has accumulated depreciation but no linked_depreciation_account_id configured', v_asset.code;
   END IF;
 
-  v_nbv := v_asset.base_cost - v_asset.accumulated_depreciation;
-  v_gain_loss := p_disposal_value - v_nbv;
-
   IF p_disposal_value > 0 THEN
-    IF v_asset.financial_account_id IS NULL THEN
-      RAISE EXCEPTION 'Asset % has a disposal value but no financial_account_id set to receive the proceeds', v_asset.code;
-    END IF;
+    IF v_asset.financial_account_id IS NULL THEN RAISE EXCEPTION 'Asset % has no financial_account_id for disposal proceeds', v_asset.code; END IF;
     SELECT linked_ledger_account_id INTO v_cash_ledger_account_id
     FROM finance.financial_accounts
     WHERE id = v_asset.financial_account_id AND organization_id = v_org AND is_active = true;
-    IF v_cash_ledger_account_id IS NULL THEN
-      RAISE EXCEPTION 'Asset %''s financial account is missing, inactive, or has no linked GL ledger account', v_asset.code;
-    END IF;
+    IF v_cash_ledger_account_id IS NULL THEN RAISE EXCEPTION 'Disposal proceeds account is missing, inactive, or not linked to GL'; END IF;
   END IF;
 
   IF v_gain_loss > 0 THEN
-    SELECT id INTO v_gain_account_id FROM finance.chart_of_accounts
-    WHERE organization_id = v_org AND code = '7031' AND is_active = true AND posting_allowed IS NOT FALSE;
-    IF v_gain_account_id IS NULL THEN
-      RAISE EXCEPTION 'Fixed Asset Disposal Gain account (code 7031) is missing or not postable';
-    END IF;
+    SELECT id INTO v_gain_account_id FROM finance.chart_of_accounts WHERE organization_id = v_org AND code = '7031' AND is_active = true AND posting_allowed IS NOT FALSE;
+    IF v_gain_account_id IS NULL THEN RAISE EXCEPTION 'Fixed Asset Disposal Gain account (7031) is missing or not postable'; END IF;
   ELSIF v_gain_loss < 0 THEN
-    SELECT id INTO v_loss_account_id FROM finance.chart_of_accounts
-    WHERE organization_id = v_org AND code = '7131' AND is_active = true AND posting_allowed IS NOT FALSE;
-    IF v_loss_account_id IS NULL THEN
-      RAISE EXCEPTION 'Fixed Asset Disposal Loss account (code 7131) is missing or not postable';
-    END IF;
+    SELECT id INTO v_loss_account_id FROM finance.chart_of_accounts WHERE organization_id = v_org AND code = '7131' AND is_active = true AND posting_allowed IS NOT FALSE;
+    IF v_loss_account_id IS NULL THEN RAISE EXCEPTION 'Fixed Asset Disposal Loss account (7131) is missing or not postable'; END IF;
   END IF;
 
-  SELECT id INTO v_period_id
-  FROM finance.accounting_periods
-  WHERE organization_id = v_org AND status = 'OPEN'
-    AND p_disposal_date BETWEEN start_date AND end_date
+  SELECT id INTO v_period_id FROM finance.accounting_periods
+  WHERE organization_id = v_org AND status = 'OPEN' AND p_disposal_date BETWEEN start_date AND end_date
   ORDER BY start_date DESC LIMIT 1;
-  IF v_period_id IS NULL THEN
-    SELECT id INTO v_period_id
-    FROM finance.accounting_periods
-    WHERE organization_id = v_org AND status = 'OPEN'
-    ORDER BY start_date DESC LIMIT 1;
-  END IF;
-  IF v_period_id IS NULL THEN
-    RAISE EXCEPTION 'No OPEN accounting period found to post disposal of asset %', v_asset.code;
-  END IF;
+  IF v_period_id IS NULL THEN RAISE EXCEPTION 'No OPEN accounting period found for disposal date %', p_disposal_date; END IF;
 
   v_lines := v_lines || jsonb_build_array(
-    jsonb_build_object('account_id', v_asset.linked_asset_account_id, 'debit_amount', 0, 'credit_amount', v_asset.base_cost, 'description', 'Disposal of asset ' || v_asset.code || ' - remove cost')
+    jsonb_build_object('account_id', v_asset.linked_asset_account_id, 'debit_amount', 0, 'credit_amount', v_asset.base_cost, 'description', 'Disposal of asset ' || v_asset.code || ' - remove cost'),
+    jsonb_build_object('account_id', v_asset.linked_depreciation_account_id, 'debit_amount', v_asset.accumulated_depreciation, 'credit_amount', 0, 'description', 'Disposal of asset ' || v_asset.code || ' - remove accumulated depreciation')
   );
-  IF v_asset.accumulated_depreciation > 0 THEN
-    v_lines := v_lines || jsonb_build_array(
-      jsonb_build_object('account_id', v_asset.linked_depreciation_account_id, 'debit_amount', v_asset.accumulated_depreciation, 'credit_amount', 0, 'description', 'Disposal of asset ' || v_asset.code || ' - remove accumulated depreciation')
-    );
-  END IF;
   IF p_disposal_value > 0 THEN
-    v_lines := v_lines || jsonb_build_array(
-      jsonb_build_object('account_id', v_cash_ledger_account_id, 'debit_amount', p_disposal_value, 'credit_amount', 0, 'description', 'Disposal proceeds: asset ' || v_asset.code)
-    );
+    v_lines := v_lines || jsonb_build_array(jsonb_build_object('account_id', v_cash_ledger_account_id, 'debit_amount', v_proceeds_base, 'credit_amount', 0, 'description', 'Disposal proceeds: ' || v_asset.code));
   END IF;
   IF v_gain_loss > 0 THEN
-    v_lines := v_lines || jsonb_build_array(
-      jsonb_build_object('account_id', v_gain_account_id, 'debit_amount', 0, 'credit_amount', v_gain_loss, 'description', 'Gain on disposal: asset ' || v_asset.code)
-    );
+    v_lines := v_lines || jsonb_build_array(jsonb_build_object('account_id', v_gain_account_id, 'debit_amount', 0, 'credit_amount', v_gain_loss, 'description', 'Gain on disposal: ' || v_asset.code));
   ELSIF v_gain_loss < 0 THEN
-    v_lines := v_lines || jsonb_build_array(
-      jsonb_build_object('account_id', v_loss_account_id, 'debit_amount', abs(v_gain_loss), 'credit_amount', 0, 'description', 'Loss on disposal: asset ' || v_asset.code)
-    );
+    v_lines := v_lines || jsonb_build_array(jsonb_build_object('account_id', v_loss_account_id, 'debit_amount', abs(v_gain_loss), 'credit_amount', 0, 'description', 'Loss on disposal: ' || v_asset.code));
   END IF;
 
   v_journal_id := finance.post_journal_entry(
-    p_description := 'Asset disposal: ' || v_asset.code || ' - ' || v_asset.name,
-    p_transaction_date := p_disposal_date,
-    p_period_id := v_period_id,
-    p_lines := v_lines,
-    p_currency := COALESCE(p_disposal_currency, v_asset.currency),
-    p_exchange_rate := 1,
-    p_source_type := 'ASSET_DISPOSAL',
-    p_source_id := v_asset.id,
-    p_project_id := v_asset.project_id,
-    p_department_id := v_asset.department_id
+    'Asset disposal: ' || v_asset.code || ' - ' || v_asset.name,
+    p_disposal_date, v_period_id, v_lines, v_currency, v_rate,
+    'ASSET_DISPOSAL', v_asset.id, v_asset.project_id, v_asset.department_id
   );
 
-  UPDATE finance.fixed_assets
-  SET status = CASE WHEN p_disposal_value > 0 THEN 'sold' ELSE 'disposed' END,
-      disposal_date = p_disposal_date,
-      disposal_value = p_disposal_value,
-      disposal_currency = p_disposal_currency,
-      disposal_method = p_disposal_method,
-      gain_loss_amount = v_gain_loss,
-      disposal_journal_id = v_journal_id,
-      updated_at = now()
-  WHERE id = p_asset_id
-  RETURNING * INTO v_asset;
-
+  UPDATE finance.fixed_assets SET
+    status = CASE WHEN p_disposal_value > 0 THEN 'sold' ELSE 'disposed' END,
+    disposal_date = p_disposal_date, disposal_value = p_disposal_value,
+    disposal_currency = v_currency, disposal_method = p_disposal_method,
+    gain_loss_amount = v_gain_loss, disposal_journal_id = v_journal_id, updated_at = now()
+  WHERE id = p_asset_id RETURNING * INTO v_asset;
   RETURN v_asset;
 END;
 $$;
@@ -3581,6 +3801,81 @@ ALTER FUNCTION "finance"."post_asset_disposal"("p_asset_id" "uuid", "p_disposal_
 
 COMMENT ON FUNCTION "finance"."post_asset_disposal"("p_asset_id" "uuid", "p_disposal_date" "date", "p_disposal_value" numeric, "p_disposal_currency" "text", "p_disposal_method" "text") IS 'BUG-024 FIX: previously missing entirely, so no asset could ever be disposed. Removes the asset at cost and its accumulated depreciation, records any sale proceeds and the resulting gain/loss, through finance.post_journal_entry().';
 
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_asset_impairment"("p_asset_id" "uuid", "p_adjustment_date" "date", "p_amount" numeric, "p_reason" "text", "p_posted_by" "uuid") RETURNS "finance"."fixed_assets"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  a finance.fixed_assets%ROWTYPE; org_id uuid; period_id uuid; journal_id uuid;
+  new_acc numeric(18,2); new_nbv numeric(18,2); lines jsonb;
+BEGIN
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Insufficient privileges for asset impairment/adjustment'; END IF;
+  IF p_amount IS NULL OR p_amount <= 0 OR p_reason IS NULL OR btrim(p_reason) = '' THEN RAISE EXCEPTION 'Positive amount and reason are required'; END IF;
+  SELECT * INTO a FROM finance.fixed_assets WHERE id = p_asset_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Fixed asset not found'; END IF;
+  org_id := a.organization_id;
+  IF NOT core.same_org(org_id) THEN RAISE EXCEPTION 'Access denied: asset belongs to another organization'; END IF;
+  IF a.status NOT IN ('active','fully_depreciated','under_repair') THEN RAISE EXCEPTION 'Only active/fully_depreciated/under_repair assets may be impaired'; END IF;
+  IF p_amount > a.net_book_value THEN RAISE EXCEPTION 'Impairment cannot exceed current net book value'; END IF;
+  IF a.linked_expense_account_id IS NULL OR a.linked_depreciation_account_id IS NULL THEN RAISE EXCEPTION 'Asset impairment requires linked expense and depreciation accounts'; END IF;
+  SELECT id INTO period_id FROM finance.accounting_periods WHERE organization_id=org_id AND status='OPEN' AND p_adjustment_date BETWEEN start_date AND end_date ORDER BY start_date DESC LIMIT 1;
+  IF period_id IS NULL THEN RAISE EXCEPTION 'No OPEN accounting period found for adjustment date %', p_adjustment_date; END IF;
+  new_acc := a.accumulated_depreciation + p_amount; new_nbv := a.net_book_value - p_amount;
+  lines := jsonb_build_array(
+    jsonb_build_object('account_id', a.linked_expense_account_id, 'debit_amount', p_amount, 'credit_amount', 0, 'description', 'Asset impairment: '||a.code||' - '||p_reason, 'project_id', a.project_id),
+    jsonb_build_object('account_id', a.linked_depreciation_account_id, 'debit_amount', 0, 'credit_amount', p_amount, 'description', 'Asset impairment allowance: '||a.code, 'project_id', a.project_id)
+  );
+  journal_id := finance.post_journal_entry('Asset impairment: '||a.code||' - '||a.name, p_adjustment_date, period_id, lines, 'PKR', 1, 'ASSET_IMPAIRMENT', a.id, a.project_id, a.department_id);
+  INSERT INTO finance.asset_impairments(organization_id,asset_id,adjustment_date,amount,reason,previous_accumulated_depreciation,previous_net_book_value,new_accumulated_depreciation,new_net_book_value,journal_entry_id,created_by)
+  VALUES(org_id,a.id,p_adjustment_date,p_amount,p_reason,a.accumulated_depreciation,a.net_book_value,new_acc,new_nbv,journal_id,p_posted_by);
+  UPDATE finance.fixed_assets SET accumulated_depreciation=new_acc, net_book_value=new_nbv, status=CASE WHEN new_nbv=0 THEN 'fully_depreciated' ELSE status END, updated_at=now() WHERE id=a.id RETURNING * INTO a;
+  RETURN a;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_asset_impairment"("p_asset_id" "uuid", "p_adjustment_date" "date", "p_amount" numeric, "p_reason" "text", "p_posted_by" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_asset_transfer"("p_asset_id" "uuid", "p_transfer_date" "date", "p_location" character varying, "p_assigned_user_id" "uuid", "p_project_id" "uuid", "p_department_id" "uuid", "p_cost_center_id" "uuid", "p_reason" "text", "p_posted_by" "uuid") RETURNS "finance"."fixed_assets"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  a finance.fixed_assets%ROWTYPE; org_id uuid; period_id uuid; journal_id uuid; lines jsonb;
+BEGIN
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Insufficient privileges for asset transfer'; END IF;
+  IF p_reason IS NULL OR btrim(p_reason)='' THEN RAISE EXCEPTION 'Transfer reason is required'; END IF;
+  SELECT * INTO a FROM finance.fixed_assets WHERE id=p_asset_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Fixed asset not found'; END IF;
+  org_id:=a.organization_id;
+  IF NOT core.same_org(org_id) THEN RAISE EXCEPTION 'Access denied: asset belongs to another organization'; END IF;
+  IF a.status IN ('disposed','sold','pending_capitalization') THEN RAISE EXCEPTION 'Asset status % cannot be transferred', a.status; END IF;
+  IF p_project_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id=p_project_id AND p.organization_id=org_id AND p.is_active=true) THEN RAISE EXCEPTION 'Target project is invalid or outside the organization'; END IF;
+  IF p_department_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM finance.dimensions d WHERE d.id=p_department_id AND d.organization_id=org_id AND d.type='DEPARTMENT' AND d.is_active=true) THEN RAISE EXCEPTION 'Target department is invalid or outside the organization'; END IF;
+  IF p_cost_center_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM finance.dimensions d WHERE d.id=p_cost_center_id AND d.organization_id=org_id AND d.type='COST_CENTER' AND d.is_active=true) THEN RAISE EXCEPTION 'Target cost center is invalid or outside the organization'; END IF;
+  SELECT id INTO period_id FROM finance.accounting_periods WHERE organization_id=org_id AND status='OPEN' AND p_transfer_date BETWEEN start_date AND end_date ORDER BY start_date DESC LIMIT 1;
+  IF period_id IS NULL THEN RAISE EXCEPTION 'No OPEN accounting period found for transfer date %', p_transfer_date; END IF;
+
+  -- The transfer is represented by a balanced reclassification in the asset account;
+  -- project is carried per line, while the header carries the target department.
+  IF a.linked_asset_account_id IS NULL THEN RAISE EXCEPTION 'Asset has no linked asset GL account'; END IF;
+  lines := jsonb_build_array(
+    jsonb_build_object('account_id',a.linked_asset_account_id,'debit_amount',a.base_cost,'credit_amount',0,'description','Asset transfer to new assignment: '||a.code,'project_id',p_project_id),
+    jsonb_build_object('account_id',a.linked_asset_account_id,'debit_amount',0,'credit_amount',a.base_cost,'description','Asset transfer from previous assignment: '||a.code,'project_id',a.project_id)
+  );
+  journal_id := finance.post_journal_entry('Asset transfer: '||a.code||' - '||a.name,p_transfer_date,period_id,lines,'PKR',1,'ASSET_TRANSFER',a.id,p_project_id,p_department_id);
+  INSERT INTO finance.asset_transfers(organization_id,asset_id,transfer_date,from_location,to_location,from_assigned_user_id,to_assigned_user_id,from_project_id,to_project_id,from_department_id,to_department_id,from_cost_center_id,to_cost_center_id,reason,journal_entry_id,created_by)
+  VALUES(org_id,a.id,p_transfer_date,a.location,p_location,a.assigned_user_id,p_assigned_user_id,a.project_id,p_project_id,a.department_id,p_department_id,a.cost_center_id,p_cost_center_id,p_reason,journal_id,p_posted_by);
+  UPDATE finance.fixed_assets SET location=p_location,assigned_user_id=p_assigned_user_id,project_id=p_project_id,department_id=p_department_id,cost_center_id=p_cost_center_id,updated_at=now() WHERE id=a.id RETURNING * INTO a;
+  RETURN a;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_asset_transfer"("p_asset_id" "uuid", "p_transfer_date" "date", "p_location" character varying, "p_assigned_user_id" "uuid", "p_project_id" "uuid", "p_department_id" "uuid", "p_cost_center_id" "uuid", "p_reason" "text", "p_posted_by" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
@@ -3733,6 +4028,96 @@ $$;
 
 
 ALTER FUNCTION "finance"."post_credit_note"("p_cn_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_credit_note_atomic"("p_cn_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_cn record;
+  v_invoice record;
+  v_ar uuid;
+  v_revenue uuid;
+  v_journal_id uuid;
+  v_reference text;
+  v_new_outstanding numeric(18,2);
+  v_new_base_outstanding numeric(18,2);
+  v_new_status text;
+  v_lines jsonb;
+BEGIN
+  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+
+  SELECT * INTO v_cn
+  FROM finance.credit_notes
+  WHERE id = p_cn_id AND organization_id = v_org
+  FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Credit note not found or access denied'; END IF;
+  IF v_cn.status <> 'APPROVED' THEN RAISE EXCEPTION 'Only APPROVED credit notes can be posted'; END IF;
+  IF v_cn.invoice_id IS NULL THEN RAISE EXCEPTION 'Only invoice credit notes are supported by this AR posting flow'; END IF;
+
+  SELECT id, total_amount, outstanding_amount, base_outstanding_amount, currency, exchange_rate, organization_id, status
+    INTO v_invoice
+  FROM public.invoices
+  WHERE id = v_cn.invoice_id AND organization_id = v_org
+  FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Linked invoice not found or access denied'; END IF;
+  IF v_cn.amount > COALESCE(v_invoice.outstanding_amount, 0) + 0.01 THEN
+    RAISE EXCEPTION 'Credit note amount % exceeds invoice outstanding amount %', v_cn.amount, v_invoice.outstanding_amount;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM finance.accounting_periods WHERE id=p_period_id AND organization_id=v_org AND status='OPEN') THEN
+    RAISE EXCEPTION 'Posting period is not OPEN';
+  END IF;
+
+  SELECT id INTO v_ar FROM finance.chart_of_accounts
+  WHERE code='1210' AND account_type='ASSET' AND is_active=true AND organization_id=v_org
+  LIMIT 1;
+  SELECT id INTO v_revenue FROM finance.chart_of_accounts
+  WHERE code='4110' AND account_type='REVENUE' AND is_active=true AND organization_id=v_org
+  LIMIT 1;
+  IF v_ar IS NULL OR v_revenue IS NULL THEN RAISE EXCEPTION 'Required AR/Revenue control accounts are not configured for this organization'; END IF;
+
+  IF EXISTS (SELECT 1 FROM finance.journal_entries WHERE source_type='CREDIT_NOTE' AND source_id=p_cn_id AND organization_id=v_org) THEN
+    RAISE EXCEPTION 'Credit note is already posted';
+  END IF;
+
+  v_lines := jsonb_build_array(
+    jsonb_build_object('account_id',v_revenue,'debit_amount',v_cn.amount,'credit_amount',0,'description','Revenue reversal: Credit Note '||coalesce(v_cn.credit_note_number,p_cn_id::text)),
+    jsonb_build_object('account_id',v_ar,'debit_amount',0,'credit_amount',v_cn.amount,'description','Receivable reduction: Credit Note '||coalesce(v_cn.credit_note_number,p_cn_id::text))
+  );
+
+  v_journal_id := finance.post_journal_entry(
+    'Credit Note: '||coalesce(v_cn.credit_note_number,p_cn_id::text),
+    p_transaction_date,p_period_id,v_lines,v_cn.currency,coalesce(v_cn.exchange_rate,1),'CREDIT_NOTE',p_cn_id,NULL,NULL
+  );
+
+  v_new_outstanding := greatest(0, coalesce(v_invoice.outstanding_amount,0) - v_cn.amount);
+  v_new_base_outstanding := greatest(0, coalesce(v_invoice.base_outstanding_amount,0) - (v_cn.amount * coalesce(v_invoice.exchange_rate,1)));
+  v_new_status := CASE WHEN v_new_outstanding <= 0.01 THEN 'CREDITED' ELSE v_invoice.status END;
+
+  UPDATE public.invoices
+  SET outstanding_amount=v_new_outstanding,
+      base_outstanding_amount=v_new_base_outstanding,
+      status=v_new_status
+  WHERE id=v_invoice.id AND organization_id=v_org;
+
+  UPDATE finance.credit_notes
+  SET status='POSTED', journal_entry_id=v_journal_id, posted_by=auth.uid(), posted_at=now(), updated_at=now()
+  WHERE id=p_cn_id AND organization_id=v_org AND status='APPROVED';
+
+  IF NOT FOUND THEN RAISE EXCEPTION 'Credit note status update failed'; END IF;
+
+  SELECT reference INTO v_reference FROM finance.journal_entries WHERE id=v_journal_id;
+  RETURN jsonb_build_object('journal_id',v_journal_id,'reference',v_reference,'outstanding_amount',v_new_outstanding);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_credit_note_atomic"("p_cn_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_depreciation_for_period"("p_period_id" "uuid", "p_created_by" "uuid") RETURNS integer
@@ -4197,6 +4582,100 @@ ALTER FUNCTION "finance"."post_invoice_atomic"("p_invoice_id" "uuid", "p_period_
 
 COMMENT ON FUNCTION "finance"."post_invoice_atomic"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") IS 'FND-FIN-001 fix: atomic replacement for the previous post_journal_entry-then-separate-UPDATE two-step in src/app/api/finance/post-invoice/route.ts. Creates the journal via finance.post_journal_entry() and links journal_entry_id/period_id on the invoice in the same DB transaction.';
 
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_invoice_refund_atomic"("p_refund_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_refund record;
+  v_invoice record;
+  v_cash uuid;
+  v_revenue uuid;
+  v_period uuid;
+  v_journal_id uuid;
+  v_reference text;
+  v_new_outstanding numeric(18,2);
+  v_new_base_outstanding numeric(18,2);
+  v_new_status text;
+  v_lines jsonb;
+BEGIN
+  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+
+  SELECT * INTO v_refund
+  FROM finance.invoice_refunds
+  WHERE id=p_refund_id AND organization_id=v_org
+  FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Refund not found or access denied'; END IF;
+  IF v_refund.status <> 'APPROVED' THEN RAISE EXCEPTION 'Only APPROVED refunds can be posted'; END IF;
+
+  SELECT id,total_amount,outstanding_amount,base_outstanding_amount,currency,exchange_rate,amount_paid,status,organization_id
+    INTO v_invoice
+  FROM public.invoices
+  WHERE id=v_refund.invoice_id AND organization_id=v_org
+  FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Linked invoice not found or access denied'; END IF;
+  IF v_refund.amount > coalesce(v_invoice.amount_paid,0) + 0.01 THEN
+    RAISE EXCEPTION 'Refund amount % exceeds amount already paid %',v_refund.amount,v_invoice.amount_paid;
+  END IF;
+
+  SELECT id INTO v_period
+  FROM finance.accounting_periods
+  WHERE organization_id=v_org AND status='OPEN'
+  ORDER BY start_date DESC LIMIT 1;
+  IF v_period IS NULL THEN RAISE EXCEPTION 'No OPEN accounting period found'; END IF;
+
+  SELECT linked_ledger_account_id INTO v_cash
+  FROM finance.financial_accounts
+  WHERE id=v_refund.financial_account_id AND organization_id=v_org AND is_active=true;
+  IF v_cash IS NULL THEN RAISE EXCEPTION 'Refund financial account is missing, inactive, or not linked to a ledger account'; END IF;
+
+  SELECT id INTO v_revenue FROM finance.chart_of_accounts
+  WHERE code='4110' AND account_type='REVENUE' AND is_active=true AND organization_id=v_org LIMIT 1;
+  IF v_revenue IS NULL THEN RAISE EXCEPTION 'Revenue account 4110 is not configured for this organization'; END IF;
+
+  IF EXISTS (SELECT 1 FROM finance.journal_entries WHERE source_type='INVOICE_REFUND' AND source_id=p_refund_id AND organization_id=v_org) THEN
+    RAISE EXCEPTION 'Refund is already posted';
+  END IF;
+
+  v_lines := jsonb_build_array(
+    jsonb_build_object('account_id',v_revenue,'debit_amount',v_refund.amount,'credit_amount',0,'description','Refund: '||v_refund.refund_number),
+    jsonb_build_object('account_id',v_cash,'debit_amount',0,'credit_amount',v_refund.amount,'description','Cash refund: '||v_refund.refund_number)
+  );
+
+  v_journal_id := finance.post_journal_entry(
+    'Invoice refund '||v_refund.refund_number,
+    current_date,v_period,v_lines,v_refund.currency,coalesce(v_refund.exchange_rate,1),'INVOICE_REFUND',p_refund_id,NULL,NULL
+  );
+
+  -- Do not rewrite invoice total_amount. The subledger balance is adjusted
+  -- through outstanding_amount only, preserving the original billed amount.
+  v_new_outstanding := greatest(0,coalesce(v_invoice.outstanding_amount,0)-v_refund.amount);
+  v_new_base_outstanding := greatest(0,coalesce(v_invoice.base_outstanding_amount,0)-(v_refund.amount*coalesce(v_invoice.exchange_rate,1)));
+  v_new_status := CASE WHEN v_new_outstanding <= 0.01 THEN 'REFUNDED' ELSE v_invoice.status END;
+
+  UPDATE public.invoices
+  SET outstanding_amount=v_new_outstanding,
+      base_outstanding_amount=v_new_base_outstanding,
+      status=v_new_status
+  WHERE id=v_invoice.id AND organization_id=v_org;
+
+  UPDATE finance.invoice_refunds
+  SET status='POSTED',journal_entry_id=v_journal_id,posted_at=now(),updated_at=now()
+  WHERE id=p_refund_id AND organization_id=v_org AND status='APPROVED';
+  IF NOT FOUND THEN RAISE EXCEPTION 'Refund status update failed'; END IF;
+
+  SELECT reference INTO v_reference FROM finance.journal_entries WHERE id=v_journal_id;
+  RETURN jsonb_build_object('journal_id',v_journal_id,'reference',v_reference,'outstanding_amount',v_new_outstanding);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_invoice_refund_atomic"("p_refund_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_journal_entry"("p_description" "text", "p_transaction_date" "date", "p_period_id" "uuid", "p_lines" "jsonb", "p_currency" "text" DEFAULT 'PKR'::"text", "p_exchange_rate" numeric DEFAULT 1.0000, "p_source_type" "text" DEFAULT 'MANUAL'::"text", "p_source_id" "uuid" DEFAULT NULL::"uuid", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_department_id" "uuid" DEFAULT NULL::"uuid") RETURNS "uuid"
@@ -5325,6 +5804,66 @@ END;
 ALTER FUNCTION "finance"."reset_sequence"("p_type" "text", "p_fy_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."reverse_credit_note_atomic"("p_credit_note_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_cn record;
+  v_journal_id uuid;
+  v_reversal_id uuid;
+BEGIN
+  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+  IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+    RAISE EXCEPTION 'Reversal reason is mandatory';
+  END IF;
+
+  SELECT id, status, organization_id, invoice_id, amount
+    INTO v_cn
+  FROM finance.credit_notes
+  WHERE id = p_credit_note_id AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND OR v_cn.status <> 'POSTED' THEN
+    RAISE EXCEPTION 'Posted credit note not found or access denied';
+  END IF;
+
+  SELECT id INTO v_journal_id
+  FROM finance.journal_entries
+  WHERE source_type = 'CREDIT_NOTE'
+    AND source_id = p_credit_note_id
+    AND organization_id = v_org
+    AND status = 'POSTED'
+    AND reversal_of_id IS NULL
+  ORDER BY posted_at DESC NULLS LAST, created_at DESC
+  LIMIT 1
+  FOR UPDATE;
+
+  IF v_journal_id IS NULL THEN
+    RAISE EXCEPTION 'Posted credit note has no original journal entry';
+  END IF;
+
+  v_reversal_id := finance.reverse_journal_entry(v_journal_id, p_reversal_date, p_reason);
+
+  UPDATE finance.credit_notes
+  SET status = 'REVERSED', updated_at = now()
+  WHERE id = p_credit_note_id AND organization_id = v_org AND status = 'POSTED';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Credit note status update failed';
+  END IF;
+
+  RETURN v_reversal_id;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."reverse_credit_note_atomic"("p_credit_note_id" "uuid", "p_reversal_date" "date", "p_reason" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."reverse_expense_atomic"("p_expense_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
@@ -5524,6 +6063,66 @@ ALTER FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid",
 
 COMMENT ON FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") IS 'Confirmed audit fix: atomic payment reversal across GL, receipt, allocations and invoice balances.';
 
+
+
+CREATE OR REPLACE FUNCTION "finance"."reverse_vendor_bill_atomic"("p_vendor_bill_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_bill record;
+  v_journal_id uuid;
+  v_reversal_id uuid;
+BEGIN
+  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Access denied';
+  END IF;
+  IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+    RAISE EXCEPTION 'Reversal reason is mandatory';
+  END IF;
+
+  SELECT id, status, bill_number, organization_id
+    INTO v_bill
+  FROM finance.vendor_bills
+  WHERE id = p_vendor_bill_id AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND OR v_bill.status <> 'POSTED' THEN
+    RAISE EXCEPTION 'Posted vendor bill not found or access denied';
+  END IF;
+
+  SELECT id INTO v_journal_id
+  FROM finance.journal_entries
+  WHERE source_type = 'VENDOR_BILL'
+    AND source_id = p_vendor_bill_id
+    AND organization_id = v_org
+    AND status = 'POSTED'
+    AND reversal_of_id IS NULL
+  ORDER BY posted_at DESC NULLS LAST, created_at DESC
+  LIMIT 1
+  FOR UPDATE;
+
+  IF v_journal_id IS NULL THEN
+    RAISE EXCEPTION 'Posted vendor bill has no original journal entry';
+  END IF;
+
+  v_reversal_id := finance.reverse_journal_entry(v_journal_id, p_reversal_date, p_reason);
+
+  UPDATE finance.vendor_bills
+  SET status = 'REVERSED', updated_at = now()
+  WHERE id = p_vendor_bill_id AND organization_id = v_org AND status = 'POSTED';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Vendor bill status update failed';
+  END IF;
+
+  RETURN v_reversal_id;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."reverse_vendor_bill_atomic"("p_vendor_bill_id" "uuid", "p_reversal_date" "date", "p_reason" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."snapshot_tax_rule_set"() RETURNS "trigger"
@@ -6732,25 +7331,57 @@ ALTER FUNCTION "public"."get_all_system_users"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_my_permissions"() RETURNS TABLE("permission_code" "text", "permission_name" "text", "module" "text", "data_scope" "text")
-    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public'
-    AS $$ BEGIN
-  RETURN QUERY
-  SELECT DISTINCT
-    p.code AS permission_code,
-    p.name AS permission_name,
-    p.module,
-    rp.data_scope
-  FROM public.user_roles ur
-  JOIN public.role_permissions rp ON rp.role_id = ur.role_id
-  JOIN public.permissions p ON p.id = rp.permission_id
-  WHERE ur.user_id = auth.uid()
-    AND ur.is_active = true
-    AND (ur.effective_to IS NULL OR ur.effective_to >= CURRENT_DATE)
-    AND rp.effective_from <= CURRENT_DATE
-    AND (rp.effective_to IS NULL OR rp.effective_to >= CURRENT_DATE)
-  ORDER BY p.module, p.code;
-END;
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'core'
+    AS $$
+  WITH role_grants AS (
+    SELECT p.code, p.name, p.module, rp.data_scope,
+           10 AS priority, rp.effective_from
+    FROM core.user_roles ur
+    JOIN core.role_permissions rp ON rp.role_id = ur.role_id
+    JOIN core.permissions p ON p.id = rp.permission_id
+    WHERE ur.user_id = auth.uid()
+      AND ur.is_active = true
+      AND CURRENT_DATE >= ur.effective_from
+      AND (ur.effective_to IS NULL OR ur.effective_to >= CURRENT_DATE)
+      AND CURRENT_DATE >= rp.effective_from
+      AND (rp.effective_to IS NULL OR rp.effective_to >= CURRENT_DATE)
+  ),
+  allow_overrides AS (
+    SELECT p.code, p.name, p.module, upo.data_scope,
+           20 AS priority, upo.effective_from
+    FROM core.user_permission_overrides upo
+    JOIN core.permissions p ON p.id = upo.permission_id
+    JOIN public.profiles pr ON pr.user_id = upo.user_id
+    WHERE upo.user_id = auth.uid()
+      AND upo.override_type = 'ALLOW'
+      AND CURRENT_DATE >= upo.effective_from
+      AND (upo.effective_to IS NULL OR upo.effective_to >= CURRENT_DATE)
+      AND pr.organization_id = core.current_user_org_id()
+  ),
+  effective AS (
+    SELECT DISTINCT ON (code)
+      code, name, module, data_scope
+    FROM (
+      SELECT * FROM role_grants
+      UNION ALL
+      SELECT * FROM allow_overrides
+    ) grants
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM core.user_permission_overrides deny
+      JOIN core.permissions dp ON dp.id = deny.permission_id
+      WHERE deny.user_id = auth.uid()
+        AND deny.override_type = 'DENY'
+        AND dp.code = grants.code
+        AND CURRENT_DATE >= deny.effective_from
+        AND (deny.effective_to IS NULL OR deny.effective_to >= CURRENT_DATE)
+    )
+    ORDER BY code, priority DESC, effective_from DESC
+  )
+  SELECT code AS permission_code, name AS permission_name, module, data_scope
+  FROM effective
+  ORDER BY module, code;
 $$;
 
 
@@ -8839,7 +9470,7 @@ CREATE TABLE IF NOT EXISTS "core"."approval_limits" (
     CONSTRAINT "approval_limits_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "approval_limits_role_or_user_chk" CHECK (((("role_id" IS NOT NULL) AND ("user_id" IS NULL)) OR (("role_id" IS NULL) AND ("user_id" IS NOT NULL)))),
     CONSTRAINT "approval_limits_scope_chk" CHECK (("scope" = ANY (ARRAY['OWN'::"text", 'PROJECT'::"text", 'DEPARTMENT'::"text", 'ALL'::"text"]))),
-    CONSTRAINT "approval_limits_transaction_type_chk" CHECK (("transaction_type" = ANY (ARRAY['EXPENSE'::"text", 'PURCHASE'::"text", 'VENDOR_PAYMENT'::"text", 'BUDGET_REVISION'::"text", 'JOURNAL_ENTRY'::"text", 'BANK_TRANSFER'::"text", 'SALARY_PAYROLL'::"text", 'OWNER_DISTRIBUTION'::"text", 'PERIOD_REOPEN'::"text", 'INVOICE_CREDIT_NOTE'::"text", 'VENDOR_BILL'::"text", 'RESERVE_ALLOCATION'::"text"])))
+    CONSTRAINT "approval_limits_transaction_type_chk" CHECK (("transaction_type" = ANY (ARRAY['EXPENSE'::"text", 'INCOME'::"text", 'INVOICE'::"text", 'PURCHASE'::"text", 'VENDOR_PAYMENT'::"text", 'VENDOR_BILL'::"text", 'BUDGET_REVISION'::"text", 'JOURNAL_ENTRY'::"text", 'BANK_TRANSFER'::"text", 'SALARY_PAYROLL'::"text", 'OWNER_DISTRIBUTION'::"text", 'PERIOD_REOPEN'::"text", 'INVOICE_CREDIT_NOTE'::"text", 'RESERVE_ALLOCATION'::"text"])))
 );
 
 
@@ -9366,6 +9997,54 @@ CREATE TABLE IF NOT EXISTS "finance"."asset_categories" (
 
 
 ALTER TABLE "finance"."asset_categories" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."asset_impairments" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "asset_id" "uuid" NOT NULL,
+    "adjustment_date" "date" NOT NULL,
+    "amount" numeric(18,2) NOT NULL,
+    "reason" "text" NOT NULL,
+    "previous_accumulated_depreciation" numeric(18,2) NOT NULL,
+    "previous_net_book_value" numeric(18,2) NOT NULL,
+    "new_accumulated_depreciation" numeric(18,2) NOT NULL,
+    "new_net_book_value" numeric(18,2) NOT NULL,
+    "journal_entry_id" "uuid",
+    "created_by" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "asset_impairments_amount_check" CHECK (("amount" > (0)::numeric)),
+    CONSTRAINT "asset_impairments_reason_check" CHECK (("btrim"("reason") <> ''::"text"))
+);
+
+
+ALTER TABLE "finance"."asset_impairments" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."asset_transfers" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "asset_id" "uuid" NOT NULL,
+    "transfer_date" "date" NOT NULL,
+    "from_location" character varying(200),
+    "to_location" character varying(200),
+    "from_assigned_user_id" "uuid",
+    "to_assigned_user_id" "uuid",
+    "from_project_id" "uuid",
+    "to_project_id" "uuid",
+    "from_department_id" "uuid",
+    "to_department_id" "uuid",
+    "from_cost_center_id" "uuid",
+    "to_cost_center_id" "uuid",
+    "reason" "text" NOT NULL,
+    "journal_entry_id" "uuid",
+    "created_by" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "asset_transfers_reason_check" CHECK (("btrim"("reason") <> ''::"text"))
+);
+
+
+ALTER TABLE "finance"."asset_transfers" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "finance"."asset_verification_lines" (
@@ -12183,37 +12862,6 @@ CREATE OR REPLACE VIEW "public"."postable_accounts" WITH ("security_invoker"='tr
 ALTER VIEW "public"."postable_accounts" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."profiles" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "user_id" "uuid" NOT NULL,
-    "full_name" "text" DEFAULT ''::"text",
-    "role" "text" DEFAULT 'VIEWER'::"text" NOT NULL,
-    "created_at" timestamp with time zone DEFAULT "now"(),
-    "email" "text" DEFAULT ''::"text",
-    "can_create_project" boolean DEFAULT false,
-    "can_delete_project" boolean DEFAULT false,
-    "can_add_income" boolean DEFAULT false,
-    "can_add_expense" boolean DEFAULT false,
-    "can_create_invoice" boolean DEFAULT false,
-    "can_delete_invoice" boolean DEFAULT false,
-    "can_edit_project" boolean DEFAULT false,
-    "can_edit_income" boolean DEFAULT false,
-    "can_edit_expense" boolean DEFAULT false,
-    "can_edit_invoice" boolean DEFAULT false,
-    "can_delete_income" boolean DEFAULT false,
-    "can_delete_expense" boolean DEFAULT false,
-    "can_manage_budgets" boolean DEFAULT false,
-    "mfa_required" boolean DEFAULT false NOT NULL,
-    "organization_id" "uuid",
-    "department_id" "uuid",
-    "manager_id" "uuid",
-    CONSTRAINT "profiles_role_check" CHECK (("role" = ANY (ARRAY['CEO'::"text", 'FINANCE_HEAD'::"text", 'ACCOUNTANT'::"text", 'PROJECT_MANAGER'::"text", 'EMPLOYEE'::"text", 'VIEWER'::"text", 'Admin'::"text", 'AUDITOR'::"text", 'HOD'::"text", 'TECHNICAL_ADMIN'::"text"])))
-);
-
-
-ALTER TABLE "public"."profiles" OWNER TO "postgres";
-
-
 CREATE TABLE IF NOT EXISTS "public"."projects" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid",
@@ -13033,6 +13681,35 @@ CREATE OR REPLACE VIEW "reporting"."cash_flow" WITH ("security_invoker"='true') 
 
 
 ALTER VIEW "reporting"."cash_flow" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "reporting"."cash_flow_forecasts" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "forecast_date" "date" NOT NULL,
+    "horizon_days" integer NOT NULL,
+    "scenario" "text" NOT NULL,
+    "opening_cash" numeric(20,4) DEFAULT 0 NOT NULL,
+    "expected_inflows" numeric(20,4) DEFAULT 0 NOT NULL,
+    "expected_outflows" numeric(20,4) DEFAULT 0 NOT NULL,
+    "ending_cash" numeric(20,4) DEFAULT 0 NOT NULL,
+    "assumptions" "jsonb" DEFAULT '{}'::"jsonb" NOT NULL,
+    "confidence" numeric(5,4),
+    "calculated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "calculated_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "cash_flow_forecasts_confidence_check" CHECK ((("confidence" IS NULL) OR (("confidence" >= (0)::numeric) AND ("confidence" <= (1)::numeric)))),
+    CONSTRAINT "cash_flow_forecasts_horizon_days_check" CHECK (("horizon_days" = ANY (ARRAY[30, 60, 90]))),
+    CONSTRAINT "cash_flow_forecasts_scenario_check" CHECK (("scenario" = ANY (ARRAY['BASE'::"text", 'CONSERVATIVE'::"text", 'OPTIMISTIC'::"text"])))
+);
+
+
+ALTER TABLE "reporting"."cash_flow_forecasts" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "reporting"."cash_flow_forecasts" IS 'Permission-scoped deterministic forecast scenarios. Forecasts are separate from actual reporting data per Spec §13.2/§13.3 and include assumptions/confidence metadata.';
+
 
 
 CREATE OR REPLACE VIEW "reporting"."changes_in_equity" WITH ("security_invoker"='true') AS
@@ -13856,6 +14533,16 @@ ALTER TABLE ONLY "finance"."asset_categories"
 
 
 
+ALTER TABLE ONLY "finance"."asset_impairments"
+    ADD CONSTRAINT "asset_impairments_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "finance"."asset_transfers"
+    ADD CONSTRAINT "asset_transfers_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "finance"."asset_verification_lines"
     ADD CONSTRAINT "asset_verification_lines_pkey" PRIMARY KEY ("id");
 
@@ -14536,6 +15223,16 @@ ALTER TABLE ONLY "public"."user_mfa"
 
 
 
+ALTER TABLE ONLY "reporting"."cash_flow_forecasts"
+    ADD CONSTRAINT "cash_flow_forecasts_organization_id_forecast_date_horizon_d_key" UNIQUE ("organization_id", "forecast_date", "horizon_days", "scenario");
+
+
+
+ALTER TABLE ONLY "reporting"."cash_flow_forecasts"
+    ADD CONSTRAINT "cash_flow_forecasts_pkey" PRIMARY KEY ("id");
+
+
+
 CREATE INDEX "idx_ai_conversations_org" ON "ai"."ai_conversations" USING "btree" ("organization_id", "created_at" DESC);
 
 
@@ -14785,6 +15482,14 @@ CREATE UNIQUE INDEX "uq_shared_people_auth_user" ON "core"."shared_people" USING
 
 
 CREATE UNIQUE INDEX "uq_upo_active_user_permission" ON "core"."user_permission_overrides" USING "btree" ("user_id", "permission_id") WHERE ("effective_to" IS NULL);
+
+
+
+CREATE INDEX "asset_impairments_asset_idx" ON "finance"."asset_impairments" USING "btree" ("asset_id", "adjustment_date");
+
+
+
+CREATE INDEX "asset_transfers_asset_idx" ON "finance"."asset_transfers" USING "btree" ("asset_id", "transfer_date");
 
 
 
@@ -15697,6 +16402,10 @@ CREATE UNIQUE INDEX "projects_org_project_code_uq" ON "public"."projects" USING 
 
 
 CREATE UNIQUE INDEX "uq_incomes_invoice_posted" ON "public"."incomes" USING "btree" ("invoice_id") WHERE (("invoice_id" IS NOT NULL) AND ("status" = 'POSTED'::"text"));
+
+
+
+CREATE INDEX "cash_flow_forecasts_org_date_idx" ON "reporting"."cash_flow_forecasts" USING "btree" ("organization_id", "forecast_date" DESC, "horizon_days", "scenario");
 
 
 
@@ -16879,6 +17588,26 @@ ALTER TABLE ONLY "finance"."asset_categories"
 
 ALTER TABLE ONLY "finance"."asset_categories"
     ADD CONSTRAINT "asset_categories_linked_expense_account_id_fkey" FOREIGN KEY ("linked_expense_account_id") REFERENCES "finance"."chart_of_accounts"("id");
+
+
+
+ALTER TABLE ONLY "finance"."asset_impairments"
+    ADD CONSTRAINT "asset_impairments_asset_id_fkey" FOREIGN KEY ("asset_id") REFERENCES "finance"."fixed_assets"("id");
+
+
+
+ALTER TABLE ONLY "finance"."asset_impairments"
+    ADD CONSTRAINT "asset_impairments_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
+
+
+
+ALTER TABLE ONLY "finance"."asset_transfers"
+    ADD CONSTRAINT "asset_transfers_asset_id_fkey" FOREIGN KEY ("asset_id") REFERENCES "finance"."fixed_assets"("id");
+
+
+
+ALTER TABLE ONLY "finance"."asset_transfers"
+    ADD CONSTRAINT "asset_transfers_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id");
 
 
 
@@ -18362,6 +19091,16 @@ ALTER TABLE ONLY "public"."user_mfa"
 
 
 
+ALTER TABLE ONLY "reporting"."cash_flow_forecasts"
+    ADD CONSTRAINT "cash_flow_forecasts_calculated_by_fkey" FOREIGN KEY ("calculated_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "reporting"."cash_flow_forecasts"
+    ADD CONSTRAINT "cash_flow_forecasts_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE CASCADE;
+
+
+
 CREATE POLICY "admin_write_model_registry" ON "ai"."ai_model_registry" USING ((EXISTS ( SELECT 1
    FROM ("core"."user_roles" "ur"
      JOIN "core"."roles" "r" ON (("r"."id" = "ur"."role_id")))
@@ -18953,6 +19692,28 @@ CREATE POLICY "asset_categories_select_org_scoped" ON "finance"."asset_categorie
 
 
 CREATE POLICY "asset_categories_update_org_scoped" ON "finance"."asset_categories" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id"))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+ALTER TABLE "finance"."asset_impairments" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "asset_impairments_insert_org" ON "finance"."asset_impairments" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+CREATE POLICY "asset_impairments_select_org" ON "finance"."asset_impairments" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+ALTER TABLE "finance"."asset_transfers" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "asset_transfers_insert_org" ON "finance"."asset_transfers" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+CREATE POLICY "asset_transfers_select_org" ON "finance"."asset_transfers" FOR SELECT USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
 
@@ -20614,6 +21375,21 @@ CREATE POLICY "subscriptions_update_org_scoped" ON "public"."subscriptions" FOR 
 ALTER TABLE "public"."user_mfa" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "reporting"."cash_flow_forecasts" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "cash_flow_forecasts_insert_org" ON "reporting"."cash_flow_forecasts" FOR INSERT TO "authenticated" WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "cash_flow_forecasts_select_org" ON "reporting"."cash_flow_forecasts" FOR SELECT TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"()));
+
+
+
+CREATE POLICY "cash_flow_forecasts_update_org" ON "reporting"."cash_flow_forecasts" FOR UPDATE TO "authenticated" USING (("organization_id" = "core"."current_user_org_id"())) WITH CHECK (("organization_id" = "core"."current_user_org_id"()));
+
+
+
 
 
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
@@ -20663,7 +21439,6 @@ GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
 
 
-
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
 GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
 
@@ -20698,6 +21473,19 @@ GRANT ALL ON FUNCTION "audit"."log_security_event"("p_user_id" "uuid", "p_user_e
 
 
 
+GRANT ALL ON FUNCTION "core"."admin_list_users"() TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "public"."profiles" TO "authenticated";
+GRANT ALL ON TABLE "public"."profiles" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "core"."admin_update_user_profile"("p_user_id" "uuid", "p_department_id" "uuid", "p_manager_id" "uuid", "p_employment_status" "text", "p_clear_department" boolean, "p_clear_manager" boolean) TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "core"."current_user_org_config_id"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."current_user_org_config_id"() TO "authenticated";
 GRANT ALL ON FUNCTION "core"."current_user_org_config_id"() TO "service_role";
@@ -20707,6 +21495,10 @@ GRANT ALL ON FUNCTION "core"."current_user_org_config_id"() TO "service_role";
 REVOKE ALL ON FUNCTION "core"."current_user_org_id"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."current_user_org_id"() TO "authenticated";
 GRANT ALL ON FUNCTION "core"."current_user_org_id"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permission_code" "text") TO "authenticated";
 
 
 
@@ -20753,6 +21545,15 @@ GRANT ALL ON FUNCTION "finance"."close_period"("p_period_id" "uuid", "p_closed_b
 
 
 
+GRANT ALL ON TABLE "finance"."fixed_assets" TO "authenticated";
+GRANT ALL ON TABLE "finance"."fixed_assets" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "finance"."create_fixed_asset"("p_input" "jsonb", "p_created_by" "uuid") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") TO "authenticated";
 
@@ -20772,6 +21573,10 @@ GRANT ALL ON FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" 
 
 
 GRANT ALL ON FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."generate_next_asset_code"() TO "authenticated";
 
 
 
@@ -20809,13 +21614,25 @@ GRANT ALL ON FUNCTION "finance"."mark_paid_invoices"() TO "authenticated";
 
 
 
-GRANT ALL ON TABLE "finance"."fixed_assets" TO "authenticated";
-GRANT ALL ON TABLE "finance"."fixed_assets" TO "service_role";
+GRANT ALL ON FUNCTION "finance"."post_asset_disposal"("p_asset_id" "uuid", "p_disposal_date" "date", "p_disposal_value" numeric, "p_disposal_currency" "text", "p_disposal_method" "text") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."post_asset_impairment"("p_asset_id" "uuid", "p_adjustment_date" "date", "p_amount" numeric, "p_reason" "text", "p_posted_by" "uuid") TO "authenticated";
+
+
+
+GRANT ALL ON FUNCTION "finance"."post_asset_transfer"("p_asset_id" "uuid", "p_transfer_date" "date", "p_location" character varying, "p_assigned_user_id" "uuid", "p_project_id" "uuid", "p_department_id" "uuid", "p_cost_center_id" "uuid", "p_reason" "text", "p_posted_by" "uuid") TO "authenticated";
 
 
 
 REVOKE ALL ON FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_credit_note_atomic"("p_cn_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_credit_note_atomic"("p_cn_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") TO "authenticated";
 
 
 
@@ -20840,6 +21657,11 @@ GRANT ALL ON FUNCTION "finance"."post_income_atomic"("p_income_id" "uuid", "p_pe
 
 REVOKE ALL ON FUNCTION "finance"."post_invoice_atomic"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."post_invoice_atomic"("p_invoice_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_invoice_refund_atomic"("p_refund_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_invoice_refund_atomic"("p_refund_id" "uuid") TO "authenticated";
 
 
 
@@ -20871,6 +21693,11 @@ REVOKE ALL ON FUNCTION "finance"."prevent_posted_capital_transaction_edit"() FRO
 
 
 
+REVOKE ALL ON FUNCTION "finance"."reverse_credit_note_atomic"("p_credit_note_id" "uuid", "p_reversal_date" "date", "p_reason" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."reverse_credit_note_atomic"("p_credit_note_id" "uuid", "p_reversal_date" "date", "p_reason" "text") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "finance"."reverse_expense_atomic"("p_expense_id" "uuid", "p_reversal_date" "date", "p_reason" "text") TO "authenticated";
 
 
@@ -20884,6 +21711,11 @@ GRANT ALL ON FUNCTION "finance"."reverse_journal_entry"("p_journal_id" "uuid", "
 
 
 GRANT ALL ON FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."reverse_vendor_bill_atomic"("p_vendor_bill_id" "uuid", "p_reversal_date" "date", "p_reason" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."reverse_vendor_bill_atomic"("p_vendor_bill_id" "uuid", "p_reversal_date" "date", "p_reason" "text") TO "authenticated";
 
 
 
@@ -21314,6 +22146,16 @@ GRANT ALL ON TABLE "finance"."accounting_periods" TO "service_role";
 
 GRANT ALL ON TABLE "finance"."asset_categories" TO "authenticated";
 GRANT ALL ON TABLE "finance"."asset_categories" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."asset_impairments" TO "authenticated";
+GRANT ALL ON TABLE "finance"."asset_impairments" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "finance"."asset_transfers" TO "authenticated";
+GRANT ALL ON TABLE "finance"."asset_transfers" TO "service_role";
 
 
 
@@ -21801,11 +22643,6 @@ GRANT ALL ON TABLE "public"."postable_accounts" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."profiles" TO "authenticated";
-GRANT ALL ON TABLE "public"."profiles" TO "service_role";
-
-
-
 GRANT ALL ON TABLE "public"."projects" TO "authenticated";
 GRANT ALL ON TABLE "public"."projects" TO "service_role";
 
@@ -21948,6 +22785,11 @@ GRANT ALL ON TABLE "reporting"."cash_flow" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "reporting"."cash_flow_forecasts" TO "authenticated";
+GRANT ALL ON TABLE "reporting"."cash_flow_forecasts" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "reporting"."changes_in_equity" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."changes_in_equity" TO "service_role";
 
@@ -22027,11 +22869,6 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
-
-
-
-
-
 
 
 

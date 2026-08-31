@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Download, FileSpreadsheet, FileText, Lock, ChevronDown } from "lucide-react";
 import { logExportEvent } from "@/lib/logAction";
+import { usePermissions } from "@/context/PermissionContext";
 
 export interface ExportManagerProps {
   /** Report identifier for audit logging */
@@ -25,8 +26,10 @@ export default function ExportManager({
   getCsvData,
   getPdfData,
   activeFilters = {},
-  hasPermission = false,
+  hasPermission: explicitPermission,
 }: ExportManagerProps) {
+  const { hasPermission: userHasPermission, isLoading: permissionsLoading } = usePermissions();
+  const hasPermission = explicitPermission ?? userHasPermission("REPORT_EXPORT");
   const [open, setOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
 
@@ -82,7 +85,7 @@ export default function ExportManager({
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        disabled={!hasPermission}
+        disabled={permissionsLoading || !hasPermission}
         className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <Download className="w-4 h-4" />

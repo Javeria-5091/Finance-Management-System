@@ -56,7 +56,7 @@ export default function LoginPage() {
 
       const mfaRequiredRoles = [
         'CEO', 'FINANCE_HEAD', 'ACCOUNTANT', 'HOD',
-        'PROJECT_MANAGER', 'TECHNICAL_ADMIN',
+        'PROJECT_MANAGER', 'TECHNICAL_ADMIN', 'AUDITOR',
       ];
 
       if (profile?.role && mfaRequiredRoles.includes(profile.role)) {

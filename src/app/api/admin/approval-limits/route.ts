@@ -11,13 +11,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
+import { APPROVAL_TRANSACTION_TYPES, APPROVAL_SCOPES } from '@/lib/approval-limits';
 
-const TRANSACTION_TYPES = [
-  'EXPENSE', 'PURCHASE', 'VENDOR_PAYMENT', 'BUDGET_REVISION', 'JOURNAL_ENTRY',
-  'BANK_TRANSFER', 'SALARY_PAYROLL', 'OWNER_DISTRIBUTION', 'PERIOD_REOPEN',
-  'INVOICE_CREDIT_NOTE', 'VENDOR_BILL', 'RESERVE_ALLOCATION',
-];
-const SCOPES = ['OWN', 'PROJECT', 'DEPARTMENT', 'ALL'];
+const TRANSACTION_TYPES = APPROVAL_TRANSACTION_TYPES;
+const SCOPES = APPROVAL_SCOPES;
 
 // ─── GET: list approval limits for the org ───
 export async function GET(req: NextRequest) {

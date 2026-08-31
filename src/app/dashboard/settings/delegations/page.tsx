@@ -132,10 +132,6 @@ export default function DelegationsPage() {
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
             <UserCog size={22} className="text-indigo-500" /> Approval Delegations
           </h2>
-          <p className="text-gray-500 text-sm">
-            Time-limited delegation of specific permissions from one user to another, e.g. while someone
-            is on leave (spec 5.1/7.1). Every delegation must have an end date and a reason.
-          </p>
         </div>
         {canManage && (
           <button onClick={openCreateModal} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-medium">

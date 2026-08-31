@@ -1,69 +1,84 @@
 // =============================================================================
-// AI Feedback API — Spec 9.9 (ai_feedback)
-// Records user thumbs-up/down on AI responses for quality evaluation (Spec 9.11)
+// AI Feedback API — Spec §9.9
+// Records human feedback against an AI message or tool call.
 //
-// ✅ FIX (Gap 5 — auth inconsistency): switched from a local
-// createServerClient + getSession() (cookie-only) to getAuthSupabase()
-// (cookie OR Bearer token), matching chat/route.ts.
+// The ai.ai_feedback table contains message_id and tool_call_id references;
+// it does NOT contain conversation_id. Conversation ownership is already
+// represented by ai_messages -> ai_conversations and enforced through the
+// message relationship/RLS. Therefore conversation_id is intentionally not
+// written here.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { getAuthSupabase } from '@/lib/api-auth';
+
+const feedbackSchema = z.object({
+  message_id: z.string().uuid().nullable().optional(),
+  tool_call_id: z.string().uuid().nullable().optional(),
+  feedback_type: z.enum(['message_rating', 'suggestion_rating', 'correction', 'general']),
+  rating: z.number().int().min(1).max(5).nullable().optional(),
+  correction: z.string().max(10000).nullable().optional(),
+  reason: z.string().max(5000).nullable().optional(),
+}).strict();
 
 export async function POST(req: NextRequest) {
   try {
-    // ─── 1. Auth check (cookie session OR Bearer token) ───
     const { supabase, user, authError } = await getAuthSupabase(req);
     if (authError || !user) {
       return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
     }
 
-    const userId = user.id;
-
-    // ─── 2. Parse body ───
-    const body = await req.json();
-    const { message_id, conversation_id, feedback_type, rating, correction, reason } = body;
-
-    // Validate required fields
-    if (!feedback_type) {
-      return NextResponse.json({ error: 'feedback_type is required' }, { status: 400 });
+    const parsed = feedbackSchema.safeParse(await req.json());
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: 'Invalid feedback payload', details: parsed.error.flatten() },
+        { status: 400 },
+      );
     }
 
-    const validFeedbackTypes = ['message_rating', 'suggestion_rating', 'correction', 'general'];
-    if (!validFeedbackTypes.includes(feedback_type)) {
-      return NextResponse.json({ error: `feedback_type must be one of: ${validFeedbackTypes.join(', ')}` }, { status: 400 });
+    const input = parsed.data;
+
+    if (!input.message_id && !input.tool_call_id) {
+      return NextResponse.json(
+        { error: 'message_id or tool_call_id is required' },
+        { status: 400 },
+      );
     }
 
-    if (rating !== undefined && (rating < 1 || rating > 5)) {
-      return NextResponse.json({ error: 'rating must be between 1 and 5' }, { status: 400 });
-    }
-
-    // ─── 3. Get org_id from profile ───
-    // 'profiles' is in the PUBLIC schema (confirmed) — query unqualified.
-    const { data: profile } = await supabase
+    // Resolve the organization from the authenticated profile. Do not accept
+    // organization_id from the client because feedback must always be scoped
+    // to the authenticated user's organization.
+    const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('organization_id')
-      .eq('user_id', userId)
+      .eq('user_id', user.id)
       .maybeSingle();
 
-    const orgId = profile?.organization_id || '';
+    if (profileError) {
+      console.error('AI Feedback profile lookup error:', profileError.message);
+      return NextResponse.json({ error: 'Unable to determine organization' }, { status: 500 });
+    }
 
-    // ─── 4. Insert feedback (Spec 9.9 — with conversation_id) ───
-    // ai_feedback lives in the 'ai' schema — must use .schema('ai').from('ai_feedback'),
-    // NOT .from('ai.ai_feedback'). The dotted string is not valid schema-qualification
-    // syntax in supabase-js.
+    const organizationId = profile?.organization_id;
+    if (!organizationId) {
+      return NextResponse.json({ error: 'User organization is not configured' }, { status: 403 });
+    }
+
+    // ai.ai_feedback has message_id and tool_call_id columns only. There is
+    // deliberately no conversation_id field here (see schema.sql).
     const { data, error } = await supabase
       .schema('ai')
       .from('ai_feedback')
       .insert({
-        user_id: userId,
-        organization_id: orgId,
-        message_id: message_id || null,
-        conversation_id: conversation_id || null,  // Spec 9.9: FK reference
-        feedback_type,
-        rating: rating || null,
-        correction: correction || null,
-        reason: reason || null,
+        user_id: user.id,
+        organization_id: organizationId,
+        message_id: input.message_id ?? null,
+        tool_call_id: input.tool_call_id ?? null,
+        feedback_type: input.feedback_type,
+        rating: input.rating ?? null,
+        correction: input.correction ?? null,
+        reason: input.reason ?? null,
       })
       .select('id')
       .single();
@@ -73,9 +88,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to save feedback' }, { status: 500 });
     }
 
-    return NextResponse.json({ success: true, id: data?.id });
-  } catch (error: any) {
-    console.error('AI Feedback API error:', error.message);
+    return NextResponse.json({ success: true, id: data.id });
+  } catch (error: unknown) {
+    console.error('AI Feedback API error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

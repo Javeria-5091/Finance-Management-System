@@ -8,6 +8,8 @@ import {
   useAssetKPIs,
   useCapitalizeAsset,
   useDisposeAsset,
+  useImpairAsset,
+  useTransferAsset,
 } from "@/hooks/useFixedAssets";
 import { Plus, Search, Building2, TrendingDown, CheckCircle2, Clock, AlertTriangle, Trash2, Eye } from "lucide-react";
 import { logAction, logAudit } from "@/lib/logAction";
@@ -46,6 +48,39 @@ export default function FixedAssetsPage() {
   const { data: kpis } = useAssetKPIs();
   const capitalizeMut = useCapitalizeAsset();
   const disposeMut = useDisposeAsset();
+  const impairMut = useImpairAsset();
+  const transferMut = useTransferAsset();
+
+  const handleImpair = (asset: FixedAsset) => {
+    const rawAmount = window.prompt(`Impairment amount in PKR (max ${asset.net_book_value}):`);
+    if (rawAmount === null) return;
+    const amount = Number(rawAmount);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > asset.net_book_value) {
+      toast.error("Enter a valid positive amount not exceeding the current NBV");
+      return;
+    }
+    const reason = window.prompt("Reason for impairment/adjustment:");
+    if (!reason?.trim()) return;
+    impairMut.mutate({ id: asset.id, date: new Date().toISOString().slice(0, 10), amount, reason: reason.trim() }, {
+      onSuccess: () => { toast.success("Asset impairment posted"); logAudit.update("fixed_assets", asset.id, "Asset impairment posted"); },
+      onError: (e: Error) => toast.error(e.message),
+    });
+  };
+
+  const handleTransfer = (asset: FixedAsset) => {
+    const location = window.prompt("New asset location:", asset.location || "");
+    if (location === null) return;
+    const reason = window.prompt("Reason for asset transfer:");
+    if (!reason?.trim()) return;
+    transferMut.mutate({
+      id: asset.id, date: new Date().toISOString().slice(0, 10), location: location.trim() || null,
+      assigned_user_id: asset.assigned_user_id || null, project_id: asset.project_id || null,
+      department_id: asset.department_id || null, cost_center_id: asset.cost_center_id || null, reason: reason.trim(),
+    }, {
+      onSuccess: () => { toast.success("Asset transfer posted"); logAudit.update("fixed_assets", asset.id, "Asset transferred"); },
+      onError: (e: Error) => toast.error(e.message),
+    });
+  };
 
  const handleCapitalize = (id: string) => {
     if (!user?.id) return;
@@ -167,8 +202,14 @@ export default function FixedAssetsPage() {
                       </td>
                       <td className={`px-4 py-3 text-xs ${isDark ? "text-gray-400" : "text-gray-500"}`}>{asset.location || "—"}</td>
                       <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
-                        {asset.status === "pending_capitalization" && hasPermission("FIXED_ASSET_CREATE") && (
+                        {asset.status === "pending_capitalization" && hasPermission("FIXED_ASSET_CAPITALIZE") && (
                           <button onClick={() => handleCapitalize(asset.id)} className="text-xs text-blue-500 hover:text-blue-400 mr-2">Capitalize</button>
+                        )}
+                        {['active','fully_depreciated','under_repair'].includes(asset.status) && hasPermission("FIXED_ASSET_UPDATE") && (
+                          <>
+                            <button onClick={() => handleImpair(asset)} className="text-xs text-amber-500 hover:text-amber-400 mr-2">Impair</button>
+                            <button onClick={() => handleTransfer(asset)} className="text-xs text-violet-500 hover:text-violet-400 mr-2">Transfer</button>
+                          </>
                         )}
                         <button className={`text-xs ${isDark ? "text-gray-400 hover:text-gray-200" : "text-gray-500 hover:text-gray-700"}`}>
                           <Eye className="h-3.5 w-3.5 inline" />

@@ -125,7 +125,6 @@ export default function AiChat() {
         headers,
         body: JSON.stringify({
           message_id: msg.id,
-          conversation_id: conversationId,
           feedback_type: 'message_rating',
           rating: feedback === 'up' ? 5 : 1,
         }),
@@ -160,7 +159,6 @@ export default function AiChat() {
         headers,
         body: JSON.stringify({
           messages: allMessages.map(m => ({ role: m.role, content: m.content })),
-          conversation_id: conversationId,
         }),
       });
 
