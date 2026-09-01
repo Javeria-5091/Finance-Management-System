@@ -37,7 +37,7 @@ export default function AgingReportPage() {
     <div className="p-6 max-w-[1600px] mx-auto space-y-5">
       <ReportHeader
         title="Receivables & Payables Aging"
-        subtitle="Outstanding amounts by age bucket — Spec 13.2 AR/AP Reports"
+        subtitle="Outstanding amounts by age bucket —  AR/AP Reports"
         dataAsOf={dataAsOf}
         reconciled={true}
         actions={<ExportManager reportId="aging-reports" reportName="Aging_Report" getCsvData={getCsv} />}
@@ -55,7 +55,7 @@ export default function AgingReportPage() {
       {(highRiskRecv > 0 || highRiskPay > 0) && (
         <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/30 rounded-xl p-4 flex items-center gap-3 text-sm text-red-700 dark:text-red-400">
           <AlertTriangle className="w-5 h-5 flex-shrink-0" />
-          <span><strong>{highRiskRecv + highRiskPay}</strong> items are 90+ days overdue — per Spec 13.2, overdue items require management attention</span>
+          <span><strong>{highRiskRecv + highRiskPay}</strong> items are 90+ days overdue , overdue items require management attention</span>
         </div>
       )}
 

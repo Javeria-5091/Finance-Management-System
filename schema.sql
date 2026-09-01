@@ -1674,6 +1674,99 @@ COMMENT ON FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uu
 
 
 
+CREATE TABLE IF NOT EXISTS "finance"."financial_accounts" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "account_name" "text" NOT NULL,
+    "institution_name" "text" NOT NULL,
+    "institution_type" "text" NOT NULL,
+    "account_type" "text" NOT NULL,
+    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
+    "masked_identifier" "text",
+    "opening_balance" numeric(18,2) DEFAULT 0 NOT NULL,
+    "opening_date" "date",
+    "linked_ledger_account_id" "uuid" NOT NULL,
+    "reconciliation_method" "text" DEFAULT 'MANUAL'::"text" NOT NULL,
+    "responsible_user_id" "uuid",
+    "is_active" boolean DEFAULT true NOT NULL,
+    "is_default" boolean DEFAULT false NOT NULL,
+    "requires_dual_approval" boolean DEFAULT false,
+    "min_dual_approval_amount" numeric(18,2),
+    "notes" "text",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    "deleted_at" timestamp with time zone,
+    "deleted_by" "uuid",
+    "organization_id" "uuid" NOT NULL,
+    "supporting_evidence_reference" "text",
+    CONSTRAINT "financial_accounts_account_type_check" CHECK (("account_type" = ANY (ARRAY['CURRENT'::"text", 'SAVINGS'::"text", 'DIGITAL_WALLET'::"text", 'PLATFORM_BALANCE'::"text", 'PETTY_CASH'::"text", 'CLEARING'::"text"]))),
+    CONSTRAINT "financial_accounts_institution_type_check" CHECK (("institution_type" = ANY (ARRAY['BANK'::"text", 'CASH'::"text", 'WALLET'::"text", 'PLATFORM'::"text", 'PAYMENT_GATEWAY'::"text", 'CARD'::"text", 'CLEARING'::"text"]))),
+    CONSTRAINT "financial_accounts_reconciliation_method_check" CHECK (("reconciliation_method" = ANY (ARRAY['MANUAL'::"text", 'AUTO'::"text", 'IMPORT'::"text"])))
+);
+
+
+ALTER TABLE "finance"."financial_accounts" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "finance"."financial_accounts" IS 'Canonical (spec-aligned) financial accounts table -- has ledger mapping, reconciliation method, dual-approval fields. NOTE: public.financial_accounts is a separate, independently-writable legacy table covering the same entity. See Migration 023 / compliance audit Section 3.2 for the required consolidation decision before further schema changes.';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."approve_financial_account_change"("p_request_id" "uuid", "p_reason" "text" DEFAULT NULL::"text") RETURNS "finance"."financial_accounts"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_req finance.financial_account_change_requests;
+  v_result finance.financial_accounts;
+  v_changes jsonb;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN RAISE EXCEPTION 'Authentication and organization are required'; END IF;
+  IF NOT core.is_finance_head() THEN RAISE EXCEPTION 'Only CEO/Finance Head may approve financial-account changes'; END IF;
+
+  SELECT * INTO v_req FROM finance.financial_account_change_requests
+  WHERE id = p_request_id AND organization_id = v_org FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Change request not found or access denied'; END IF;
+  IF v_req.status <> 'PENDING' THEN RAISE EXCEPTION 'Change request is already %', v_req.status; END IF;
+  IF v_req.requested_by = auth.uid() THEN RAISE EXCEPTION 'Maker-checker: requester cannot approve their own account change'; END IF;
+  IF p_reason IS NOT NULL AND btrim(p_reason) = '' THEN RAISE EXCEPTION 'Approval reason cannot be blank'; END IF;
+
+  v_changes := v_req.requested_changes;
+  UPDATE finance.financial_accounts
+  SET account_name = COALESCE(v_changes->>'account_name', account_name),
+      institution_name = COALESCE(v_changes->>'institution_name', institution_name),
+      institution_type = COALESCE(v_changes->>'institution_type', institution_type),
+      account_type = COALESCE(v_changes->>'account_type', account_type),
+      currency = COALESCE(v_changes->>'currency', currency),
+      masked_identifier = CASE WHEN v_changes ? 'masked_identifier' THEN v_changes->>'masked_identifier' ELSE masked_identifier END,
+      opening_balance = CASE WHEN v_changes ? 'opening_balance' THEN (v_changes->>'opening_balance')::numeric ELSE opening_balance END,
+      opening_date = CASE WHEN v_changes ? 'opening_date' AND nullif(v_changes->>'opening_date','') IS NOT NULL THEN (v_changes->>'opening_date')::date WHEN v_changes ? 'opening_date' THEN NULL ELSE opening_date END,
+      linked_ledger_account_id = CASE WHEN v_changes ? 'linked_ledger_account_id' THEN (v_changes->>'linked_ledger_account_id')::uuid ELSE linked_ledger_account_id END,
+      reconciliation_method = COALESCE(v_changes->>'reconciliation_method', reconciliation_method),
+      responsible_user_id = CASE WHEN v_changes ? 'responsible_user_id' AND nullif(v_changes->>'responsible_user_id','') IS NOT NULL THEN (v_changes->>'responsible_user_id')::uuid WHEN v_changes ? 'responsible_user_id' THEN NULL ELSE responsible_user_id END,
+      supporting_evidence_reference = CASE WHEN v_changes ? 'supporting_evidence_reference' THEN v_changes->>'supporting_evidence_reference' ELSE supporting_evidence_reference END,
+      notes = CASE WHEN v_changes ? 'notes' THEN v_changes->>'notes' ELSE notes END,
+      is_active = CASE WHEN v_changes ? 'is_active' THEN (v_changes->>'is_active')::boolean ELSE is_active END,
+      requires_dual_approval = CASE WHEN v_changes ? 'requires_dual_approval' THEN (v_changes->>'requires_dual_approval')::boolean ELSE requires_dual_approval END,
+      min_dual_approval_amount = CASE WHEN v_changes ? 'min_dual_approval_amount' AND nullif(v_changes->>'min_dual_approval_amount','') IS NOT NULL THEN (v_changes->>'min_dual_approval_amount')::numeric WHEN v_changes ? 'min_dual_approval_amount' THEN NULL ELSE min_dual_approval_amount END,
+      is_default = CASE WHEN v_changes ? 'is_default' THEN (v_changes->>'is_default')::boolean ELSE is_default END,
+      updated_at = now()
+  WHERE id = v_req.financial_account_id AND organization_id = v_org
+  RETURNING * INTO v_result;
+
+  UPDATE finance.financial_account_change_requests
+  SET status='APPROVED', approved_by=auth.uid(), approved_at=now(), approval_reason=NULLIF(btrim(p_reason),'')
+  WHERE id=v_req.id;
+
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."approve_financial_account_change"("p_request_id" "uuid", "p_reason" "text") OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "finance"."tax_reconciliations" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "tax_year" "text" NOT NULL,
@@ -1735,84 +1828,8 @@ CREATE OR REPLACE FUNCTION "finance"."auto_match_statement_lines"("p_statement_i
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
-DECLARE
-    v_matched INTEGER := 0;
-    v_ledger UUID;
-    v_row_count INTEGER;
-    v_org uuid;
 BEGIN
-    -- BUG-026 FIX: this SECURITY DEFINER function took no organization
-    -- parameter, had no REVOKE (Postgres defaults EXECUTE to PUBLIC on new
-    -- functions), and definer execution bypasses RLS -- so any authenticated
-    -- user of ANY organization could call this with an arbitrary
-    -- p_statement_id and auto-match another tenant's bank statement. The
-    -- organization is now taken from the caller's own session
-    -- (core.current_user_org_id()), matching the pattern used elsewhere in
-    -- this schema (e.g. finance.reverse_journal_entry), and checked against
-    -- the statement's actual organization_id before anything is touched.
-    v_org := core.current_user_org_id();
-    IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
-
-    SELECT fa.linked_ledger_account_id INTO v_ledger
-    FROM finance.bank_statements bs JOIN finance.financial_accounts fa ON fa.id = bs.financial_account_id
-    WHERE bs.id = p_statement_id AND bs.organization_id = v_org;
-    IF v_ledger IS NULL THEN RAISE EXCEPTION 'Statement not found or access denied'; END IF;
-
-    -- Round 1: exact amount + same date
-    UPDATE finance.statement_lines sl SET
-        reconciliation_status = 'MATCHED', matched_journal_line_id = jl.id,
-        matched_at = NOW(), matched_by = auth.uid(), match_method = 'AUTO_AMOUNT_DATE'
-    FROM finance.journal_lines jl JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
-    WHERE sl.bank_statement_id = p_statement_id AND sl.reconciliation_status = 'UNRECONCILED'
-      AND jl.account_id = v_ledger AND je.status = 'POSTED'  --  FIXED: uppercase
-      AND jl.id NOT IN (SELECT matched_journal_line_id FROM finance.statement_lines WHERE matched_journal_line_id IS NOT NULL AND reconciliation_status IN ('MATCHED','MANUAL_MATCH'))
-      AND sl.transaction_date = je.transaction_date
-      AND ((sl.amount > 0 AND jl.debit_amount = sl.amount) OR (sl.amount < 0 AND jl.credit_amount = ABS(sl.amount)));
-    GET DIAGNOSTICS v_row_count = ROW_COUNT;
-    v_matched := v_matched + v_row_count;
-
-    -- Round 2: exact amount + reference match (±3 days)
-    UPDATE finance.statement_lines sl SET
-        reconciliation_status = 'MATCHED', matched_journal_line_id = jl.id,
-        matched_at = NOW(), matched_by = auth.uid(), match_method = 'AUTO_AMOUNT_REF'
-    FROM finance.journal_lines jl JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
-    WHERE sl.bank_statement_id = p_statement_id AND sl.reconciliation_status = 'UNRECONCILED'
-      AND sl.reference IS NOT NULL AND sl.reference != ''
-      AND jl.account_id = v_ledger AND je.status = 'POSTED'  --  FIXED: uppercase
-      AND jl.id NOT IN (SELECT matched_journal_line_id FROM finance.statement_lines WHERE matched_journal_line_id IS NOT NULL AND reconciliation_status IN ('MATCHED','MANUAL_MATCH'))
-      AND sl.transaction_date BETWEEN je.transaction_date - 3 AND je.transaction_date + 3
-      AND je.description ILIKE '%' || sl.reference || '%'
-      AND ((sl.amount > 0 AND jl.debit_amount = sl.amount) OR (sl.amount < 0 AND jl.credit_amount = ABS(sl.amount)));
-    GET DIAGNOSTICS v_row_count = ROW_COUNT;
-    v_matched := v_matched + v_row_count;
-
-    -- Round 3: exact amount only (±7 days)
-    UPDATE finance.statement_lines sl SET
-        reconciliation_status = 'MATCHED', matched_journal_line_id = jl.id,
-        matched_at = NOW(), matched_by = auth.uid(), match_method = 'AUTO_AMOUNT_DESC'
-    FROM finance.journal_lines jl JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
-    WHERE sl.bank_statement_id = p_statement_id AND sl.reconciliation_status = 'UNRECONCILED'
-      AND jl.account_id = v_ledger AND je.status = 'POSTED'  --  FIXED: uppercase
-      AND jl.id NOT IN (SELECT matched_journal_line_id FROM finance.statement_lines WHERE matched_journal_line_id IS NOT NULL AND reconciliation_status IN ('MATCHED','MANUAL_MATCH'))
-      AND sl.transaction_date BETWEEN je.transaction_date - 7 AND je.transaction_date + 7
-      AND ((sl.amount > 0 AND jl.debit_amount = sl.amount) OR (sl.amount < 0 AND jl.credit_amount = ABS(sl.amount)));
-    GET DIAGNOSTICS v_row_count = ROW_COUNT;
-    v_matched := v_matched + v_row_count;
-
-    -- Round 4: by transaction_identifier
-    UPDATE finance.statement_lines sl SET
-        reconciliation_status = 'MATCHED', matched_journal_line_id = jl.id,
-        matched_at = NOW(), matched_by = auth.uid(), match_method = 'AUTO_IDENTIFIER'
-    FROM finance.journal_lines jl JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
-    WHERE sl.bank_statement_id = p_statement_id AND sl.reconciliation_status = 'UNRECONCILED'
-      AND sl.transaction_identifier IS NOT NULL AND sl.transaction_identifier != ''
-      AND jl.account_id = v_ledger AND je.status = 'POSTED'  --  FIXED: uppercase
-      AND jl.id NOT IN (SELECT matched_journal_line_id FROM finance.statement_lines WHERE matched_journal_line_id IS NOT NULL AND reconciliation_status IN ('MATCHED','MANUAL_MATCH'))
-      AND je.reference ILIKE '%' || sl.transaction_identifier || '%';
-    GET DIAGNOSTICS v_row_count = ROW_COUNT;
-    v_matched := v_matched + v_row_count;
-
-    RETURN v_matched;
+  RAISE EXCEPTION 'Automatic matching is suggestion-only. Generate suggestions and explicitly confirm each match.';
 END;
 $$;
 
@@ -2047,103 +2064,60 @@ ALTER FUNCTION "finance"."close_period"("p_period_id" "uuid", "p_closed_by" "uui
 
 
 CREATE OR REPLACE FUNCTION "finance"."compute_platform_fee"("p_platform_id" "uuid", "p_amount" numeric, "p_source_type" character varying DEFAULT 'EXPENSE'::character varying) RETURNS numeric
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $_$ SELECT finance.compute_platform_fee_contextual($1,$2,$3,NULL,NULL,NULL,NULL,NULL,NULL,CURRENT_DATE); $_$;
+
+
+ALTER FUNCTION "finance"."compute_platform_fee"("p_platform_id" "uuid", "p_amount" numeric, "p_source_type" character varying) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."compute_platform_fee_contextual"("p_platform_id" "uuid", "p_amount" numeric, "p_source_type" character varying DEFAULT 'EXPENSE'::character varying, "p_financial_account_id" "uuid" DEFAULT NULL::"uuid", "p_client_id" "uuid" DEFAULT NULL::"uuid", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_currency" "text" DEFAULT NULL::"text", "p_payment_method" "text" DEFAULT NULL::"text", "p_transaction_type" "text" DEFAULT NULL::"text", "p_as_of_date" "date" DEFAULT CURRENT_DATE) RETURNS numeric
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
-DECLARE
-  v_org_id UUID;
-  v_fee NUMERIC(18,4) := 0;
-  v_rule RECORD;
-  v_tiers RECORD;
-  v_remaining NUMERIC(18,4);
-  v_tier_min NUMERIC(18,4);
-  v_tier_max NUMERIC(18,4);
+DECLARE v_org uuid; v_fee numeric(18,4):=0; v_rule record; v_t record; v_amount numeric(18,4):=greatest(coalesce(p_amount,0),0); v_remaining numeric(18,4); v_piece numeric(18,4);
 BEGIN
-  -- BUG-019 FIX: derive the owning org from the platform itself, both to
-  -- scope the rule lookup deterministically and to satisfy
-  -- fee_computation_log's NOT NULL organization_id.
-  SELECT organization_id INTO v_org_id FROM finance.platforms WHERE id = p_platform_id;
-  IF v_org_id IS NULL THEN
-    RAISE EXCEPTION 'Platform % not found or has no organization', p_platform_id;
-  END IF;
-
-  -- Get the highest-priority active rule for this platform (org-scoped).
-  SELECT * INTO v_rule
-  FROM finance.fee_rules
-  WHERE platform_id = p_platform_id
-    AND organization_id = v_org_id
-    AND is_active = true
-    AND (applies_to = 'ALL' OR applies_to = p_source_type)
-    AND (effective_from IS NULL OR effective_from <= CURRENT_DATE)
-    AND (effective_to IS NULL OR effective_to >= CURRENT_DATE)
-  ORDER BY priority DESC, effective_from DESC
+  SELECT organization_id INTO v_org FROM finance.platforms WHERE id=p_platform_id;
+  IF v_org IS NULL OR v_org <> core.current_user_org_id() THEN RAISE EXCEPTION 'Platform not found or access denied'; END IF;
+  SELECT * INTO v_rule FROM finance.fee_rules
+  WHERE platform_id=p_platform_id AND organization_id=v_org AND is_active
+    AND (applies_to='ALL' OR applies_to=p_source_type)
+    AND (effective_from IS NULL OR effective_from<=p_as_of_date)
+    AND (effective_to IS NULL OR effective_to>=p_as_of_date)
+    AND (financial_account_id IS NULL OR financial_account_id=p_financial_account_id)
+    AND (client_id IS NULL OR client_id=p_client_id)
+    AND (project_id IS NULL OR project_id=p_project_id)
+    AND (currency IS NULL OR currency=p_currency)
+    AND (payment_method IS NULL OR payment_method=p_payment_method)
+    AND (transaction_type IS NULL OR transaction_type=p_transaction_type OR transaction_type=p_source_type)
+  ORDER BY
+    (financial_account_id IS NOT NULL)::int + (client_id IS NOT NULL)::int + (project_id IS NOT NULL)::int + (currency IS NOT NULL)::int + (payment_method IS NOT NULL)::int + (transaction_type IS NOT NULL)::int DESC,
+    priority DESC, effective_from DESC NULLS LAST
   LIMIT 1;
+  IF NOT FOUND THEN RETURN 0; END IF;
 
-  IF NOT FOUND THEN
-    RETURN 0;
-  END IF;
-
-  -- PERCENTAGE: fee = amount * fee_value / 100
-  IF v_rule.fee_type = 'PERCENTAGE' THEN
-    v_fee := p_amount * v_rule.fee_value / 100;
-    IF v_rule.min_fee > 0 AND v_fee < v_rule.min_fee THEN v_fee := v_rule.min_fee; END IF;
-    IF v_rule.max_fee > 0 AND v_fee > v_rule.max_fee THEN v_fee := v_rule.max_fee; END IF;
-
-  -- FIXED: flat fee
-  ELSIF v_rule.fee_type = 'FIXED' THEN
-    v_fee := v_rule.fee_value;
-
-  -- TIERED: graduated calculation
-  ELSIF v_rule.fee_type = 'TIERED' THEN
-    v_remaining := p_amount;
-    FOR v_tiers IN (
-      SELECT * FROM finance.fee_tiers
-      WHERE fee_rule_id = v_rule.id
-      ORDER BY tier_from ASC
-    ) LOOP
-      v_tier_min := v_tiers.tier_from;
-      v_tier_max := CASE WHEN v_tiers.tier_to = 0 THEN p_amount ELSE LEAST(v_tiers.tier_to, p_amount) END;
-
-      IF v_remaining <= 0 THEN EXIT; END IF;
-
-      DECLARE
-        v_tierable NUMERIC(18,4);
-      BEGIN
-        v_tierable := LEAST(GREATEST(v_remaining, 0), v_tier_max - v_tier_min);
-        IF v_tierable > 0 THEN
-          v_fee := v_fee + (v_tierable * v_tiers.fee_percent / 100) + v_tiers.fee_fixed;
-          v_remaining := v_remaining - v_tierable;
-        END IF;
-      END;
+  IF v_rule.fee_type='PERCENTAGE' THEN v_fee:=v_amount*v_rule.fee_value/100;
+  ELSIF v_rule.fee_type='FIXED' THEN v_fee:=v_rule.fee_value;
+  ELSIF v_rule.fee_type='PERCENTAGE_PLUS_FIXED' THEN v_fee:=v_amount*v_rule.fee_value/100+coalesce(v_rule.fixed_amount,0);
+  ELSIF v_rule.fee_type='SLAB' THEN
+    SELECT (v_amount*ft.fee_percent/100)+ft.fee_fixed INTO v_fee FROM finance.fee_tiers ft WHERE ft.fee_rule_id=v_rule.id AND v_amount>=ft.tier_from AND (ft.tier_to=0 OR v_amount<ft.tier_to) ORDER BY ft.tier_from DESC LIMIT 1;
+  ELSIF v_rule.fee_type='TIERED' THEN
+    v_remaining:=v_amount;
+    FOR v_t IN SELECT * FROM finance.fee_tiers WHERE fee_rule_id=v_rule.id ORDER BY tier_from LOOP
+      EXIT WHEN v_remaining<=0;
+      v_piece:=least(v_remaining,CASE WHEN coalesce(v_t.tier_to,0)=0 THEN v_remaining ELSE greatest(v_t.tier_to,v_t.tier_from)-v_t.tier_from END);
+      IF v_piece>0 THEN v_fee:=v_fee+(v_piece*v_t.fee_percent/100)+v_t.fee_fixed; v_remaining:=v_remaining-v_piece; END IF;
     END LOOP;
-
-  -- SLAB: find the matching slab
-  ELSIF v_rule.fee_type = 'SLAB' THEN
-    SELECT (p_amount * fee_percent / 100) + fee_fixed INTO v_fee
-    FROM finance.fee_tiers
-    WHERE fee_rule_id = v_rule.id
-      AND p_amount >= tier_from
-      AND (tier_to = 0 OR p_amount < tier_to)
-    ORDER BY tier_from DESC
-    LIMIT 1;
   END IF;
-
-  -- BUG-019 FIX: organization_id is required by
-  -- fee_computation_log_org_required_going_forward — omitting it made
-  -- this INSERT (and therefore the whole function) fail every time a
-  -- rule matched.
-  INSERT INTO finance.fee_computation_log (
-    source_type, platform_id, fee_rule_id, base_amount, fee_amount, organization_id
-  ) VALUES (
-    p_source_type, p_platform_id, v_rule.id, p_amount, COALESCE(v_fee, 0), v_org_id
-  );
-
-  RETURN COALESCE(v_fee, 0);
+  IF coalesce(v_rule.min_fee,0)>0 THEN v_fee:=greatest(v_fee,v_rule.min_fee); END IF;
+  IF coalesce(v_rule.max_fee,0)>0 THEN v_fee:=least(v_fee,v_rule.max_fee); END IF;
+  RETURN round(coalesce(v_fee,0),2);
 END;
 $$;
 
 
-ALTER FUNCTION "finance"."compute_platform_fee"("p_platform_id" "uuid", "p_amount" numeric, "p_source_type" character varying) OWNER TO "postgres";
+ALTER FUNCTION "finance"."compute_platform_fee_contextual"("p_platform_id" "uuid", "p_amount" numeric, "p_source_type" character varying, "p_financial_account_id" "uuid", "p_client_id" "uuid", "p_project_id" "uuid", "p_currency" "text", "p_payment_method" "text", "p_transaction_type" "text", "p_as_of_date" "date") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."compute_tax_liability"("p_tax_recon_id" "uuid") RETURNS "void"
@@ -2422,6 +2396,52 @@ $$;
 
 
 ALTER FUNCTION "finance"."create_fixed_asset"("p_input" "jsonb", "p_created_by" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."create_platform_settlement_atomic"("p_platform_id" "uuid", "p_financial_account_id" "uuid", "p_settlement_reference" "text", "p_settlement_date" "date", "p_currency" "text", "p_gross_amount" numeric, "p_expected_fee_amount" numeric, "p_actual_fee_amount" numeric, "p_withholding_amount" numeric, "p_withdrawal_fee_amount" numeric, "p_exchange_rate" numeric, "p_notes" "text", "p_fee_variance" numeric, "p_fee_override_reason" "text", "p_fee_override_evidence_reference" "text", "p_lines" "jsonb") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_org uuid:=core.current_user_org_id(); v_batch uuid; v_net numeric(18,2); v_line jsonb; v_no int:=0;
+BEGIN
+  IF v_org IS NULL OR auth.uid() IS NULL THEN RAISE EXCEPTION 'Authentication required'; END IF;
+  IF NOT core.has_permission(auth.uid(),'SETTLEMENT_CREATE') THEN RAISE EXCEPTION 'SETTLEMENT_CREATE permission required'; END IF;
+  IF p_platform_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM finance.platforms WHERE id=p_platform_id AND organization_id=v_org AND is_active) THEN RAISE EXCEPTION 'Platform not found or inactive'; END IF;
+  IF p_financial_account_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM finance.financial_accounts WHERE id=p_financial_account_id AND organization_id=v_org AND is_active) THEN RAISE EXCEPTION 'Financial account not found or inactive'; END IF;
+  IF p_gross_amount <= 0 OR p_actual_fee_amount < 0 OR p_withholding_amount < 0 OR p_withdrawal_fee_amount < 0 THEN RAISE EXCEPTION 'Invalid settlement amounts'; END IF;
+  v_net:=p_gross_amount-p_actual_fee_amount-p_withholding_amount-p_withdrawal_fee_amount;
+  IF v_net<0 THEN RAISE EXCEPTION 'Settlement deductions cannot exceed gross amount'; END IF;
+  IF abs(coalesce(p_fee_variance,0))>0.01 AND (p_fee_override_reason IS NULL OR btrim(p_fee_override_reason)='') THEN RAISE EXCEPTION 'Fee variance requires an override reason'; END IF;
+  IF abs(coalesce(p_fee_variance,0))>0.01 AND (p_fee_override_evidence_reference IS NULL OR btrim(p_fee_override_evidence_reference)='') THEN RAISE EXCEPTION 'Fee variance requires supporting evidence'; END IF;
+  IF abs(coalesce(p_fee_variance,0))>0.01 AND NOT core.has_permission(auth.uid(),'SETTLEMENT_RECONCILE') THEN RAISE EXCEPTION 'Settlement fee override requires reconciliation permission'; END IF;
+
+  INSERT INTO finance.settlement_batches(
+    organization_id,platform_id,financial_account_id,settlement_reference,settlement_date,currency,gross_amount,expected_fee_amount,actual_fee_amount,withholding_amount,withdrawal_fee_amount,net_amount,exchange_rate,base_net_amount,status,notes,created_by,fee_variance,fee_override_reason,fee_override_evidence_reference
+  ) VALUES (
+    v_org,p_platform_id,p_financial_account_id,btrim(p_settlement_reference),p_settlement_date,upper(p_currency),p_gross_amount,coalesce(p_expected_fee_amount,0),p_actual_fee_amount,p_withholding_amount,p_withdrawal_fee_amount,v_net,p_exchange_rate,CASE WHEN p_currency='PKR' THEN round(v_net,2) ELSE round(v_net*coalesce(p_exchange_rate,0),2) END,'DRAFT',p_notes,auth.uid(),coalesce(p_fee_variance,0),nullif(btrim(p_fee_override_reason),''),nullif(btrim(p_fee_override_evidence_reference),'')
+  ) RETURNING id INTO v_batch;
+
+  IF upper(p_currency) <> 'PKR' AND (p_exchange_rate IS NULL OR p_exchange_rate <= 0) THEN RAISE EXCEPTION 'Exchange rate is required for non-PKR settlements'; END IF;
+  IF p_lines IS NULL OR jsonb_typeof(p_lines)<>'array' OR jsonb_array_length(p_lines)=0 THEN
+    p_lines:=jsonb_build_array(
+      jsonb_build_object('line_type','GROSS','amount',p_gross_amount,'currency',p_currency),
+      jsonb_build_object('line_type','FEE','amount',p_actual_fee_amount,'currency',p_currency),
+      jsonb_build_object('line_type','WITHHOLDING','amount',p_withholding_amount,'currency',p_currency),
+      jsonb_build_object('line_type','WITHDRAWAL_FEE','amount',p_withdrawal_fee_amount,'currency',p_currency),
+      jsonb_build_object('line_type','NET','amount',v_net,'currency',p_currency)
+    );
+  END IF;
+  FOR v_line IN SELECT * FROM jsonb_array_elements(p_lines) LOOP
+    v_no:=v_no+1;
+    INSERT INTO finance.settlement_lines(settlement_batch_id,organization_id,line_number,line_type,source_type,source_id,project_id,client_id,currency,amount,rate,base_amount,notes)
+    VALUES(v_batch,v_org,v_no,coalesce(v_line->>'line_type','OTHER'),v_line->>'source_type',nullif(v_line->>'source_id','')::uuid,nullif(v_line->>'project_id','')::uuid,nullif(v_line->>'client_id','')::uuid,upper(coalesce(v_line->>'currency',p_currency)),coalesce((v_line->>'amount')::numeric,0),p_exchange_rate,coalesce((v_line->>'base_amount')::numeric,round(coalesce((v_line->>'amount')::numeric,0)*coalesce(p_exchange_rate,1),2)),v_line->>'notes');
+  END LOOP;
+  RETURN v_batch;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."create_platform_settlement_atomic"("p_platform_id" "uuid", "p_financial_account_id" "uuid", "p_settlement_reference" "text", "p_settlement_date" "date", "p_currency" "text", "p_gross_amount" numeric, "p_expected_fee_amount" numeric, "p_actual_fee_amount" numeric, "p_withholding_amount" numeric, "p_withdrawal_fee_amount" numeric, "p_exchange_rate" numeric, "p_notes" "text", "p_fee_variance" numeric, "p_fee_override_reason" "text", "p_fee_override_evidence_reference" "text", "p_lines" "jsonb") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."derive_credit_note_base_amount"() RETURNS "trigger"
@@ -3860,30 +3880,19 @@ CREATE OR REPLACE FUNCTION "finance"."manual_match_statement_line"("p_line_id" "
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
-DECLARE v_org uuid := core.current_user_org_id(); v_sl record; v_ledger uuid;
+DECLARE v_org uuid:=core.current_user_org_id(); v_sl record; v_ledger uuid;
 BEGIN
   IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Access denied'; END IF;
-  SELECT sl.*, bs.organization_id, fa.linked_ledger_account_id AS ledger_id
-  INTO v_sl
-  FROM finance.statement_lines sl
-  JOIN finance.bank_statements bs ON bs.id=sl.bank_statement_id
-  JOIN finance.financial_accounts fa ON fa.id=bs.financial_account_id
+  IF p_reason IS NULL OR btrim(p_reason)='' THEN RAISE EXCEPTION 'Match confirmation reason is mandatory'; END IF;
+  SELECT sl.*,bs.organization_id,fa.linked_ledger_account_id AS ledger_id INTO v_sl
+  FROM finance.statement_lines sl JOIN finance.bank_statements bs ON bs.id=sl.bank_statement_id JOIN finance.financial_accounts fa ON fa.id=bs.financial_account_id
   WHERE sl.id=p_line_id AND bs.organization_id=v_org;
   IF NOT FOUND THEN RAISE EXCEPTION 'Statement line not found or access denied'; END IF;
-  IF v_sl.reconciliation_status <> 'UNRECONCILED' THEN RAISE EXCEPTION 'Statement line is not unreconciled'; END IF;
-  v_ledger := v_sl.ledger_id;
-  IF NOT EXISTS (
-    SELECT 1 FROM finance.journal_lines jl
-    JOIN finance.journal_entries je ON je.id=jl.journal_entry_id
-    WHERE jl.id=p_journal_line_id AND jl.account_id=v_ledger AND je.organization_id=v_org
-  ) THEN RAISE EXCEPTION 'Journal line does not belong to this organization/account'; END IF;
-  IF EXISTS (SELECT 1 FROM finance.statement_lines sl2 WHERE sl2.matched_journal_line_id=p_journal_line_id AND sl2.reconciliation_status IN ('MATCHED','MANUAL_MATCH') AND sl2.id<>p_line_id) THEN
-    RAISE EXCEPTION 'Journal line already matched';
-  END IF;
-  UPDATE finance.statement_lines
-  SET reconciliation_status='MANUAL_MATCH', matched_journal_line_id=p_journal_line_id,
-      matched_at=now(), matched_by=auth.uid(), match_method='MANUAL', exclusion_reason=p_reason, updated_at=now()
-  WHERE id=p_line_id;
+  IF v_sl.reconciliation_status<>'UNRECONCILED' THEN RAISE EXCEPTION 'Statement line is not unreconciled'; END IF;
+  v_ledger:=v_sl.ledger_id;
+  IF NOT EXISTS(SELECT 1 FROM finance.journal_lines jl JOIN finance.journal_entries je ON je.id=jl.journal_entry_id WHERE jl.id=p_journal_line_id AND jl.account_id=v_ledger AND je.organization_id=v_org AND je.status='POSTED') THEN RAISE EXCEPTION 'Journal line does not belong to this organization/account or is not posted'; END IF;
+  IF EXISTS(SELECT 1 FROM finance.statement_lines x WHERE x.matched_journal_line_id=p_journal_line_id AND x.reconciliation_status IN ('MATCHED','MANUAL_MATCH') AND x.id<>p_line_id) THEN RAISE EXCEPTION 'Journal line already matched'; END IF;
+  UPDATE finance.statement_lines SET reconciliation_status='MANUAL_MATCH',matched_journal_line_id=p_journal_line_id,matched_at=now(),matched_by=auth.uid(),match_method='MANUAL',exclusion_reason=btrim(p_reason),updated_at=now() WHERE id=p_line_id;
 END;
 $$;
 
@@ -4388,131 +4397,119 @@ CREATE OR REPLACE FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid"
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
 DECLARE
-    v_org uuid;
-    v_t RECORD;
-    v_fy_id UUID;
-    v_from_ledger UUID;
-    v_to_ledger UUID;
-    v_fx_gain UUID;
-    v_fx_loss UUID;
-    v_lines JSONB := '[]'::JSONB;
-    v_fx_diff NUMERIC(18,2);
-    v_from_base NUMERIC(18,2);
-    v_to_base NUMERIC(18,2);
-    v_from_rate NUMERIC(18,6);
-    v_to_rate NUMERIC(18,6);
-    v_journal_id UUID;
+  v_org uuid := core.current_user_org_id();
+  v_t record;
+  v_period record;
+  v_from_ledger uuid;
+  v_to_ledger uuid;
+  v_fx_gain uuid;
+  v_fx_loss uuid;
+  v_from_rate numeric(18,6) := 1;
+  v_to_rate numeric(18,6) := 1;
+  v_from_base numeric(18,2);
+  v_to_base numeric(18,2);
+  v_fx_diff numeric(18,2);
+  v_lines jsonb := '[]'::jsonb;
+  v_journal_id uuid;
+  v_from_rate_row jsonb;
+  v_to_rate_row jsonb;
+  v_snapshot_date date;
 BEGIN
-    -- BUG-025 FIX (four issues in this one check, all from the same missing
-    -- guard block):
-    -- 1) No organization scoping at all -- any authenticated user of any org
-    --    could post an arbitrary transfer by id (see BUG-026 for the same
-    --    pattern on the reconciliation-matching functions).
-    -- 2) No role/permission check at all.
-    -- 3) 'SUBMITTED' was an accepted status for posting, meaning a transfer
-    --    that was never actually approved could still be posted.
-    -- 4) requires_dual_approval / second_approved_by were never checked, so
-    --    even a transfer correctly left at SUBMITTED pending its second
-    --    approval could be posted by calling this function directly.
-    v_org := core.current_user_org_id();
-    IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
-    IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
-        RAISE EXCEPTION 'Access denied';
+  IF v_org IS NULL OR auth.uid() IS NULL THEN RAISE EXCEPTION 'Authentication required'; END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Access denied'; END IF;
+
+  SELECT * INTO v_t FROM finance.bank_transfers
+  WHERE id=p_transfer_id AND organization_id=v_org FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Transfer not found or access denied'; END IF;
+  IF v_t.status <> 'APPROVED' THEN RAISE EXCEPTION 'Transfer must be APPROVED, current: %',v_t.status; END IF;
+  IF v_t.requires_dual_approval AND v_t.second_approved_by IS NULL THEN RAISE EXCEPTION 'Second approval is required before posting'; END IF;
+
+  SELECT * INTO v_period FROM finance.accounting_periods
+  WHERE id=p_period_id AND organization_id=v_org AND status='OPEN' FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Posting period is not OPEN or does not belong to your organization'; END IF;
+  -- Never trust the browser date. The transfer record is the source of truth.
+  IF v_t.transfer_date < v_period.start_date OR v_t.transfer_date > v_period.end_date THEN
+    RAISE EXCEPTION 'Transfer date % is outside selected accounting period % - %',v_t.transfer_date,v_period.start_date,v_period.end_date;
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM finance.journal_entries WHERE source_type='BANK_TRANSFER' AND source_id=p_transfer_id AND organization_id=v_org) THEN
+    RAISE EXCEPTION 'This transfer has already been posted to the general ledger';
+  END IF;
+
+  SELECT linked_ledger_account_id INTO v_from_ledger FROM finance.financial_accounts WHERE id=v_t.from_account_id AND organization_id=v_org AND is_active;
+  SELECT linked_ledger_account_id INTO v_to_ledger FROM finance.financial_accounts WHERE id=v_t.to_account_id AND organization_id=v_org AND is_active;
+  IF v_from_ledger IS NULL OR v_to_ledger IS NULL THEN RAISE EXCEPTION 'Both financial accounts must be active and ledger-mapped'; END IF;
+
+  IF v_t.from_currency <> 'PKR' THEN
+    SELECT er.rate, to_jsonb(er) INTO v_from_rate, v_from_rate_row
+    FROM finance.exchange_rates er
+    WHERE er.organization_id=v_org AND er.from_currency=v_t.from_currency AND er.to_currency='PKR'
+      AND er.rate_date <= v_t.transfer_date AND er.approved_by IS NOT NULL AND er.is_locked=true
+    ORDER BY er.rate_date DESC, er.created_at DESC LIMIT 1;
+    IF v_from_rate IS NULL THEN RAISE EXCEPTION 'No approved/locked %/PKR exchange rate exists on or before transfer date %',v_t.from_currency,v_t.transfer_date; END IF;
+  END IF;
+
+  IF v_t.to_currency <> 'PKR' THEN
+    SELECT er.rate, to_jsonb(er) INTO v_to_rate, v_to_rate_row
+    FROM finance.exchange_rates er
+    WHERE er.organization_id=v_org AND er.from_currency=v_t.to_currency AND er.to_currency='PKR'
+      AND er.rate_date <= v_t.transfer_date AND er.approved_by IS NOT NULL AND er.is_locked=true
+    ORDER BY er.rate_date DESC, er.created_at DESC LIMIT 1;
+    IF v_to_rate IS NULL THEN RAISE EXCEPTION 'No approved/locked %/PKR exchange rate exists on or before transfer date %',v_t.to_currency,v_t.transfer_date; END IF;
+  END IF;
+
+  v_from_base := round(v_t.from_amount * v_from_rate,2);
+  v_to_base := round(v_t.to_amount * v_to_rate,2);
+  v_snapshot_date := COALESCE(v_t.fx_rate_date, (v_from_rate_row->>'rate_date')::date, (v_to_rate_row->>'rate_date')::date, v_t.transfer_date);
+
+  IF v_t.from_currency = v_t.to_currency THEN
+    -- Same-currency transfers must still use the currency's approved PKR rate.
+    v_lines := v_lines || jsonb_build_object('account_id',v_to_ledger,'debit_amount',v_t.to_amount,'credit_amount',0,'description','Transfer TO: '||v_t.transfer_number);
+    v_lines := v_lines || jsonb_build_object('account_id',v_from_ledger,'debit_amount',0,'credit_amount',v_t.from_amount,'description','Transfer FROM: '||v_t.transfer_number);
+  ELSE
+    v_fx_diff := v_to_base-v_from_base;
+    v_lines := v_lines || jsonb_build_object('account_id',v_to_ledger,'debit_amount',v_to_base,'credit_amount',0,'description','Transfer TO: '||v_t.transfer_number||' ('||v_t.to_amount||' '||v_t.to_currency||')');
+    v_lines := v_lines || jsonb_build_object('account_id',v_from_ledger,'debit_amount',0,'credit_amount',v_from_base,'description','Transfer FROM: '||v_t.transfer_number||' ('||v_t.from_amount||' '||v_t.from_currency||')');
+    IF v_fx_diff > 0 THEN
+      SELECT id INTO v_fx_gain FROM finance.chart_of_accounts WHERE organization_id=v_org AND code='4210' AND posting_allowed=true AND is_active=true LIMIT 1;
+      IF v_fx_gain IS NULL THEN RAISE EXCEPTION 'Realized FX gain account 4210 is not configured for this organization'; END IF;
+      v_lines := v_lines || jsonb_build_object('account_id',v_fx_gain,'debit_amount',0,'credit_amount',v_fx_diff,'description','FX Gain: '||v_t.transfer_number);
+    ELSIF v_fx_diff < 0 THEN
+      SELECT id INTO v_fx_loss FROM finance.chart_of_accounts WHERE organization_id=v_org AND code='7121' AND posting_allowed=true AND is_active=true LIMIT 1;
+      IF v_fx_loss IS NULL THEN RAISE EXCEPTION 'Realized FX loss account 7121 is not configured for this organization'; END IF;
+      v_lines := v_lines || jsonb_build_object('account_id',v_fx_loss,'debit_amount',abs(v_fx_diff),'credit_amount',0,'description','FX Loss: '||v_t.transfer_number);
     END IF;
+  END IF;
 
-    SELECT * INTO v_t FROM finance.bank_transfers
-    WHERE id = p_transfer_id AND organization_id = v_org
-    FOR UPDATE;
-    IF NOT FOUND THEN RAISE EXCEPTION 'Transfer not found or access denied'; END IF;
-    IF v_t.status <> 'APPROVED' THEN RAISE EXCEPTION 'Must be approved, status: %', v_t.status; END IF;
-    IF v_t.requires_dual_approval AND v_t.second_approved_by IS NULL THEN
-        RAISE EXCEPTION 'This transfer requires a second approval before it can be posted';
-    END IF;
+  v_journal_id := finance.post_journal_entry('Bank Transfer: '||v_t.transfer_number,v_t.transfer_date,p_period_id,v_lines,'PKR',1,'BANK_TRANSFER',p_transfer_id,NULL,NULL);
 
-    -- FND-BANK-01 FIX: explicit idempotency guard, matching the pattern
-    -- used by post_income_atomic / post_expense_atomic. Belt-and-suspenders
-    -- alongside the status re-check on the UPDATE below -- either one alone
-    -- would already stop a duplicate posting, but this gives a clearer
-    -- error message than a generic "Must be approved" would once the
-    -- status has already flipped to POSTED.
-    IF EXISTS (
-        SELECT 1 FROM finance.journal_entries
-        WHERE source_type = 'BANK_TRANSFER' AND source_id = p_transfer_id
-    ) THEN
-        RAISE EXCEPTION 'This transfer has already been posted to the general ledger';
-    END IF;
+  UPDATE finance.journal_entries
+  SET rate_date = v_snapshot_date,
+      rate_source = CASE WHEN v_t.from_currency='PKR' AND v_t.to_currency='PKR' THEN 'BANK_TRANSFER_SAME_CURRENCY' ELSE 'APPROVED_EXCHANGE_RATE' END,
+      rate_snapshot = jsonb_build_object(
+        'transfer_id',v_t.id,
+        'transfer_date',v_t.transfer_date,
+        'from_currency',v_t.from_currency,'from_amount',v_t.from_amount,'from_base_amount',v_from_base,
+        'to_currency',v_t.to_currency,'to_amount',v_t.to_amount,'to_base_amount',v_to_base,
+        'quoted_transfer_rate',v_t.exchange_rate,
+        'from_base_rate',v_from_rate,'to_base_rate',v_to_rate,
+        'from_rate_row',v_from_rate_row,'to_rate_row',v_to_rate_row,
+        'snapshot_taken_at',now()
+      )
+  WHERE id=v_journal_id;
 
-    SELECT fiscal_year_id INTO v_fy_id FROM finance.accounting_periods WHERE id = p_period_id;
-    IF v_fy_id IS NULL THEN RAISE EXCEPTION 'Invalid period'; END IF;
+  UPDATE finance.journal_lines
+  SET base_debit = CASE WHEN debit_amount > 0 THEN CASE WHEN v_t.to_currency=v_t.from_currency THEN v_to_base ELSE debit_amount END ELSE 0 END,
+      base_credit = CASE WHEN credit_amount > 0 THEN CASE WHEN v_t.to_currency=v_t.from_currency THEN v_from_base ELSE credit_amount END ELSE 0 END,
+      rate_date=v_snapshot_date,
+      rate_source=CASE WHEN v_t.from_currency=v_t.to_currency AND v_t.from_currency<>'PKR' THEN 'APPROVED_EXCHANGE_RATE' ELSE 'BANK_TRANSFER' END,
+      rate_snapshot=jsonb_build_object('transfer_id',v_t.id,'from_currency',v_t.from_currency,'to_currency',v_t.to_currency,'quoted_rate',v_t.exchange_rate,'from_base_rate',v_from_rate,'to_base_rate',v_to_rate,'from_base_amount',v_from_base,'to_base_amount',v_to_base)
+  WHERE journal_entry_id=v_journal_id;
 
-    SELECT linked_ledger_account_id INTO v_from_ledger FROM finance.financial_accounts WHERE id = v_t.from_account_id;
-    SELECT linked_ledger_account_id INTO v_to_ledger FROM finance.financial_accounts WHERE id = v_t.to_account_id;
-
-    --  BUG FIX: 4210 = Exchange Gain (exists), 7121 = Realized FX Loss (exists, was 7210)
-    SELECT id INTO v_fx_gain FROM finance.chart_of_accounts WHERE code = '4210' LIMIT 1;
-    SELECT id INTO v_fx_loss FROM finance.chart_of_accounts WHERE code = '7121' LIMIT 1;
-
-    -- From side to PKR base
-    IF v_t.from_currency = 'PKR' THEN v_from_base := v_t.from_amount; v_from_rate := 1;
-    ELSE
-        --  BUG FIX: rate_date NOT effective_date
-        SELECT rate INTO v_from_rate FROM finance.exchange_rates
-        WHERE from_currency = v_t.from_currency AND to_currency = 'PKR'
-        ORDER BY rate_date DESC LIMIT 1;
-        IF v_from_rate IS NULL THEN v_from_rate := v_t.exchange_rate; END IF;
-        v_from_base := ROUND(v_t.from_amount * v_from_rate, 2);
-    END IF;
-
-    -- To side to PKR base
-    IF v_t.to_currency = 'PKR' THEN v_to_base := v_t.to_amount; v_to_rate := 1;
-    ELSE
-        --  BUG FIX: rate_date NOT effective_date
-        SELECT rate INTO v_to_rate FROM finance.exchange_rates
-        WHERE from_currency = v_t.to_currency AND to_currency = 'PKR'
-        ORDER BY rate_date DESC LIMIT 1;
-        IF v_to_rate IS NULL THEN v_to_rate := 1 / v_t.exchange_rate; END IF;
-        v_to_base := ROUND(v_t.to_amount * v_to_rate, 2);
-    END IF;
-
-    -- Same currency
-    IF v_t.from_currency = v_t.to_currency THEN
-        v_lines := v_lines || jsonb_build_object('account_id', v_to_ledger, 'debit_amount', v_t.to_amount, 'credit_amount', 0, 'description', 'Transfer TO: ' || v_t.transfer_number);
-        v_lines := v_lines || jsonb_build_object('account_id', v_from_ledger, 'debit_amount', 0, 'credit_amount', v_t.from_amount, 'description', 'Transfer FROM: ' || v_t.transfer_number);
-    ELSE
-        v_fx_diff := v_to_base - v_from_base;
-        v_lines := v_lines || jsonb_build_object('account_id', v_to_ledger, 'debit_amount', v_to_base, 'credit_amount', 0, 'description', 'Transfer TO: ' || v_t.transfer_number || ' (' || v_t.to_amount || ' ' || v_t.to_currency || ')');
-        v_lines := v_lines || jsonb_build_object('account_id', v_from_ledger, 'debit_amount', 0, 'credit_amount', v_from_base, 'description', 'Transfer FROM: ' || v_t.transfer_number || ' (' || v_t.from_amount || ' ' || v_t.from_currency || ')');
-        IF v_fx_diff > 0 AND v_fx_gain IS NOT NULL THEN
-            v_lines := v_lines || jsonb_build_object('account_id', v_fx_gain, 'debit_amount', 0, 'credit_amount', v_fx_diff, 'description', 'FX Gain: ' || v_t.transfer_number);
-        ELSIF v_fx_diff < 0 AND v_fx_loss IS NOT NULL THEN
-            v_lines := v_lines || jsonb_build_object('account_id', v_fx_loss, 'debit_amount', ABS(v_fx_diff), 'credit_amount', 0, 'description', 'FX Loss: ' || v_t.transfer_number);
-        END IF;
-    END IF;
-
-    --  CORRECT PARAMETER ORDER
-    v_journal_id := finance.post_journal_entry('Bank Transfer: ' || v_t.transfer_number, p_transaction_date, p_period_id, v_lines, 'PKR', 1.0000, 'BANK_TRANSFER', p_transfer_id, NULL, NULL);
-
-    -- FND-BANK-01 FIX: finalize the transfer row in the SAME transaction as
-    -- the journal insert above. If this UPDATE fails or matches zero rows
-    -- (status changed under us despite the earlier FOR UPDATE lock), the
-    -- RAISE EXCEPTION below rolls back the journal insert too, so we never
-    -- end up with a posted journal and a transfer still stuck at APPROVED.
-    UPDATE finance.bank_transfers
-    SET status = 'POSTED',
-        journal_entry_id = v_journal_id,
-        period_id = p_period_id,
-        posted_by = auth.uid(),
-        posted_at = now(),
-        updated_at = now()
-    WHERE id = p_transfer_id
-      AND organization_id = v_org
-      AND status = 'APPROVED';
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Bank transfer status update failed while posting to GL';
-    END IF;
-
-    RETURN v_journal_id;
+  UPDATE finance.bank_transfers SET status='POSTED',journal_entry_id=v_journal_id,period_id=p_period_id,posted_by=auth.uid(),posted_at=now(),updated_at=now()
+  WHERE id=p_transfer_id AND organization_id=v_org AND status='APPROVED';
+  IF NOT FOUND THEN RAISE EXCEPTION 'Transfer finalization failed'; END IF;
+  RETURN v_journal_id;
 END;
 $$;
 
@@ -6540,6 +6537,37 @@ $$;
 ALTER FUNCTION "finance"."prevent_used_fiscal_year_deletion"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."request_financial_account_change"("p_account_id" "uuid", "p_changes" "jsonb", "p_reason" "text") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_id uuid;
+  v_account finance.financial_accounts;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN RAISE EXCEPTION 'Authentication and organization are required'; END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Access denied'; END IF;
+  IF p_reason IS NULL OR btrim(p_reason) = '' THEN RAISE EXCEPTION 'Reason is mandatory'; END IF;
+  IF p_changes IS NULL OR jsonb_typeof(p_changes) <> 'object' OR p_changes = '{}'::jsonb THEN RAISE EXCEPTION 'At least one account change is required'; END IF;
+
+  SELECT * INTO v_account FROM finance.financial_accounts
+  WHERE id = p_account_id AND organization_id = v_org FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Financial account not found or access denied'; END IF;
+
+  INSERT INTO finance.financial_account_change_requests(
+    organization_id, financial_account_id, requested_changes, reason, requested_by
+  ) VALUES (v_org, p_account_id, p_changes, btrim(p_reason), auth.uid())
+  RETURNING id INTO v_id;
+
+  RETURN v_id;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."request_financial_account_change"("p_account_id" "uuid", "p_changes" "jsonb", "p_reason" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."reset_sequence"("p_type" "text", "p_fy_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
@@ -6556,6 +6584,34 @@ END;
 
 
 ALTER FUNCTION "finance"."reset_sequence"("p_type" "text", "p_fy_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."reverse_bank_transfer"("p_transfer_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_t record;
+  v_journal uuid;
+  v_reversal uuid;
+BEGIN
+  IF v_org IS NULL OR auth.uid() IS NULL THEN RAISE EXCEPTION 'Authentication required'; END IF;
+  IF NOT core.is_finance_head() THEN RAISE EXCEPTION 'Only CEO/Finance Head may reverse a bank transfer'; END IF;
+  IF p_reason IS NULL OR btrim(p_reason)='' THEN RAISE EXCEPTION 'Reversal reason is mandatory'; END IF;
+  SELECT * INTO v_t FROM finance.bank_transfers WHERE id=p_transfer_id AND organization_id=v_org FOR UPDATE;
+  IF NOT FOUND OR v_t.status<>'POSTED' OR v_t.journal_entry_id IS NULL THEN RAISE EXCEPTION 'Only a posted bank transfer with a journal can be reversed'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM finance.accounting_periods WHERE id=v_t.period_id AND organization_id=v_org AND status='OPEN') THEN RAISE EXCEPTION 'Original posting period is not open; use an authorized open reversal period'; END IF;
+  v_journal := v_t.journal_entry_id;
+  v_reversal := finance.reverse_journal_entry(v_journal,p_reversal_date,p_reason);
+  UPDATE finance.bank_transfers SET status='REVERSED',reversal_reason=p_reason,reversed_at=now(),updated_at=now() WHERE id=p_transfer_id AND organization_id=v_org AND status='POSTED';
+  IF NOT FOUND THEN RAISE EXCEPTION 'Bank transfer reversal finalization failed'; END IF;
+  RETURN v_reversal;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."reverse_bank_transfer"("p_transfer_id" "uuid", "p_reversal_date" "date", "p_reason" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."reverse_credit_note_atomic"("p_credit_note_id" "uuid", "p_reversal_date" "date", "p_reason" "text") RETURNS "uuid"
@@ -7177,6 +7233,54 @@ ALTER FUNCTION "finance"."snapshot_tax_rule_set"() OWNER TO "postgres";
 
 COMMENT ON FUNCTION "finance"."snapshot_tax_rule_set"() IS 'Auto-populates tax_computations.computation_json with an immutable snapshot of the referenced tax_rule_set + tax_slabs at insert time (Spec 5.12.1). Applies to new rows only -- existing tax_computations rows created before this migration do not have a verified-accurate historical snapshot and require a manual decision (see Migration 033 notes) before they can be trusted for a filed return.';
 
+
+
+CREATE OR REPLACE FUNCTION "finance"."suggest_bank_statement_matches"("p_statement_id" "uuid") RETURNS TABLE("line_id" "uuid", "journal_line_id" "uuid", "match_method" "text", "confidence" numeric, "journal_date" "date", "journal_description" "text", "journal_amount" numeric)
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_org uuid := core.current_user_org_id(); v_ledger uuid;
+BEGIN
+  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Access denied'; END IF;
+  SELECT fa.linked_ledger_account_id INTO v_ledger
+  FROM finance.bank_statements bs JOIN finance.financial_accounts fa ON fa.id=bs.financial_account_id
+  WHERE bs.id=p_statement_id AND bs.organization_id=v_org;
+  IF v_ledger IS NULL THEN RAISE EXCEPTION 'Statement not found or access denied'; END IF;
+
+  RETURN QUERY
+  WITH candidates AS (
+    SELECT sl.id line_id, jl.id journal_line_id,
+      CASE
+        WHEN sl.transaction_date=je.transaction_date AND ((sl.amount>0 AND jl.debit_amount=sl.amount) OR (sl.amount<0 AND jl.credit_amount=abs(sl.amount))) THEN 'AUTO_AMOUNT_DATE'
+        WHEN sl.reference IS NOT NULL AND sl.reference<>'' AND sl.transaction_date BETWEEN je.transaction_date-3 AND je.transaction_date+3 AND je.description ILIKE '%'||sl.reference||'%' THEN 'AUTO_AMOUNT_REF'
+        WHEN sl.transaction_date BETWEEN je.transaction_date-7 AND je.transaction_date+7 AND ((sl.amount>0 AND jl.debit_amount=sl.amount) OR (sl.amount<0 AND jl.credit_amount=abs(sl.amount))) THEN 'AUTO_AMOUNT_DATE_WINDOW'
+        WHEN sl.transaction_identifier IS NOT NULL AND sl.transaction_identifier<>'' AND je.reference ILIKE '%'||sl.transaction_identifier||'%' THEN 'AUTO_IDENTIFIER'
+      END match_method,
+      CASE
+        WHEN sl.transaction_date=je.transaction_date AND ((sl.amount>0 AND jl.debit_amount=sl.amount) OR (sl.amount<0 AND jl.credit_amount=abs(sl.amount))) THEN 1.0
+        WHEN sl.reference IS NOT NULL AND sl.reference<>'' AND sl.transaction_date BETWEEN je.transaction_date-3 AND je.transaction_date+3 AND je.description ILIKE '%'||sl.reference||'%' THEN 0.95
+        WHEN sl.transaction_date BETWEEN je.transaction_date-7 AND je.transaction_date+7 AND ((sl.amount>0 AND jl.debit_amount=sl.amount) OR (sl.amount<0 AND jl.credit_amount=abs(sl.amount))) THEN 0.85
+        ELSE 0.80
+      END confidence,
+      je.transaction_date journal_date, je.description journal_description,
+      CASE WHEN sl.amount>0 THEN jl.debit_amount ELSE jl.credit_amount END journal_amount,
+      row_number() over(partition by sl.id order by
+        CASE WHEN sl.transaction_date=je.transaction_date AND ((sl.amount>0 AND jl.debit_amount=sl.amount) OR (sl.amount<0 AND jl.credit_amount=abs(sl.amount))) THEN 1 WHEN sl.reference IS NOT NULL AND sl.reference<>'' AND je.description ILIKE '%'||sl.reference||'%' THEN 2 WHEN sl.transaction_date BETWEEN je.transaction_date-7 AND je.transaction_date+7 THEN 3 ELSE 4 END,
+        abs(extract(epoch from (sl.transaction_date-je.transaction_date)))) rn
+    FROM finance.statement_lines sl
+    JOIN finance.journal_lines jl ON jl.account_id=v_ledger
+    JOIN finance.journal_entries je ON je.id=jl.journal_entry_id
+    WHERE sl.bank_statement_id=p_statement_id AND sl.reconciliation_status='UNRECONCILED'
+      AND je.organization_id=v_org AND je.status='POSTED'
+      AND NOT EXISTS (SELECT 1 FROM finance.statement_lines x WHERE x.matched_journal_line_id=jl.id AND x.reconciliation_status IN ('MATCHED','MANUAL_MATCH'))
+  )
+  SELECT line_id,journal_line_id,match_method,confidence,journal_date,journal_description,journal_amount
+  FROM candidates WHERE rn=1 AND match_method IS NOT NULL;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."suggest_bank_statement_matches"("p_statement_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."sync_budget_line_committed_amount"() RETURNS "trigger"
@@ -11701,8 +11805,15 @@ CREATE TABLE IF NOT EXISTS "finance"."fee_rules" (
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "organization_id" "uuid",
+    "financial_account_id" "uuid",
+    "client_id" "uuid",
+    "project_id" "uuid",
+    "currency" "text",
+    "payment_method" "text",
+    "transaction_type" "text",
+    "fixed_amount" numeric(18,4) DEFAULT 0,
     CONSTRAINT "fee_rules_applies_to_check" CHECK ((("applies_to")::"text" = ANY (ARRAY['EXPENSE'::"text", 'INVOICE'::"text", 'VENDOR_BILL'::"text", 'PAYMENT_RECEIPT'::"text", 'SETTLEMENT'::"text", 'ALL'::"text"]))),
-    CONSTRAINT "fee_rules_fee_type_check" CHECK ((("fee_type")::"text" = ANY ((ARRAY['PERCENTAGE'::character varying, 'FIXED'::character varying, 'TIERED'::character varying, 'SLAB'::character varying])::"text"[]))),
+    CONSTRAINT "fee_rules_fee_type_check" CHECK ((("fee_type")::"text" = ANY ((ARRAY['PERCENTAGE'::character varying, 'FIXED'::character varying, 'PERCENTAGE_PLUS_FIXED'::character varying, 'TIERED'::character varying, 'SLAB'::character varying])::"text"[]))),
     CONSTRAINT "fee_rules_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
@@ -11724,41 +11835,24 @@ CREATE TABLE IF NOT EXISTS "finance"."fee_tiers" (
 ALTER TABLE "finance"."fee_tiers" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "finance"."financial_accounts" (
+CREATE TABLE IF NOT EXISTS "finance"."financial_account_change_requests" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "account_name" "text" NOT NULL,
-    "institution_name" "text" NOT NULL,
-    "institution_type" "text" NOT NULL,
-    "account_type" "text" NOT NULL,
-    "currency" "text" DEFAULT 'PKR'::"text" NOT NULL,
-    "masked_identifier" "text",
-    "opening_balance" numeric(18,2) DEFAULT 0 NOT NULL,
-    "opening_date" "date",
-    "linked_ledger_account_id" "uuid" NOT NULL,
-    "reconciliation_method" "text" DEFAULT 'MANUAL'::"text" NOT NULL,
-    "responsible_user_id" "uuid",
-    "is_active" boolean DEFAULT true NOT NULL,
-    "is_default" boolean DEFAULT false NOT NULL,
-    "requires_dual_approval" boolean DEFAULT false,
-    "min_dual_approval_amount" numeric(18,2),
-    "notes" "text",
-    "created_at" timestamp with time zone DEFAULT "now"(),
-    "updated_at" timestamp with time zone DEFAULT "now"(),
-    "created_by" "uuid",
-    "deleted_at" timestamp with time zone,
-    "deleted_by" "uuid",
     "organization_id" "uuid" NOT NULL,
-    CONSTRAINT "financial_accounts_account_type_check" CHECK (("account_type" = ANY (ARRAY['CURRENT'::"text", 'SAVINGS'::"text", 'DIGITAL_WALLET'::"text", 'PLATFORM_BALANCE'::"text", 'PETTY_CASH'::"text", 'CLEARING'::"text"]))),
-    CONSTRAINT "financial_accounts_institution_type_check" CHECK (("institution_type" = ANY (ARRAY['BANK'::"text", 'CASH'::"text", 'WALLET'::"text", 'PLATFORM'::"text", 'PAYMENT_GATEWAY'::"text", 'CARD'::"text", 'CLEARING'::"text"]))),
-    CONSTRAINT "financial_accounts_reconciliation_method_check" CHECK (("reconciliation_method" = ANY (ARRAY['MANUAL'::"text", 'AUTO'::"text", 'IMPORT'::"text"])))
+    "financial_account_id" "uuid" NOT NULL,
+    "requested_changes" "jsonb" NOT NULL,
+    "reason" "text" NOT NULL,
+    "status" "text" DEFAULT 'PENDING'::"text" NOT NULL,
+    "requested_by" "uuid" NOT NULL,
+    "requested_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "approval_reason" "text",
+    CONSTRAINT "fa_change_reason_not_blank" CHECK (("length"("btrim"("reason")) > 0)),
+    CONSTRAINT "financial_account_change_requests_status_check" CHECK (("status" = ANY (ARRAY['PENDING'::"text", 'APPROVED'::"text", 'REJECTED'::"text"])))
 );
 
 
-ALTER TABLE "finance"."financial_accounts" OWNER TO "postgres";
-
-
-COMMENT ON TABLE "finance"."financial_accounts" IS 'Canonical (spec-aligned) financial accounts table -- has ledger mapping, reconciliation method, dual-approval fields. NOTE: public.financial_accounts is a separate, independently-writable legacy table covering the same entity. See Migration 023 / compliance audit Section 3.2 for the required consolidation decision before further schema changes.';
-
+ALTER TABLE "finance"."financial_account_change_requests" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "finance"."fiscal_years" (
@@ -12338,6 +12432,9 @@ CREATE TABLE IF NOT EXISTS "finance"."settlement_batches" (
     "posted_at" timestamp with time zone,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "fee_variance" numeric(18,2) DEFAULT 0,
+    "fee_override_reason" "text",
+    "fee_override_evidence_reference" "text",
     CONSTRAINT "settlement_batches_amounts_check" CHECK ((("gross_amount" >= (0)::numeric) AND ("expected_fee_amount" >= (0)::numeric) AND ("actual_fee_amount" >= (0)::numeric) AND ("withholding_amount" >= (0)::numeric) AND ("withdrawal_fee_amount" >= (0)::numeric) AND ("net_amount" >= (0)::numeric))),
     CONSTRAINT "settlement_batches_currency_check" CHECK (("currency" ~ '^[A-Z]{3}$'::"text")),
     CONSTRAINT "settlement_batches_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'RECONCILED'::"text", 'REJECTED'::"text", 'REVERSED'::"text"])))
@@ -15830,6 +15927,11 @@ ALTER TABLE ONLY "finance"."fee_tiers"
 
 
 
+ALTER TABLE ONLY "finance"."financial_account_change_requests"
+    ADD CONSTRAINT "financial_account_change_requests_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "finance"."financial_accounts"
     ADD CONSTRAINT "financial_accounts_pkey" PRIMARY KEY ("id");
 
@@ -16794,6 +16896,10 @@ CREATE INDEX "idx_fa_type" ON "finance"."financial_accounts" USING "btree" ("ins
 
 
 CREATE INDEX "idx_fee_computation_log_org" ON "finance"."fee_computation_log" USING "btree" ("organization_id");
+
+
+
+CREATE INDEX "idx_fee_rules_context" ON "finance"."fee_rules" USING "btree" ("organization_id", "platform_id", "financial_account_id", "client_id", "project_id", "currency", "payment_method", "transaction_type", "priority");
 
 
 
@@ -19095,6 +19201,16 @@ ALTER TABLE ONLY "finance"."fee_tiers"
 
 
 
+ALTER TABLE ONLY "finance"."financial_account_change_requests"
+    ADD CONSTRAINT "financial_account_change_requests_financial_account_id_fkey" FOREIGN KEY ("financial_account_id") REFERENCES "finance"."financial_accounts"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "finance"."financial_account_change_requests"
+    ADD CONSTRAINT "financial_account_change_requests_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "core"."organizations"("id") ON DELETE RESTRICT;
+
+
+
 ALTER TABLE ONLY "finance"."financial_accounts"
     ADD CONSTRAINT "financial_accounts_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
 
@@ -21219,6 +21335,18 @@ CREATE POLICY "expense_lines_update_org" ON "finance"."expense_lines" FOR UPDATE
 
 
 
+CREATE POLICY "fa_change_insert_org" ON "finance"."financial_account_change_requests" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("requested_by" = "auth"."uid"())));
+
+
+
+CREATE POLICY "fa_change_select_org" ON "finance"."financial_account_change_requests" FOR SELECT TO "authenticated" USING ("core"."same_org"("organization_id"));
+
+
+
+CREATE POLICY "fa_change_update_org" ON "finance"."financial_account_change_requests" FOR UPDATE TO "authenticated" USING (false) WITH CHECK (false);
+
+
+
 CREATE POLICY "fa_delete" ON "finance"."financial_accounts" FOR DELETE USING (("core"."is_finance_head"() AND "core"."same_org"("organization_id")));
 
 
@@ -21231,7 +21359,7 @@ CREATE POLICY "fa_select" ON "finance"."financial_accounts" FOR SELECT USING (((
 
 
 
-CREATE POLICY "fa_update" ON "finance"."financial_accounts" FOR UPDATE USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id")));
+CREATE POLICY "fa_update" ON "finance"."financial_accounts" FOR UPDATE TO "authenticated" USING (false) WITH CHECK (false);
 
 
 
@@ -21252,6 +21380,9 @@ CREATE POLICY "fee_tiers_select_org_scoped" ON "finance"."fee_tiers" FOR SELECT 
    FROM "finance"."fee_rules" "fr"
   WHERE (("fr"."id" = "fee_tiers"."fee_rule_id") AND "core"."same_org"("fr"."organization_id")))));
 
+
+
+ALTER TABLE "finance"."financial_account_change_requests" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "finance"."financial_accounts" ENABLE ROW LEVEL SECURITY;
@@ -22699,6 +22830,9 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
 
+
+
+
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
@@ -22710,6 +22844,16 @@ GRANT ALL ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" 
 
 REVOKE ALL ON FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "finance"."financial_accounts" TO "authenticated";
+GRANT ALL ON TABLE "finance"."financial_accounts" TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."approve_financial_account_change"("p_request_id" "uuid", "p_reason" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."approve_financial_account_change"("p_request_id" "uuid", "p_reason" "text") TO "authenticated";
 
 
 
@@ -22731,12 +22875,22 @@ GRANT ALL ON FUNCTION "finance"."close_period"("p_period_id" "uuid", "p_closed_b
 
 
 
+REVOKE ALL ON FUNCTION "finance"."compute_platform_fee_contextual"("p_platform_id" "uuid", "p_amount" numeric, "p_source_type" character varying, "p_financial_account_id" "uuid", "p_client_id" "uuid", "p_project_id" "uuid", "p_currency" "text", "p_payment_method" "text", "p_transaction_type" "text", "p_as_of_date" "date") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."compute_platform_fee_contextual"("p_platform_id" "uuid", "p_amount" numeric, "p_source_type" character varying, "p_financial_account_id" "uuid", "p_client_id" "uuid", "p_project_id" "uuid", "p_currency" "text", "p_payment_method" "text", "p_transaction_type" "text", "p_as_of_date" "date") TO "authenticated";
+
+
+
 GRANT ALL ON TABLE "finance"."fixed_assets" TO "authenticated";
 GRANT ALL ON TABLE "finance"."fixed_assets" TO "service_role";
 
 
 
 GRANT ALL ON FUNCTION "finance"."create_fixed_asset"("p_input" "jsonb", "p_created_by" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."create_platform_settlement_atomic"("p_platform_id" "uuid", "p_financial_account_id" "uuid", "p_settlement_reference" "text", "p_settlement_date" "date", "p_currency" "text", "p_gross_amount" numeric, "p_expected_fee_amount" numeric, "p_actual_fee_amount" numeric, "p_withholding_amount" numeric, "p_withdrawal_fee_amount" numeric, "p_exchange_rate" numeric, "p_notes" "text", "p_fee_variance" numeric, "p_fee_override_reason" "text", "p_fee_override_evidence_reference" "text", "p_lines" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."create_platform_settlement_atomic"("p_platform_id" "uuid", "p_financial_account_id" "uuid", "p_settlement_reference" "text", "p_settlement_date" "date", "p_currency" "text", "p_gross_amount" numeric, "p_expected_fee_amount" numeric, "p_actual_fee_amount" numeric, "p_withholding_amount" numeric, "p_withdrawal_fee_amount" numeric, "p_exchange_rate" numeric, "p_notes" "text", "p_fee_variance" numeric, "p_fee_override_reason" "text", "p_fee_override_evidence_reference" "text", "p_lines" "jsonb") TO "authenticated";
 
 
 
@@ -22797,6 +22951,7 @@ GRANT ALL ON FUNCTION "finance"."is_date_in_open_period"("p_date" "date") TO "au
 
 
 
+REVOKE ALL ON FUNCTION "finance"."manual_match_statement_line"("p_line_id" "uuid", "p_journal_line_id" "uuid", "p_reason" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."manual_match_statement_line"("p_line_id" "uuid", "p_journal_line_id" "uuid", "p_reason" "text") TO "authenticated";
 
 
@@ -22901,6 +23056,16 @@ REVOKE ALL ON FUNCTION "finance"."prevent_posted_capital_transaction_edit"() FRO
 
 
 
+REVOKE ALL ON FUNCTION "finance"."request_financial_account_change"("p_account_id" "uuid", "p_changes" "jsonb", "p_reason" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."request_financial_account_change"("p_account_id" "uuid", "p_changes" "jsonb", "p_reason" "text") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."reverse_bank_transfer"("p_transfer_id" "uuid", "p_reversal_date" "date", "p_reason" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."reverse_bank_transfer"("p_transfer_id" "uuid", "p_reversal_date" "date", "p_reason" "text") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "finance"."reverse_credit_note_atomic"("p_credit_note_id" "uuid", "p_reversal_date" "date", "p_reason" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."reverse_credit_note_atomic"("p_credit_note_id" "uuid", "p_reversal_date" "date", "p_reason" "text") TO "authenticated";
 
@@ -22933,6 +23098,11 @@ GRANT ALL ON TABLE "finance"."vendor_bills" TO "service_role";
 
 
 GRANT ALL ON FUNCTION "finance"."save_vendor_bill_atomic"("p_bill_id" "uuid", "p_payload" "jsonb", "p_lines" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."suggest_bank_statement_matches"("p_statement_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."suggest_bank_statement_matches"("p_statement_id" "uuid") TO "authenticated";
 
 
 
@@ -23475,8 +23645,8 @@ GRANT ALL ON TABLE "finance"."fee_tiers" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "finance"."financial_accounts" TO "authenticated";
-GRANT ALL ON TABLE "finance"."financial_accounts" TO "service_role";
+GRANT ALL ON TABLE "finance"."financial_account_change_requests" TO "authenticated";
+GRANT ALL ON TABLE "finance"."financial_account_change_requests" TO "service_role";
 
 
 
@@ -24080,7 +24250,6 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
-
 
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";

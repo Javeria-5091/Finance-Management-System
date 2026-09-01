@@ -34,6 +34,7 @@ export interface FinancialAccount {
   linked_ledger_account_id: string;
   reconciliation_method: 'MANUAL' | 'AUTO' | 'IMPORT';
   responsible_user_id: string | null;
+  supporting_evidence_reference: string | null;
   is_active: boolean;
   is_default: boolean;
   requires_dual_approval: boolean;
@@ -146,7 +147,7 @@ export const getFinancialAccounts = async (orgId: string) => {
   const { data, error } = await db
     .from('financial_accounts')
     .select('*')
-    
+    .eq('organization_id', orgId)
     .eq('is_active', true)
     .order('institution_type', { ascending: true })
     .order('account_name', { ascending: true });
@@ -157,7 +158,7 @@ export const getReconciliationSummary = async (orgId: string) => {
   const { data, error } = await rpt
     .from('reconciliation_summary')
     .select('*')
-    
+    .eq('organization_id', orgId)
     .order('account_name', { ascending: true });
   return { data: data as ReconciliationSummary[], error };
 };
@@ -166,7 +167,7 @@ export const getAssetAccounts = async (orgId: string) => {
   const { data, error } = await db
     .from('chart_of_accounts')
     .select('id, code, name, account_type')
-    
+    .eq('organization_id', orgId)
     .eq('posting_allowed', true)
     .eq('is_active', true)
     .like('code', '1%')
@@ -195,45 +196,11 @@ export const updateFinancialAccount = async (id: string, payload: Partial<Financ
 
 export const deactivateFinancialAccount = async (id: string, orgId: string, reason: string) => {
   const reasonText = reason.trim();
-  if (!reasonText) {
-    throw new Error('A deactivation reason is required.');
-  }
-
-  const { data: existing, error: fetchError } = await db
-    .from('financial_accounts')
-    .select('notes')
-    .eq('id', id)
-    
-    .eq('is_active', true)
-    .single();
-
-  if (fetchError) {
-    throw new Error(fetchError.message || 'Financial account was not found or is already inactive.');
-  }
-
-  const previousNotes = typeof existing?.notes === 'string' ? existing.notes.trim() : '';
-  const notes = previousNotes
-    ? `${previousNotes}\nDeactivated: ${reasonText}`
-    : `Deactivated: ${reasonText}`;
-
-  const { data, error } = await db
-    .from('financial_accounts')
-    .update({
-      is_active: false,
-      notes,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', id)
-    
-    .eq('is_active', true)
-    .select()
-    .single();
-
-  if (error || !data) {
-    throw new Error(error?.message || 'Unable to deactivate financial account.');
-  }
-
-  return { data: data as FinancialAccount, error: null };
+  if (!reasonText) throw new Error('A deactivation reason is required.');
+  const { data, error } = await db.schema('finance').rpc('request_financial_account_change', {
+    p_account_id: id, p_changes: { is_active: false, notes: `[DEACTIVATED] ${reasonText}` }, p_reason: reasonText
+  });
+  return { data, error };
 };
 
 // ==================== BANK STATEMENTS ====================
@@ -242,7 +209,7 @@ export const getBankStatements = async (orgId: string, accountId: string) => {
   const { data, error } = await db
     .from('bank_statements')
     .select('*, financial_accounts(account_name, currency, masked_identifier)')
-    
+    .eq('organization_id', orgId)
     .eq('financial_account_id', accountId)
     .order('statement_date', { ascending: false });
   return { data: data as BankStatement[], error };
@@ -306,8 +273,8 @@ export const getStatementLines = async (orgId: string, statementId: string) => {
   const { data, error } = await db
     .from('statement_lines')
     .select('*')
-    
     .eq('bank_statement_id', statementId)
+    .eq('financial_account_id', (await db.from('bank_statements').select('financial_account_id').eq('id', statementId).eq('organization_id', orgId).single()).data?.financial_account_id || '00000000-0000-0000-0000-000000000000')
     .order('line_number', { ascending: true });
   return { data: data as StatementLine[], error };
 };
@@ -324,8 +291,51 @@ export const getUnreconciledLines = async (orgId: string) => {
 // ==================== RECONCILIATION RPCs ====================
 
 export const runAutoMatch = async (statementId: string) => {
-  const { data, error } = await db.schema('finance').rpc('auto_match_statement_lines', {
+  const { data, error } = await db.schema('finance').rpc('suggest_bank_statement_matches', {
     p_statement_id: statementId
+  });
+  if (error) throw new Error(error.message);
+  return Array.isArray(data) ? data : [];
+};
+
+export const confirmSuggestedMatch = async (lineId: string, journalLineId: string, reason?: string) => {
+  const { data, error } = await db.schema('finance').rpc('manual_match_statement_line', {
+    p_line_id: lineId, p_journal_line_id: journalLineId, p_reason: reason || 'User confirmed automatic match suggestion'
+  });
+  return { data, error };
+};
+
+export const finalizeReconciliation = async (statementId: string, userId: string, orgId: string) => {
+  const { data, error } = await db.schema('finance').rpc('finalize_bank_reconciliation', {
+    p_statement_id: statementId, p_user_id: userId, p_organization_id: orgId
+  });
+  return { data, error };
+};
+
+export const requestFinancialAccountChange = async (accountId: string, changes: Record<string, unknown>, reason: string) => {
+  const { data, error } = await db.schema('finance').rpc('request_financial_account_change', {
+    p_account_id: accountId, p_changes: changes, p_reason: reason
+  });
+  return { data, error };
+};
+
+export const getFinancialAccountChangeRequests = async (orgId: string) => {
+  const { data, error } = await db.from('financial_account_change_requests')
+    .select('*, financial_accounts(account_name)')
+    .eq('organization_id', orgId).eq('status', 'PENDING').order('requested_at', { ascending: false });
+  return { data, error };
+};
+
+export const approveFinancialAccountChange = async (requestId: string, reason?: string) => {
+  const { data, error } = await db.schema('finance').rpc('approve_financial_account_change', {
+    p_request_id: requestId, p_reason: reason || null
+  });
+  return { data, error };
+};
+
+export const reverseBankTransfer = async (transferId: string, reversalDate: string, reason: string) => {
+  const { data, error } = await db.schema('finance').rpc('reverse_bank_transfer', {
+    p_transfer_id: transferId, p_reversal_date: reversalDate, p_reason: reason
   });
   return { data, error };
 };
@@ -367,7 +377,7 @@ export const getBankTransfers = async (orgId: string) => {
   const { data: transfers, error } = await db
     .from('bank_transfers')
     .select('*')
-    
+    .eq('organization_id', orgId)
     .order('transfer_date', { ascending: false });
 
   if (error || !transfers) return { data: [], error };
@@ -376,6 +386,7 @@ export const getBankTransfers = async (orgId: string) => {
   const { data: accounts } = await db
     .from('financial_accounts')
     .select('id, account_name, currency, masked_identifier')
+    .eq('organization_id', orgId)
     ;
 
   const accMap = new Map((accounts || []).map((a: any) => [a.id, a]));

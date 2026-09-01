@@ -50,7 +50,7 @@ export default function BudgetVariancePage() {
     <div className="p-6 max-w-[1600px] mx-auto space-y-5">
       <ReportHeader
         title="Budget Variance Report"
-        subtitle="Original/revised/committed/actual/forecast/variance — Spec 13.2"
+        subtitle="Original/revised/committed/actual/forecast/variance "
         dataAsOf={dataAsOf}
         reconciled={false}
         actions={<ExportManager reportId="budget-variance" reportName="Budget_Variance" getCsvData={getCsv} activeFilters={filters as Record<string, string>} />}

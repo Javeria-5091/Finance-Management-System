@@ -68,7 +68,7 @@ export default function ProjectProfitabilityPage() {
     <div className="p-6 max-w-[1600px] mx-auto space-y-5">
       <ReportHeader
         title="Project Profitability"
-        subtitle="Revenue, costs, margins, and budget variance per project — Spec 13.2 Projects"
+        subtitle="Revenue, costs, margins, and budget variance per project  Projects"
         period={filters.startDate && filters.endDate ? `${filters.startDate} to ${filters.endDate}` : 'All Periods'}
         dataAsOf={dataAsOf}
         reconciled={true}

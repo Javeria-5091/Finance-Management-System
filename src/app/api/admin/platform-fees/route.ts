@@ -91,7 +91,7 @@ export async function POST(req: NextRequest) {
     const action = parsed.data.action;
 
     if (action === 'create') {
-      const { platform, name, fee_type, fee_rate, fee_fixed_amount, applies_to, priority, min_amount, max_amount, tiers } = parsed.data;
+      const { platform, name, fee_type, fee_rate, fee_fixed_amount, applies_to, priority, min_amount, max_amount, effective_from, effective_to, tiers } = parsed.data;
       if (!platform || !fee_type) {
         return NextResponse.json({ error: 'platform and fee_type are required' }, { status: 400 });
       }
@@ -104,7 +104,8 @@ export async function POST(req: NextRequest) {
       // fee_rules.fee_value is one column shared by PERCENTAGE (a %) and
       // FIXED (a flat amount) — see finance.compute_platform_fee(). TIERED/
       // SLAB rules ignore fee_value and use finance.fee_tiers instead.
-      const feeValue = fee_type === 'FIXED' ? (fee_fixed_amount ?? 0) : (fee_rate ?? 0);
+      const feeValue = fee_rate ?? 0;
+      const fixedAmount = fee_fixed_amount ?? 0;
       const ruleName = name?.trim() || `${resolvedPlatform.name} - ${fee_type} fee`;
 
       const { data, error } = await supabase
@@ -114,10 +115,13 @@ export async function POST(req: NextRequest) {
           name: ruleName,
           fee_type,
           fee_value: feeValue,
+          fixed_amount: fixedAmount,
           min_fee: min_amount ?? 0,
           max_fee: max_amount ?? 0,
           applies_to: applies_to || 'ALL',
           priority: priority ?? 0,
+          effective_from: effective_from || new Date().toISOString().slice(0,10),
+          effective_to: effective_to || null,
           is_active: true,
           organization_id: auth.orgId,
           created_by: auth.userId,
@@ -132,7 +136,7 @@ export async function POST(req: NextRequest) {
       if ((fee_type === 'TIERED' || fee_type === 'SLAB') && tiers?.length) {
         const { error: tiersError } = await supabase
           .schema('finance').from('fee_tiers')
-          .insert(tiers.map(t => ({
+          .insert(tiers.map((t: any) => ({
             fee_rule_id: data.id,
             tier_from: t.tier_from,
             tier_to: t.tier_to,
@@ -161,7 +165,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'update') {
-      const { id, name, fee_rate, fee_fixed_amount, min_amount, max_amount, priority } = parsed.data;
+      const { id, name, fee_rate, fee_fixed_amount, min_amount, max_amount, priority, effective_from, effective_to, tiers } = parsed.data;
       if (!id) {
         return NextResponse.json({ error: 'id is required for update' }, { status: 400 });
       }
@@ -186,6 +190,16 @@ export async function POST(req: NextRequest) {
       if (min_amount !== undefined) updates.min_fee = min_amount;
       if (max_amount !== undefined) updates.max_fee = max_amount;
       if (priority !== undefined) updates.priority = priority;
+      if (effective_from !== undefined) updates.effective_from = effective_from || null;
+      if (effective_to !== undefined) updates.effective_to = effective_to || null;
+      if (fee_fixed_amount !== undefined) updates.fixed_amount = fee_fixed_amount;
+      if (tiers && (existing.fee_type === 'TIERED' || existing.fee_type === 'SLAB')) {
+        await supabase.schema('finance').from('fee_tiers').delete().eq('fee_rule_id', id);
+        if (tiers.length) {
+          const { error: tierError } = await supabase.schema('finance').from('fee_tiers').insert(tiers.map((t:any)=>({...t, fee_rule_id:id})));
+          if (tierError) return NextResponse.json({error:tierError.message},{status:500});
+        }
+      }
 
       const { data, error } = await supabase
         .schema('finance').from('fee_rules')

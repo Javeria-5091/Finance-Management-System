@@ -50,8 +50,8 @@ export default function PlatformSettlementsPage() {
   return (
     <div className="p-6 max-w-[1600px] mx-auto space-y-5">
       <ReportHeader
-        title="Platform Settlements"
-        subtitle="Gross settlements, fees, effective rate, variance, net payout — Spec 13.2"
+        title="Platform Settlement Report"
+        subtitle="Gross settlements, fees, effective rate, variance, net payout "
         period={filters.startDate && filters.endDate ? `${filters.startDate} to ${filters.endDate}` : 'All Periods'}
         dataAsOf={dataAsOf}
         reconciled={true}
@@ -85,7 +85,7 @@ export default function PlatformSettlementsPage() {
             <div className="lg:col-span-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
-                  <thead className="bg-gray-50 dark:bg-gray-900/60 text-[10px] uppercase text-gray-500">
+                  <thead className="bg-gray-50 dark:bg-gray-900/60 text-[10px] uppercase text-gray-500 dark:text-gray-400">
                     <tr>
                       <th className="p-3 text-left">Platform</th>
                       <th className="p-3 text-left hidden md:table-cell">Client</th>
@@ -96,15 +96,15 @@ export default function PlatformSettlementsPage() {
                       <th className="p-3 text-center">Recon</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                  <tbody className="divide-y divide-gray-100 dark:divide-gray-700 dark:divide-gray-700">
                     {rows.map((r, i) => (
                       <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                        <td className="p-3 font-medium text-gray-900 dark:text-white">{r.platform_name}</td>
-                        <td className="p-3 text-gray-500 hidden md:table-cell">{r.client_name}</td>
+                        <td className="p-3 font-medium text-gray-900 dark:text-white dark:text-white">{r.platform_name}</td>
+                        <td className="p-3 text-gray-500 dark:text-gray-400 hidden md:table-cell">{r.client_name}</td>
                         <td className="p-3 text-right font-mono text-green-600">{f(r.gross_settlement)}</td>
                         <td className="p-3 text-right font-mono text-red-500">{f(r.actual_fee)}</td>
                         <td className="p-3 text-right font-mono font-medium">{f(r.net_payout)}</td>
-                        <td className={`p-3 text-right font-mono hidden md:table-cell ${Math.abs(r.fee_variance) > 100 ? 'text-red-600 font-bold' : 'text-gray-500'}`}>{f(r.fee_variance)}</td>
+                        <td className={`p-3 text-right font-mono hidden md:table-cell ${Math.abs(r.fee_variance) > 100 ? 'text-red-600 font-bold' : 'text-gray-500 dark:text-gray-400'}`}>{f(r.fee_variance)}</td>
                         <td className="p-3 text-center">
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${r.reconciliation_status === 'reconciled' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>{r.reconciliation_status}</span>
                         </td>
@@ -120,7 +120,7 @@ export default function PlatformSettlementsPage() {
 
             <div className="space-y-5">
               <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
-                <h4 className="text-xs font-bold uppercase text-gray-500 mb-4">Gross-to-Net Waterfall</h4>
+                <h4 className="text-xs font-bold uppercase text-gray-500 dark:text-gray-400 mb-4">Gross-to-Net Waterfall</h4>
                 <ResponsiveContainer width="100%" height={200}>
                   <BarChart data={platformData.slice(0, 6)}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
@@ -135,7 +135,7 @@ export default function PlatformSettlementsPage() {
                 </ResponsiveContainer>
               </div>
               <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
-                <h4 className="text-xs font-bold uppercase text-gray-500 mb-4">Effective Rate Trend</h4>
+                <h4 className="text-xs font-bold uppercase text-gray-500 dark:text-gray-400 mb-4">Effective Rate Trend</h4>
                 <ResponsiveContainer width="100%" height={180}>
                   <ScatterChart>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
@@ -151,7 +151,7 @@ export default function PlatformSettlementsPage() {
           </div>
         </div>
       ) : (
-        <EmptyReportState icon="chart" title="No Settlement Data" message="No platform settlement records found" hint="Process invoices and payments through platform accounts" />
+        <EmptyReportState icon="chart" title="No Platform Settlement Data" message="No platform settlement records found" hint="Process invoices and payments through platform accounts" />
       )}
     </div>
   );

@@ -18,7 +18,11 @@ export default function ControlsAuditPage() {
   const [filters, setFilters] = useState<ReportFilters>({});
   const [dataAsOf] = useState(new Date().toISOString());
 
-  const approvals = useQuery({ queryKey: ['approval-aging'], queryFn: getApprovalAging, enabled: tab === 'approvals' });
+  const approvals = useQuery<ApprovalAgingRow[], Error>({
+  queryKey: ['approval-aging'],
+  queryFn: () => getApprovalAging(),
+  enabled: tab === 'approvals',
+});
   const auditLog = useQuery({ queryKey: ['audit-log', filters], queryFn: () => getAuditLog({
     startDate: filters.startDate,
     endDate: filters.endDate,
@@ -75,7 +79,7 @@ export default function ControlsAuditPage() {
     <div className='p-6 max-w-[1600px] mx-auto space-y-5'>
       <ReportHeader
         title='Controls & Audit'
-        subtitle='Approval aging, policy exceptions, audit trail, access review — Spec 13.2'
+        subtitle='Approval aging, policy exceptions, audit trail, access review '
         dataAsOf={dataAsOf}
         reconciled={true}
         actions={<ExportManager reportId={`controls-${tab}`} reportName={`Controls_${tab}`} getCsvData={getCsv} activeFilters={filters as Record<string, string>} />}

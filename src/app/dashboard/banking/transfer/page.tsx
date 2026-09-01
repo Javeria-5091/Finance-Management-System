@@ -2,10 +2,10 @@
 import { useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { usePermissions } from "@/context/PermissionContext";
-import { useBankTransfers, useFinancialAccounts, useCreateTransfer, useUpdateTransferStatus, usePostTransfer, useOpenPeriod } from '@/hooks/useBanking';
+import { useBankTransfers, useFinancialAccounts, useCreateTransfer, useUpdateTransferStatus, usePostTransfer, useOpenPeriod, useReverseTransfer } from '@/hooks/useBanking';
 import StatusActions from '@/components/finance/StatusActions';
 import ReasonModal from '@/components/finance/ReasonModal';
-import { Plus, ArrowLeftRight, Loader2, X, ShieldCheck } from 'lucide-react';
+import { Plus, ArrowLeftRight, Loader2, X, ShieldCheck, RotateCcw } from 'lucide-react';
 import type { BankTransfer } from '../../../../services/bank.service';
 
 const STATUS_STYLES: Record<string, string> = {
@@ -40,6 +40,7 @@ export default function TransfersPage() {
   const createTransfer = useCreateTransfer();
   const updateStatus = useUpdateTransferStatus();
   const postTransfer = usePostTransfer();
+  const reverseTransfer = useReverseTransfer();
 
   const [showModal, setShowModal] = useState(false);
   const [reasonState, setReasonState] = useState({ open: false, title: '', action: '', id: '' });
@@ -138,6 +139,10 @@ export default function TransfersPage() {
     );
   };
 
+  const useReverseTransferAction = async (transferId: string, reason: string) => {
+    return await reverseTransfer.mutateAsync({ transferId, reversalDate: new Date().toISOString().slice(0,10), reason });
+  };
+
   // Workflow actions
   const processAction = async (transferId: string, action: string, reason: string) => {
     const updates: any = {};
@@ -162,6 +167,10 @@ export default function TransfersPage() {
         updates.status = 'CANCELLED';
         updates.rejection_reason = reason;
         break;
+      case 'reverse':
+        const reverseResult = await useReverseTransferAction(transferId, reason);
+        if (reverseResult?.error) alert('Reversal failed: ' + reverseResult.error.message);
+        return;
       case 'post':
         if (!openPeriod) {
           alert('No open accounting period found. Cannot post.');
@@ -177,10 +186,10 @@ export default function TransfersPage() {
         // creates — see schema.sql / P2_008 migration. Leaving the dead
         // assignments here previously made it look like this page was
         // finalizing the transfer, masking the real bug.
+        const transfer = (transfers as BankTransfer[] | undefined)?.find(t => t.id === transferId);
+        if (!transfer) { alert('Transfer record could not be loaded. Refresh and try again.'); return; }
         const { error: postErr } = await postTransfer.mutateAsync({
-          transferId,
-          periodId: openPeriod.id,
-          date: form.transfer_date,
+          transferId, periodId: openPeriod.id, date: transfer.transfer_date,
         });
         if (postErr) {
           alert('Posting failed: ' + postErr.message);
@@ -291,6 +300,11 @@ export default function TransfersPage() {
                     <td className="px-4 py-3 text-right">
                       {['DRAFT', 'SUBMITTED', 'APPROVED'].includes(t.status) && (
                         <StatusActions record={t} module="banking" onAction={handleAction} isPosting={postTransfer.isPending} />
+                      )}
+                      {t.status === 'POSTED' && hasPermission('BANK_TRANSFER_APPROVE') && (
+                        <button onClick={() => handleAction(t.id, 'reverse', true)} className="inline-flex items-center gap-1 text-xs text-red-600 hover:text-red-700" title="Reverse posted transfer">
+                          <RotateCcw size={14} /> Reverse
+                        </button>
                       )}
                     </td>
                   </tr>

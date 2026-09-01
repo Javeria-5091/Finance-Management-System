@@ -1,26 +1,33 @@
 'use client';
-import {useEffect,useState} from 'react';
+import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
-export default function PlatformSettlements()
-{
-    const [rows,setRows]=useState<any[]>([]);
-    const load=async()=>{const r=await fetch('/api/finance/platform-settlements');
-        const j=await r.json();
-        if(r.ok)setRows(j.data||[]);
-        else toast.error(j.error||'Failed')};
-        useEffect(()=>{load()},[]);
-        const reconcile=async(id:string)=>{const r=await fetch(`/api/finance/platform-settlements/${id}`,{method:'POST'});
-        const j=await r.json();
-        if(!r.ok)toast.error(j.error||'Failed');
-        else{toast.success(`Reconciled; fee variance ${j.data?.fee_variance??0}`);
-        load()}};
-        return <div className="space-y-6">
-            <h1 className="text-2xl font-bold">Platform Settlements</h1>
-            <p className="text-sm text-gray-500">Expected fee is calculated from the active rule; actual deductions remain the source for final cash settlement.</p>
-            <div className="overflow-auto">
-                <table className="w-full text-sm">
-                    <thead><tr><th>Reference</th><th>Date</th><th>Gross</th><th>Expected Fee</th><th>Actual Fee</th><th>Net</th><th>Status</th><th/></tr></thead>
-                    <tbody>{rows.map(r=><tr key={r.id} className="border-t"><td>{r.settlement_reference}</td><td>{r.settlement_date}</td><td>{r.gross_amount} {r.currency}</td><td>{r.expected_fee_amount}</td><td>{r.actual_fee_amount}</td><td>{r.net_amount}</td><td>{r.status}</td><td>{['DRAFT','SUBMITTED','VERIFIED','APPROVED'].includes(r.status)&&<button onClick={()=>reconcile(r.id)} className="text-blue-600">Reconcile</button>}</td></tr>)}</tbody>
-                </table>
-            </div>
-            </div>}
+import { Plus, BarChart3 } from 'lucide-react';
+import Link from 'next/link';
+import { supabase } from '@/lib/supabase';
+
+export default function PlatformSettlements() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [platforms, setPlatforms] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [show, setShow] = useState(false);
+  const [form, setForm] = useState({ platform_id:'', financial_account_id:'', settlement_reference:'', settlement_date:new Date().toISOString().slice(0,10), currency:'PKR', gross_amount:'', actual_fee_amount:'0', withholding_amount:'0', withdrawal_fee_amount:'0', exchange_rate:'1', fee_override_reason:'', fee_override_evidence_reference:'', notes:'' });
+
+  const load = async () => {
+    const [r, p, a] = await Promise.all([fetch('/api/finance/platform-settlements'), supabase.schema('finance').from('platforms').select('id,name').eq('is_active',true).order('name'), supabase.schema('finance').from('financial_accounts').select('id,account_name,currency').eq('is_active',true).order('account_name')]);
+    const j = await r.json(); if (r.ok) setRows(j.data || []); else toast.error(j.error || 'Failed');
+    setPlatforms(p.data || []); setAccounts(a.data || []);
+  };
+  useEffect(()=>{load()},[]);
+
+  const create = async () => {
+    if (!form.platform_id || !form.settlement_reference || !form.gross_amount) return toast.error('Platform, reference and gross amount are required');
+    const r = await fetch('/api/finance/platform-settlements',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...form,gross_amount:Number(form.gross_amount),actual_fee_amount:Number(form.actual_fee_amount),withholding_amount:Number(form.withholding_amount),withdrawal_fee_amount:Number(form.withdrawal_fee_amount),exchange_rate:Number(form.exchange_rate)||null,financial_account_id:form.financial_account_id||null,fee_override_reason:form.fee_override_reason||null,fee_override_evidence_reference:form.fee_override_evidence_reference||null})});
+    const j=await r.json(); if(!r.ok) return toast.error(j.error||'Create failed'); toast.success('Settlement created with auditable gross-to-net lines'); setShow(false); await load();
+  };
+  const reconcile = async(id:string)=>{const r=await fetch(`/api/finance/platform-settlements/${id}`,{method:'POST'});const j=await r.json();if(!r.ok)toast.error(j.error||'Failed');else{toast.success('Settlement reconciled and posted');load()}};
+
+  return <div className="space-y-6 p-6"><div className="flex items-center justify-between"><div><h1 className="text-2xl font-bold text-gray-900 dark:text-white">Platform Settlement Entry</h1><p className="text-sm text-gray-500 dark:text-gray-400 dark:text-gray-500">Operational settlement entry: capture gross-to-net settlement evidence. Use the report page for analysis and reporting.</p></div><div className="flex items-center gap-2"><Link href="/dashboard/reports/platform-settlements" className="flex items-center gap-2 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-200 px-4 py-2 rounded-lg"><BarChart3 size={16}/> View Report</Link><button onClick={()=>setShow(true)} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg"><Plus size={16}/> New Settlement</button></div></div>
+    <div className="overflow-auto bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700"><table className="w-full text-sm"><thead><tr className="bg-gray-50 dark:bg-gray-900/50"><th className="p-3 text-left">Reference</th><th className="p-3">Date</th><th className="p-3">Gross</th><th className="p-3">Expected</th><th className="p-3">Actual</th><th className="p-3">Variance</th><th className="p-3">Net</th><th className="p-3">Status</th><th/></tr></thead><tbody>{rows.map(r=><tr key={r.id} className="border-t border-gray-200 dark:border-gray-700"><td className="p-3 text-gray-900 dark:text-white">{r.settlement_reference}</td><td className="p-3">{r.settlement_date}</td><td className="p-3">{r.gross_amount} {r.currency}</td><td className="p-3">{r.expected_fee_amount}</td><td className="p-3">{r.actual_fee_amount}</td><td className="p-3">{r.fee_variance ?? Number(r.actual_fee_amount-r.expected_fee_amount).toFixed(2)}</td><td className="p-3">{r.net_amount} {r.currency}</td><td className="p-3">{r.status}</td><td className="p-3">{r.status==='DRAFT'&&<button onClick={()=>reconcile(r.id)} className="text-blue-600 hover:underline">Reconcile</button>}</td></tr>)}</tbody></table></div>
+    {show&&<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"><div className="bg-white dark:bg-gray-800 rounded-xl p-6 w-full max-w-lg max-h-[90vh] overflow-auto"><h2 className="text-lg font-bold mb-4">New Platform Settlement</h2><div className="grid grid-cols-2 gap-3">{[['Reference','settlement_reference'],['Date','settlement_date'],['Currency','currency'],['Gross','gross_amount'],['Actual Fee','actual_fee_amount'],['Withholding','withholding_amount'],['Withdrawal Fee','withdrawal_fee_amount'],['Exchange Rate','exchange_rate']].map(([label,key])=><input key={key} type={key==='settlement_date'?'date':key==='currency'?'text':'number'} placeholder={label} value={(form as any)[key]} onChange={e=>setForm({...form,[key]:e.target.value})} className="p-2.5 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white rounded-lg"/>)}<select value={form.platform_id} onChange={e=>setForm({...form,platform_id:e.target.value})} className="p-2.5 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white rounded-lg"><option value="">Platform *</option>{platforms.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><select value={form.financial_account_id} onChange={e=>setForm({...form,financial_account_id:e.target.value})} className="p-2.5 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white rounded-lg"><option value="">Bank/Wallet account</option>{accounts.map(a=><option key={a.id} value={a.id}>{a.account_name} ({a.currency})</option>)}</select><input placeholder="Fee override reason (required if variance)" value={form.fee_override_reason} onChange={e=>setForm({...form,fee_override_reason:e.target.value})} className="col-span-2 p-2.5 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white rounded-lg"/><input placeholder="Fee override evidence" value={form.fee_override_evidence_reference} onChange={e=>setForm({...form,fee_override_evidence_reference:e.target.value})} className="col-span-2 p-2.5 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white rounded-lg"/></div><div className="flex justify-end gap-2 mt-5"><button onClick={()=>setShow(false)} className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg">Cancel</button><button onClick={create} className="px-4 py-2 bg-blue-600 text-white rounded-lg">Create</button></div></div></div>}
+  </div>;
+}

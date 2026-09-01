@@ -180,7 +180,7 @@ export interface AccountBalanceRow {
   account_type: string;
   currency: string;
   balance: number;
-  pkr_equivalent: number;
+  pkr_equivalent: number | null;
   reconciliation_status: "reconciled" | "pending" | "unreconciled";
   last_reconciled_date?: string;
 }
@@ -306,7 +306,7 @@ export interface CurrencyExposureRow {
   total_receivable: number;
   total_payable: number;
   net_exposure: number;
-  pkr_equivalent: number;
+  pkr_equivalent: number | null;
   realized_gain_loss: number;
   unrealized_gain_loss: number;
 }

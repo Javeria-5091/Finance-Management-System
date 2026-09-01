@@ -19,20 +19,21 @@ export default function CashBankReportsPage() {
   const [filters, setFilters] = useState<ReportFilters>({});
   const [dataAsOf] = useState(new Date().toISOString());
 
-  const balances = useQuery({ queryKey: ['account-balances'], queryFn: getAccountBalances, enabled: tab === 'balances' });
+  const balances = useQuery({ queryKey: ['account-balances'], queryFn: () => getAccountBalances(), enabled: tab === 'balances' });
   const transfers = useQuery({ queryKey: ['bank-transfers', filters.startDate, filters.endDate], queryFn: () => getBankTransfers(filters.startDate, filters.endDate), enabled: tab === 'transfers' });
 
   const isLoading = tab === 'balances' ? balances.isLoading : transfers.isLoading;
   const balanceData = (balances.data || []) as AccountBalanceRow[];
   const transferData = (transfers.data || []) as BankTransferRow[];
 
-  const totalBalance = balanceData.reduce((s, a) => s + a.pkr_equivalent, 0);
+  const totalBalance = balanceData.reduce((s, a) => s + (a.pkr_equivalent ?? 0), 0);
   const reconciledCount = balanceData.filter(a => a.reconciliation_status === 'reconciled').length;
   const pendingCount = balanceData.filter(a => a.reconciliation_status === 'pending').length;
   const unreconciledCount = balanceData.filter(a => a.reconciliation_status === 'unreconciled').length;
 
   const currencyPieData = balanceData.reduce((acc, a) => {
     const existing = acc.find(e => e.name === a.currency);
+    if (a.pkr_equivalent == null) return acc;
     if (existing) existing.value += a.pkr_equivalent;
     else acc.push({ name: a.currency, value: a.pkr_equivalent });
     return acc;
@@ -47,7 +48,7 @@ export default function CashBankReportsPage() {
   const getCsv = () => {
  if (tab === 'balances') {
  let csv = 'Account,Type,Currency,Balance,PKR Equivalent,Status\n';
- balanceData.forEach(a => csv += `"${a.account_name}",${a.account_type},${a.currency},${a.balance},${a.pkr_equivalent},${a.reconciliation_status}\n`);
+ balanceData.forEach(a => csv += `"${a.account_name}",${a.account_type},${a.currency},${a.balance},${a.pkr_equivalent ?? ""},${a.reconciliation_status}\n`);
  return csv;
  }
  let csv = 'Date,From,To,Amount,Currency,Fee,Net,Status\n';
@@ -59,7 +60,7 @@ export default function CashBankReportsPage() {
     <div className="p-6 max-w-[1600px] mx-auto space-y-5">
       <ReportHeader
         title="Cash & Bank Reports"
-        subtitle="Account balances, reconciliation, transfers, fees — Spec 13.2"
+        subtitle="Account balances, reconciliation, transfers, fees"
         dataAsOf={dataAsOf}
         period={filters.startDate && filters.endDate ? `${filters.startDate} to ${filters.endDate}` : 'Current'}
         currency="PKR (Consolidated)"
@@ -107,7 +108,7 @@ export default function CashBankReportsPage() {
                       <td className="p-3 font-medium text-gray-900 dark:text-white">{a.account_name}</td>
                       <td className="p-3 text-gray-500 hidden md:table-cell text-xs">{a.account_type}</td>
                       <td className="p-3 text-right font-mono">{f(a.balance)} <span className="text-[10px] text-gray-400">{a.currency}</span></td>
-                      <td className="p-3 text-right font-mono font-medium">{f(a.pkr_equivalent)}</td>
+                      <td className="p-3 text-right font-mono font-medium">{a.pkr_equivalent == null ? <span className="text-amber-600">Rate unavailable</span> : f(a.pkr_equivalent)}</td>
                       <td className="p-3 text-center">
                         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${a.reconciliation_status === 'reconciled' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : a.reconciliation_status === 'pending' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'}`}>{a.reconciliation_status}</span>
                       </td>

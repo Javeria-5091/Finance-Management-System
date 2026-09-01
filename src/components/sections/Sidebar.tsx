@@ -222,13 +222,12 @@ const navGroups: NavGroup[] = [
       { id: "financial-accounts", label: "Financial Accounts", icon: "CircleDollarSign", path: "/dashboard/settings/financial-accounts", perm: "SETTINGS_READ" },
       { id: "numbering", label: "Numbering Sequences", icon: "Hash", path: "/dashboard/settings/numbering", perm: "SETTINGS_READ" },
       { id: "exchange-rates", label: "Exchange Rates", icon: "Scale", path: "/dashboard/settings/exchange-rates", perm: "SETTINGS_READ" },
+      { id: "platform-fees", label: "Platform Fees", icon: "ReceiptPercent", path: "/dashboard/settings/platform-fees", perm: "SETTINGS_READ" },
       { id: "notifications", label: "Notifications", icon: "Bell", path: "/dashboard/settings/notifications", perm: "SETTINGS_READ" },
-      // NEW (Module 1 audit fix): these three tables (core.approval_limits,
-      // core.user_permission_overrides, core.delegations) previously had no
-      // UI anywhere in the app despite full RLS/audit support (spec 7.1-7.3).
       { id: "approval-limits", label: "Approval Limits", icon: "ShieldAlert", path: "/dashboard/settings/approval-limits", perm: "ADMIN_USERS" },
       { id: "permission-overrides", label: "Permission Overrides", icon: "KeyRound", path: "/dashboard/settings/permission-overrides", perm: "ADMIN_USERS" },
       { id: "delegations", label: "Delegations", icon: "UserCog", path: "/dashboard/settings/delegations", perm: "ADMIN_USERS" },
+      
     ],
   },
   {

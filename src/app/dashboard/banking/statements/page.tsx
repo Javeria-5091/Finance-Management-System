@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { usePermissions } from "@/context/PermissionContext";
-import { useFinancialAccounts, useBankStatements, useStatementLines, useAutoMatch } from '@/hooks/useBanking';
+import { useFinancialAccounts, useBankStatements, useStatementLines, useAutoMatch, useManualMatch, useFinalizeReconciliation } from '@/hooks/useBanking';
 import ReconciliationTable from '@/components/banking/ReconciliationTable';
 import StatementImport from '@/components/banking/StatementImport';
 import { FileText, Sparkles, ChevronLeft, Loader2, CheckCircle, Clock, AlertTriangle } from 'lucide-react';
@@ -26,11 +26,14 @@ export default function StatementsPage() {
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [selectedStatementId, setSelectedStatementId] = useState<string | null>(null);
   const [showImport, setShowImport] = useState(false);
+  const [suggestions, setSuggestions] = useState<any[]>([]);
 
   const { data: accounts } = useFinancialAccounts();
   const { data: statements, isLoading: loadingStmts, refetch: refetchStmts } = useBankStatements(selectedAccountId || '');
   const { data: lines, isLoading: loadingLines } = useStatementLines(selectedStatementId || '');
   const autoMatch = useAutoMatch();
+  const manualMatch = useManualMatch();
+  const finalize = useFinalizeReconciliation();
 
   // Auto-select account from URL param
   useEffect(() => {
@@ -62,9 +65,24 @@ export default function StatementsPage() {
     if (!selectedStatementId) return;
     autoMatch.mutate(selectedStatementId, {
       onSuccess: (data) => {
-        alert(`Auto-match complete! ${data} lines matched.`);
+        setSuggestions((data as any[]) || []);
+        alert(`${Array.isArray(data) ? data.length : 0} match suggestions generated. Nothing was posted or matched automatically.`);
       },
+      onError: (e: any) => alert('Suggestion failed: ' + e.message),
     });
+  };
+
+  const confirmSuggestion = (row: any) => {
+    manualMatch.mutate({ lineId: row.line_id, journalLineId: row.journal_line_id, reason: 'User confirmed automatic reconciliation suggestion' }, {
+      onSuccess: () => setSuggestions(prev => prev.filter(x => x.line_id !== row.line_id)),
+      onError: (e: any) => alert('Match failed: ' + e.message),
+    });
+  };
+
+  const handleFinalize = () => {
+    if (!selectedStatementId) return;
+    if (!confirm('Finalize this reconciliation? All remaining unresolved lines must be matched, excluded, or duplicate first.')) return;
+    finalize.mutate(selectedStatementId, { onSuccess: () => alert('Reconciliation finalized.'), onError: (e: any) => alert('Finalize failed: ' + e.message) });
   };
 
   const handleImportSuccess = () => {
@@ -234,10 +252,32 @@ export default function StatementsPage() {
                     className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50 transition-colors"
                   >
                     {autoMatch.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                    Auto-Match
+                    Suggest Matches
+                  </button>
+                )}
+                {hasPermission('BANK_RECONCILE') && selectedStatement && selectedStatement.reconciliation_status !== 'COMPLETED' && (
+                  <button onClick={handleFinalize} disabled={finalize.isPending} className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-50">
+                    <CheckCircle className="w-4 h-4" /> {finalize.isPending ? 'Finalizing...' : 'Finalize'}
                   </button>
                 )}
               </div>
+              {suggestions.length > 0 && (
+                <div className="mb-4 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800/40 rounded-xl p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div><h3 className="font-semibold text-indigo-900 dark:text-indigo-200">Match Suggestions</h3><p className="text-xs text-indigo-700 dark:text-indigo-300">Suggestions never change the ledger until you confirm them.</p></div>
+                    <button onClick={() => setSuggestions([])} className="text-xs text-gray-500 hover:underline">Dismiss</button>
+                  </div>
+                  <div className="space-y-2 max-h-48 overflow-auto">
+                    {suggestions.map((row:any) => (
+                      <div key={row.line_id} className="flex items-center justify-between gap-3 bg-white dark:bg-gray-800 rounded-lg p-2.5 border dark:border-gray-700">
+                        <div className="min-w-0 text-xs"><div className="font-medium truncate">{row.journal_description || 'Journal line'} · {row.journal_date}</div><div className="text-gray-500">{row.match_method} · {Math.round(Number(row.confidence || 0)*100)}% confidence · {row.journal_amount}</div></div>
+                        <button onClick={() => confirmSuggestion(row)} disabled={manualMatch.isPending} className="shrink-0 px-3 py-1.5 rounded-md bg-indigo-600 text-white text-xs disabled:opacity-50">Confirm</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="flex-1 overflow-hidden">
                 {loadingLines ? (
                   <div className="flex items-center justify-center h-full"><Loader2 className="w-6 h-6 animate-spin text-gray-400" /></div>

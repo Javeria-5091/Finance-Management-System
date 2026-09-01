@@ -63,7 +63,7 @@ export default function FiscalClosePage() {
     <div className="p-6 max-w-[1600px] mx-auto space-y-5">
       <ReportHeader
         title="Fiscal Calendar & Close"
-        subtitle="Period status, close checklist, adjustments, year-end statements — Spec 13.2"
+        subtitle="Period status, close checklist, adjustments, year-end statements "
         dataAsOf={dataAsOf}
         reconciled={isBalanced}
         actions={<ExportManager reportId="fiscal-close" reportName="Fiscal_Close" getCsvData={getCsv} activeFilters={filters as Record<string, string>} />}

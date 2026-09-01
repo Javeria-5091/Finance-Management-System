@@ -440,6 +440,8 @@ export const getAccountBalances = async (organization_id?: string) => {
       .select('from_currency, to_currency, rate, rate_date')
       .in('from_currency', foreignCurrencies)
       .eq('to_currency', baseCurrency)
+      .not('approved_by', 'is', null)
+      .eq('is_locked', true)
       .order('rate_date', { ascending: false });
     for (const r of rates || []) {
       if (!rateByCurrency.has(r.from_currency)) rateByCurrency.set(r.from_currency, Number(r.rate));
@@ -458,7 +460,10 @@ export const getAccountBalances = async (organization_id?: string) => {
       account_type: a.account_type,
       currency: a.currency,
       balance,
-      pkr_equivalent: rate !== undefined ? balance * rate : balance,
+      // Never fabricate a PKR value when no approved conversion rate exists.
+      // The report consumer must display the original-currency balance and
+      // mark the consolidated value as unavailable until a rate is available.
+      pkr_equivalent: rate !== undefined ? balance * rate : null,
       reconciliation_status,
       last_reconciled_date: stmt?.reconciled_at,
     };

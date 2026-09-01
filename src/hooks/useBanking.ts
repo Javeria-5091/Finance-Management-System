@@ -155,6 +155,22 @@ export const useExcludeLine = () => {
   });
 };
 
+export const useFinalizeReconciliation = () => {
+  const qc = useQueryClient();
+  const { profile } = useAuth();
+  return useMutation({
+    mutationFn: (statementId: string) => {
+      if (!profile?.organization_id || !profile?.user_id) throw new Error('Authentication context is unavailable');
+      return bankService.finalizeReconciliation(statementId, profile.user_id, profile.organization_id);
+    },
+    onSuccess: (_data, statementId) => {
+      qc.invalidateQueries({ queryKey: ['bank_statements'] });
+      qc.invalidateQueries({ queryKey: ['statement_lines', statementId] });
+      qc.invalidateQueries({ queryKey: ['reconciliation_summary'] });
+    },
+  });
+};
+
 // ==================== TRANSFERS ====================
 
 export const useBankTransfers = () => {
@@ -206,5 +222,16 @@ export const useOpenPeriod = () => {
     queryFn: () => bankService.getOpenPeriod(orgId!).then(r => r.data),
     enabled: !!orgId,
     staleTime: 5 * 60 * 1000,
+  });
+};
+export const useReverseTransfer = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ transferId, reversalDate, reason }: { transferId: string; reversalDate: string; reason: string }) =>
+      bankService.reverseBankTransfer(transferId, reversalDate, reason),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['bank_transfers'] });
+      qc.invalidateQueries({ queryKey: ['reconciliation_summary'] });
+    },
   });
 };

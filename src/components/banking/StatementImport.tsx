@@ -107,7 +107,24 @@ export default function StatementImport({ accountId, currency, onSuccess }: Prop
         continue;
       }
 
-      const [dateStr, desc, ref, amountStr, balanceStr] = parts;
+      const normalizeHeader = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      const headerMap = new Map(rows[0].map((h, idx) => [normalizeHeader(h), idx]));
+      const valueAt = (...names: string[]) => {
+        for (const name of names) {
+          const idx = headerMap.get(normalizeHeader(name));
+          if (idx !== undefined) return parts[idx] ?? '';
+        }
+        return '';
+      };
+      // Supports the legacy 5-column export and the richer Spec-compatible
+      // export without changing the old import format.
+      const dateStr = valueAt('date', 'transaction_date') || parts[0];
+      const desc = valueAt('description', 'details') || parts[1];
+      const ref = valueAt('reference', 'ref') || parts[2];
+      const counterparty = valueAt('counterparty', 'counterparty_name', 'payee', 'payer') || null;
+      const transactionIdentifier = valueAt('transaction_identifier', 'transaction_id', 'transactionid', 'txn_id', 'txn') || null;
+      const amountStr = valueAt('amount', 'transaction_amount') || parts[3];
+      const balanceStr = valueAt('balance', 'balance_after', 'running_balance') || parts[4];
       const amount = parseFloat((amountStr || '').replace(/[^0-9.-]/g, ''));
 
       if (isNaN(amount)) {
@@ -115,10 +132,12 @@ export default function StatementImport({ accountId, currency, onSuccess }: Prop
         continue;
       }
 
-      if (!dateStr || isNaN(new Date(dateStr).getTime())) {
+      const parsedDate = new Date(dateStr);
+      if (!dateStr || isNaN(parsedDate.getTime())) {
         errors.push(`Row ${i + 1}: Invalid date "${dateStr}"`);
         continue;
       }
+      const normalizedDate = `${parsedDate.getFullYear()}-${String(parsedDate.getMonth() + 1).padStart(2, '0')}-${String(parsedDate.getDate()).padStart(2, '0')}`;
 
       if (amount > 0) totalDebits += amount;
       else totalCredits += Math.abs(amount);
@@ -126,11 +145,11 @@ export default function StatementImport({ accountId, currency, onSuccess }: Prop
       result.push({
         bank_statement_id: '',
         line_number: i,
-        transaction_date: dateStr,
+        transaction_date: normalizedDate,
         description: desc || null,
         reference: ref || null,
-        counterparty: null,
-        transaction_identifier: null,
+        counterparty,
+        transaction_identifier: transactionIdentifier,
         amount,
         balance_after: balanceStr ? parseFloat(balanceStr.replace(/[^0-9.-]/g, '')) : null,
         reconciliation_status: 'UNRECONCILED',

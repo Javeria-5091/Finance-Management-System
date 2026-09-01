@@ -309,7 +309,7 @@ export const numberingPostSchema = z.discriminatedUnion('action', [
 ]);
 
 // ─── Platform Fee Management ──────────────────────────────────────────────
-const feeType = z.enum(['PERCENTAGE', 'FIXED', 'TIERED', 'SLAB']);
+const feeType = z.enum(['PERCENTAGE', 'FIXED', 'PERCENTAGE_PLUS_FIXED', 'TIERED', 'SLAB']);
 const appliesTo = z.enum(['EXPENSE', 'INVOICE', 'VENDOR_BILL', 'PAYMENT_RECEIPT', 'SETTLEMENT', 'ALL']);
 const feeNumber = z.number().finite().min(0).max(9999999999999999.99);
 // BUG-019 FIX: this endpoint now targets finance.fee_rules (+ optional
@@ -343,6 +343,8 @@ const platformFeeFields = {
   currency: currencyCode.optional(),
   min_amount: feeNumber.nullable().optional(),
   max_amount: feeNumber.nullable().optional(),
+  effective_from: isoDate.nullable().optional(),
+  effective_to: isoDate.nullable().optional(),
   tiers: z.array(feeTierSchema).max(20).optional(),
 };
 export const platformFeeCreateSchema = z.object({ action: z.literal('create'), ...platformFeeFields }).strict();
@@ -355,6 +357,9 @@ export const platformFeeUpdateSchema = z.object({
   description: z.string().max(2000).nullable().optional(),
   min_amount: feeNumber.nullable().optional(),
   max_amount: feeNumber.nullable().optional(),
+  effective_from: isoDate.nullable().optional(),
+  effective_to: isoDate.nullable().optional(),
+  tiers: z.array(feeTierSchema).max(20).optional(),
   priority: z.number().int().min(0).max(1000).optional(),
 }).strict();
 export const platformFeeToggleSchema = z.object({ action: z.literal('toggle'), id: uuidSchema }).strict();

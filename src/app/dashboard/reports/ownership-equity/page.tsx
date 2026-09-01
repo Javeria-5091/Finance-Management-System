@@ -15,7 +15,10 @@ const f = (n: number) => new Intl.NumberFormat('en-PK', { style: 'currency', cur
 
 export default function OwnershipEquityPage() {
   const [dataAsOf] = useState(new Date().toISOString());
-  const { data, isLoading } = useQuery({ queryKey: ['ownership-equity'], queryFn: getOwnershipEquity });
+  const { data, isLoading } = useQuery<OwnershipRow[], Error>({
+  queryKey: ['ownership-equity'],
+  queryFn: () => getOwnershipEquity(),
+});
 
   const rows = (data || []) as OwnershipRow[];
   const totalCapital = rows.reduce((s, r) => s + r.capital, 0);
@@ -51,7 +54,7 @@ export default function OwnershipEquityPage() {
     <div className="p-6 max-w-[1600px] mx-auto space-y-5">
       <ReportHeader
         title="Ownership & Equity"
-        subtitle="Capital, owner loans, reserves, retained earnings, distributions — Spec 13.2"
+        subtitle="Capital, owner loans, reserves, retained earnings, distributions "
         dataAsOf={dataAsOf}
         reconciled={true}
         actions={<ExportManager reportId="ownership-equity" reportName="Ownership_Equity" getCsvData={getCsv} />}

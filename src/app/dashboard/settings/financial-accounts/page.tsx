@@ -54,6 +54,8 @@ interface AccountForm {
   linked_ledger_account_id: string;
   reconciliation_method: string;
   notes: string;
+  responsible_user_id: string;
+  supporting_evidence_reference: string;
 }
 
 const emptyForm: AccountForm = {
@@ -68,6 +70,8 @@ const emptyForm: AccountForm = {
   linked_ledger_account_id: "",
   reconciliation_method: "MANUAL",
   notes: "",
+  responsible_user_id: "",
+  supporting_evidence_reference: "",
 };
 
 export default function FinancialAccountsPage() {
@@ -89,6 +93,9 @@ export default function FinancialAccountsPage() {
   const [saving, setSaving] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<FinancialAccount | null>(null);
+  const [pendingChanges, setPendingChanges] = useState<any[]>([]);
+  const [changeTarget, setChangeTarget] = useState<FinancialAccount | null>(null);
+  const [changeReason, setChangeReason] = useState("");
 
   const fetchAccounts = useCallback(async () => {
     setLoading(true);
@@ -110,13 +117,15 @@ export default function FinancialAccountsPage() {
     }
 
     setOrgId(resolvedOrgId);
-    const [{ data, error }, { data: coa }] = await Promise.all([
+    const [{ data, error }, { data: coa }, { data: pending }] = await Promise.all([
       bankService.getFinancialAccounts(resolvedOrgId),
       bankService.getAssetAccounts(resolvedOrgId),
+      bankService.getFinancialAccountChangeRequests(resolvedOrgId),
     ]);
     if (!error && data) setAccounts(data);
     else if (error) toast.error("Failed to load: " + error.message);
     if (coa) setLedgerAccounts(coa as any);
+    if (pending) setPendingChanges(pending as any);
     setLoading(false);
   }, []);
 
@@ -150,11 +159,15 @@ export default function FinancialAccountsPage() {
       linked_ledger_account_id: form.linked_ledger_account_id,
       reconciliation_method: form.reconciliation_method,
       notes: form.notes || null,
+      responsible_user_id: form.responsible_user_id || null,
+      supporting_evidence_reference: form.supporting_evidence_reference.trim() || null,
     };
 
     if (editing) {
-      const { error } = await bankService.updateFinancialAccount(editing.id, payload);
-      if (error) toast.error("Update failed: " + error.message); else toast.success("Account updated");
+      setChangeTarget(editing);
+      setChangeReason("");
+      setSaving(false);
+      return;
     } else {
       if (!orgId) {
         toast.error("Could not determine your organization — please reload and try again.");
@@ -177,15 +190,32 @@ export default function FinancialAccountsPage() {
 
   const handleDeleteConfirm = async (reason: string) => {
     if (!deleteTarget || !reason.trim()) return;
-    const { error } = await bankService.updateFinancialAccount(deleteTarget.id, {
-      is_active: false,
-      notes: `[DEACTIVATED] ${reason}`,
-    } as any);
-    if (error) toast.error("Deactivation failed: " + error.message);
-    else toast.success("Account deactivated");
+    const { error } = await bankService.requestFinancialAccountChange(deleteTarget.id, { is_active: false, notes: `[DEACTIVATED] ${reason}` }, reason);
+    if (error) toast.error("Deactivation request failed: " + error.message);
+    else toast.success("Deactivation submitted for approval");
     setShowDeleteModal(false);
     setDeleteTarget(null);
     fetchAccounts();
+  };
+
+  const submitEditRequest = async () => {
+    if (!changeTarget || !changeReason.trim()) { toast.error('A reason is required for account changes'); return; }
+    const payload: Record<string, unknown> = {
+      account_name: form.account_name.trim(), institution_name: form.institution_name.trim(), institution_type: form.institution_type,
+      account_type: form.account_type, currency: form.currency, masked_identifier: form.masked_identifier || null,
+      opening_balance: Number(form.opening_balance) || 0, opening_date: form.opening_date || null, linked_ledger_account_id: form.linked_ledger_account_id,
+      reconciliation_method: form.reconciliation_method, notes: form.notes || null, responsible_user_id: form.responsible_user_id || null, supporting_evidence_reference: form.supporting_evidence_reference.trim() || null,
+    };
+    const { error } = await bankService.requestFinancialAccountChange(changeTarget.id, payload, changeReason.trim());
+    if (error) toast.error('Change request failed: ' + error.message);
+    else { toast.success('Account change submitted for approval'); setChangeTarget(null); setChangeReason(''); setShowForm(false); setEditing(null); fetchAccounts(); }
+  };
+
+  const approveChange = async (id: string) => {
+    const reason = window.prompt('Approval reason (optional):') || '';
+    const { error } = await bankService.approveFinancialAccountChange(id, reason);
+    if (error) toast.error('Approval failed: ' + error.message);
+    else { toast.success('Financial account change approved'); fetchAccounts(); }
   };
 
   const openEdit = (acc: FinancialAccount) => {
@@ -202,6 +232,8 @@ export default function FinancialAccountsPage() {
       linked_ledger_account_id: acc.linked_ledger_account_id || "",
       reconciliation_method: acc.reconciliation_method || "MANUAL",
       notes: acc.notes || "",
+      responsible_user_id: acc.responsible_user_id || "",
+      supporting_evidence_reference: acc.supporting_evidence_reference || "",
     });
     setShowForm(true);
   };
@@ -283,6 +315,20 @@ export default function FinancialAccountsPage() {
           {INSTITUTION_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
         </select>
       </div>
+
+      {pendingChanges.length > 0 && hasPermission("SETTINGS_MANAGE") && (
+        <div className="mb-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 rounded-xl p-4">
+          <h3 className="font-semibold text-amber-900 dark:text-amber-200 mb-3">Pending Financial-Account Changes</h3>
+          <div className="space-y-2">
+            {pendingChanges.map((r:any) => (
+              <div key={r.id} className="flex items-center justify-between gap-3 bg-white dark:bg-gray-800 rounded-lg p-3 border dark:border-gray-700">
+                <div className="text-sm"><div className="font-medium">{r.financial_accounts?.account_name || r.financial_account_id}</div><div className="text-xs text-gray-500">Requested {new Date(r.requested_at).toLocaleString()} · Reason: {r.reason}</div></div>
+                {user?.id !== r.requested_by && <button onClick={() => approveChange(r.id)} className="px-3 py-1.5 rounded-md bg-green-600 text-white text-xs">Approve</button>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Table */}
       <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden shadow-sm">
@@ -384,6 +430,7 @@ export default function FinancialAccountsPage() {
                 </select>
               </div>
               <div><label className={labelCls}>Notes</label><textarea className={inputCls} rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Internal notes..." /></div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3"><div><label className={labelCls}>Responsible User ID</label><input className={inputCls} value={form.responsible_user_id} onChange={(e) => setForm({ ...form, responsible_user_id: e.target.value })} placeholder="Optional user UUID" /></div><div><label className={labelCls}>Supporting Evidence</label><input className={inputCls} value={form.supporting_evidence_reference} onChange={(e) => setForm({ ...form, supporting_evidence_reference: e.target.value })} placeholder="Document/reference" /></div></div>
             </div>
             <div className="flex justify-end gap-3 p-5 border-t border-gray-200 dark:border-gray-700">
               <button onClick={() => { setShowForm(false); setEditing(null); }} className="px-4 py-2.5 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">Cancel</button>
@@ -396,6 +443,17 @@ export default function FinancialAccountsPage() {
       )}
 
       {/* DELETE MODAL -- uses ReasonModal's actual props: open, title, description, onConfirm(reason), onCancel */}
+      {changeTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
+          <div className="bg-white dark:bg-gray-800 rounded-xl w-full max-w-md p-5 shadow-2xl">
+            <h3 className="text-lg font-bold text-gray-900 dark:text-white">Submit Account Change for Approval</h3>
+            <p className="text-sm text-gray-500 mt-2">Sensitive financial-account changes require a reason and a second-person approval.</p>
+            <textarea value={changeReason} onChange={e => setChangeReason(e.target.value)} className={`${inputCls} mt-4`} rows={4} placeholder="Reason for this change *" />
+            <div className="flex justify-end gap-2 mt-4"><button onClick={() => setChangeTarget(null)} className="px-4 py-2 rounded-lg bg-gray-200 dark:bg-gray-700 text-sm">Cancel</button><button onClick={submitEditRequest} className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm">Submit for approval</button></div>
+          </div>
+        </div>
+      )}
+
       <ReasonModal
         open={showDeleteModal}
         title="Deactivate Account"
