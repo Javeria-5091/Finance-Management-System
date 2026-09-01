@@ -568,21 +568,28 @@ export async function checkOrgAiDailyLimit(
 ): Promise<{ allowed: boolean; reason: string }> {
   try {
     const today = new Date().toISOString().split('T')[0];
+    // AI-01 FIX: a raw `.from('ai_user_cost_tracking').eq('organization_id', orgId)`
+    // query here looks org-wide, but this `supabase` client is request-scoped
+    // (runs as the "authenticated" role under RLS). The only policy on this
+    // table, "users_own_cost", forces `user_id = auth.uid()` onto every row
+    // regardless of any organization_id filter the app applies — so a raw
+    // SELECT could only ever see the CALLING USER'S OWN row, never the rest
+    // of the org's usage, silently neutering the company-wide cost ceiling.
+    // ai.get_org_daily_ai_usage() is a SECURITY DEFINER RPC that computes the
+    // SUM() across every user in the org, bypassing that per-row restriction
+    // the same way ai.increment_usage() already does for writes.
     const { data, error } = await supabase
       .schema('ai')
-      .from('ai_user_cost_tracking')
-      .select('request_count, estimated_cost')
-      .eq('organization_id', orgId)
-      .eq('period_date', today);
+      .rpc('get_org_daily_ai_usage', { p_organization_id: orgId, p_period_date: today })
+      .maybeSingle();
 
     if (error) {
       console.error('checkOrgAiDailyLimit fetch error:', error.message);
       return { allowed: false, reason: 'Org rate limit check failed. Please try again later.' };
     }
 
-    const rows = data || [];
-    const totalRequests = rows.reduce((sum: number, r: any) => sum + (r.request_count || 0), 0);
-    const totalCost = rows.reduce((sum: number, r: any) => sum + parseFloat(r.estimated_cost || '0'), 0);
+    const totalRequests = Number(data?.total_requests || 0);
+    const totalCost = parseFloat(data?.total_cost || '0');
 
     if (totalRequests >= maxOrgRequests) {
       return { allowed: false, reason: 'Organization-wide daily AI request limit reached. Contact administrator.' };

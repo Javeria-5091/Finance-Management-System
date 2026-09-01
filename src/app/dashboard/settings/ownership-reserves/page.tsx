@@ -38,7 +38,7 @@ export default function OwnershipReservesPage() {
   const { data: policies, isLoading: loadingPolicies } = useReservePolicies();
   const createPolicy = useCreateReservePolicy();
   const updatePolicy = useUpdateReservePolicy();
-  const [policyForm, setPolicyForm] = useState({ policy_type: 'PERCENT_OF_PROFIT', fixed_amount: '0', percentage: '25', target_balance: '0', effective_from: new Date().toISOString().split('T')[0], notes: '' });
+  const [policyForm, setPolicyForm] = useState({ policy_type: 'PERCENT_OF_PROFIT', fixed_amount: '0', percentage: '25', target_balance: '0', effective_from: new Date().toISOString().split('T')[0] });
 
   const [reasonState, setReasonState] = useState({ open: false, title: '', action: '', id: '' });
 
@@ -147,7 +147,6 @@ export default function OwnershipReservesPage() {
             {policyForm.policy_type === 'TARGET_BALANCE' && <div><label className={labelCls}>Target Balance (PKR)</label><input type="number" value={policyForm.target_balance} onChange={e => setPolicyForm(p => ({ ...p, target_balance: e.target.value }))} className={inputCls} /></div>}
             <div><label className={labelCls}>Effective From</label><input type="date" value={policyForm.effective_from} onChange={e => setPolicyForm(p => ({ ...p, effective_from: e.target.value }))} className={inputCls} /></div>
           </div>
-          <div><label className={labelCls}>Notes</label><textarea value={policyForm.notes} onChange={e => setPolicyForm(p => ({ ...p, notes: e.target.value }))} className={`${inputCls} resize-none`} rows={2} /></div>
           <div className="flex justify-end"><button onClick={handleSavePolicy} disabled={updatePolicy.isPending || createPolicy.isPending} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm disabled:opacity-50 flex items-center gap-2">{(updatePolicy.isPending || createPolicy.isPending) && <Loader2 size={14} className="animate-spin" />} Save Policy</button></div>
         </div>
       )}

@@ -74,12 +74,21 @@ export async function POST(req: NextRequest) {
     // Check budget before posting to GL. If HARD_BLOCK policy is active and budget
     // is exceeded, the transaction is rejected unless force_budget_override is provided
     // by a CEO or FINANCE_HEAD.
+    // AP-04 FIX: budgets are PKR-only (public.budgets has no currency
+    // column) but expense.amount is in the expense's own currency
+    // (expense.currency). Passing the raw foreign-currency amount here
+    // compared e.g. a USD spend directly against a PKR budget ceiling as
+    // if 1 USD == 1 PKR. Convert to base currency first using the
+    // exchange_rate already validated above (validateExchangeRate
+    // guarantees a real rate for any non-PKR currency), then tell
+    // checkBudgetForTransaction the amount is now PKR.
+    const budgetAmountPKR = Number(expense.amount) * Number(expense.exchange_rate || 1);
     const budgetCheck = await checkBudgetForTransaction({
       project_id: expense.project_id || undefined,
       department: expense.department || undefined,
       category: expense.category || undefined,
-      amount: expense.amount,
-      currency: expense.currency || 'PKR',
+      amount: budgetAmountPKR,
+      currency: 'PKR',
       organization_id: orgId,
       // BUG-007 FIX: pass server-side authenticated supabase client so budget
       // checks run with the correct RLS context (browser client has no

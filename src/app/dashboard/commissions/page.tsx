@@ -124,6 +124,7 @@ export default function CommissionsPage() {
   const [payTarget, setPayTarget] = useState<CommissionRow | null>(null);
   const [payDate, setPayDate] = useState('');
   const [payRef, setPayRef] = useState('');
+  const [payFinancialAccountId, setPayFinancialAccountId] = useState('');
 
   // ─── Summary sub-tab ───
   const [summaryView, setSummaryView] = useState<'person' | 'project' | 'type'>('person');
@@ -131,6 +132,7 @@ export default function CommissionsPage() {
   // ─── Dropdowns ───
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [contractors, setContractors] = useState<{ id: string; name: string }[]>([]);
+  const [financialAccounts, setFinancialAccounts] = useState<{ id: string; account_name: string; masked_identifier?: string | null }[]>([]);
 
   // ==========================================
   // HOOKS
@@ -155,12 +157,14 @@ export default function CommissionsPage() {
 
   // ─── Fetch dropdowns ───
   const fetchDropdowns = useCallback(async () => {
-    const [projRes, conRes] = await Promise.all([
+    const [projRes, conRes, accountRes] = await Promise.all([
       supabase.from('projects').select('id, name').eq('status', 'ACTIVE').order('name'),
       supabase.from('contractors').select('id, name').eq('status', 'ACTIVE').order('name'),
+      supabase.schema('finance').from('financial_accounts').select('id, account_name, masked_identifier').eq('is_active', true).order('account_name'),
     ]);
     setProjects(projRes.data || []);
     setContractors(conRes.data || []);
+    setFinancialAccounts(accountRes.data || []);
   }, []);
 
   useEffect(() => { fetchDropdowns(); }, [fetchDropdowns]);
@@ -293,6 +297,7 @@ export default function CommissionsPage() {
     setPayTarget(com);
     setPayDate(new Date().toISOString().split('T')[0]);
     setPayRef('');
+    setPayFinancialAccountId('');
     setShowPayModal(true);
   };
 
@@ -302,8 +307,12 @@ export default function CommissionsPage() {
       toast.error('Payment date is required');
       return;
     }
+    if (!payFinancialAccountId) {
+      toast.error('Payment bank/cash account is required');
+      return;
+    }
     try {
-      await paidMut.mutateAsync({ id: payTarget.id, paymentDate: payDate, paymentRef: payRef });
+      await paidMut.mutateAsync({ id: payTarget.id, paymentDate: payDate, paymentRef: payRef, financialAccountId: payFinancialAccountId });
       toast.success('Commission marked as paid');
       setShowPayModal(false);
       setPayTarget(null);
@@ -1163,6 +1172,21 @@ export default function CommissionsPage() {
                 onChange={(e) => setPayDate(e.target.value)}
                 className={inputCls}
               />
+            </div>
+            <div>
+              <label className={labelCls + ` ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>Payment Account *</label>
+              <select
+                value={payFinancialAccountId}
+                onChange={(e) => setPayFinancialAccountId(e.target.value)}
+                className={inputCls}
+              >
+                <option value="">Select bank/cash account...</option>
+                {financialAccounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.account_name}{account.masked_identifier ? ` — ${account.masked_identifier}` : ''}
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
               <label className={labelCls + ` ${isDark ? 'text-gray-300' : 'text-gray-700'}`}>Payment Reference</label>

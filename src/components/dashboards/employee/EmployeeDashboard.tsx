@@ -19,8 +19,9 @@ export function EmployeeDashboard() {
         const { data, error } = await supabase
           .from('expenses')
           .select('*')
-          .eq('created_by', user.id)
+          .eq('user_id', user.id)
           .order('created_at', { ascending: false });
+        if (error) throw error;
         if (data) setMyExpenses(data);
       } catch (err) {
         console.error('EmployeeDashboard fetch error:', err);

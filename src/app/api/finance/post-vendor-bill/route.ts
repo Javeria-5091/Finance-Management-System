@@ -82,13 +82,19 @@ export async function POST(req: NextRequest) {
     }
 
     // --- BUDGET CHECK ---
-    const totalBillAmount = Number(bill.total_amount) || 0;
+    // AP-04 FIX: budgets are PKR-only but bill.total_amount is in the
+    // bill's own currency (bill.currency). Convert to base currency using
+    // bill.exchange_rate (validated above by validateExchangeRate) before
+    // comparing against the budget ceiling — otherwise a foreign-currency
+    // bill's spend is compared against PKR as if 1 unit of that currency
+    // == PKR 1.
+    const totalBillAmountPKR = (Number(bill.total_amount) || 0) * (Number(bill.exchange_rate) || 1);
     const budgetCheck = await checkBudgetForTransaction({
       project_id: bill.project_id || undefined,
       department: bill.department || undefined,
       category: bill.category || undefined,
-      amount: totalBillAmount,
-      currency: bill.currency || 'PKR',
+      amount: totalBillAmountPKR,
+      currency: 'PKR',
       organization_id: orgId,
       // BUG-007 FIX: pass server-side authenticated supabase client.
       supabaseClient: supabase,
@@ -109,7 +115,7 @@ export async function POST(req: NextRequest) {
             p_description: `Budget override on vendor bill posting by ${auth.role}.`,
             p_previous_status: 'APPROVED', p_new_status: 'APPROVED', p_source_module: 'budget',
             p_severity: 'high',
-            p_new_values: { override_by: auth.userId, override_role: auth.role, bill_amount: totalBillAmount },
+            p_new_values: { override_by: auth.userId, override_role: auth.role, bill_amount: bill.total_amount, bill_currency: bill.currency || 'PKR', bill_amount_pkr: totalBillAmountPKR },
           });
         } catch (overrideAuditErr: any) { console.error('Budget override audit log failed:', overrideAuditErr); }
       } else {

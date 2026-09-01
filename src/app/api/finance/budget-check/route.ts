@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { unstable_noStore as noStore } from 'next/cache';
 import { requirePermission, getAuthSupabase } from '@/lib/api-auth';
+import { validateExchangeRate } from '@/lib/validations';
 import {
   checkBudgetForTransaction,
   createBudgetAlertNotifications,
@@ -22,7 +23,7 @@ export async function POST(req: NextRequest) {
   }
  
   try {
-    const { budget_id, project_id, department, category, amount, currency, force_allow } = await req.json();
+    const { budget_id, project_id, department, category, amount, currency, exchange_rate, force_allow } = await req.json();
  
     if (!amount) {
       return NextResponse.json({ error: 'amount is required' }, { status: 400 });
@@ -32,6 +33,19 @@ export async function POST(req: NextRequest) {
     if (transactionAmount <= 0) {
       return NextResponse.json({ error: 'Amount must be greater than 0' }, { status: 400 });
     }
+
+    // AP-04 FIX: this ad-hoc endpoint used to forward whatever `currency`
+    // the caller sent straight into checkBudgetForTransaction, which then
+    // silently ignored it and compared the raw amount against the (PKR)
+    // budget ceiling as if it were already PKR. Budgets are PKR-only, so a
+    // non-PKR request must supply an exchange_rate to convert with — same
+    // requirement validateExchangeRate already enforces for expenses/bills/
+    // invoices before they're posted.
+    const rateError = validateExchangeRate(currency, exchange_rate);
+    if (rateError) {
+      return NextResponse.json({ error: rateError }, { status: 400 });
+    }
+    const amountPKR = transactionAmount * Number(exchange_rate || 1);
  
     // Run the budget check using the centralized service
     const result = await checkBudgetForTransaction({
@@ -39,8 +53,8 @@ export async function POST(req: NextRequest) {
       project_id,
       department,
       category,
-      amount: transactionAmount,
-      currency,
+      amount: amountPKR,
+      currency: 'PKR',
       organization_id: orgId,
       // BUG-007 FIX: pass server-side authenticated supabase client.
       supabaseClient: supabase,
@@ -135,4 +149,3 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
- 

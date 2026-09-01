@@ -260,7 +260,7 @@ export async function markCommissionPaid(
 // ─── Fetch summary by person (from view) ───
 export async function fetchCommissionByPerson(orgId: string) {
   const { data, error } = await supabase
-    .schema('reporting')
+    .schema('public')
     .from('v_commission_by_person')
     .select('*')
     .eq('organization_id', orgId);
@@ -271,7 +271,7 @@ export async function fetchCommissionByPerson(orgId: string) {
 // ─── Fetch summary by project (from view) ───
 export async function fetchCommissionByProject(orgId: string) {
   const { data, error } = await supabase
-    .schema('reporting')
+    .schema('public')
     .from('v_commission_by_project')
     .select('*')
     .eq('organization_id', orgId);
@@ -282,7 +282,7 @@ export async function fetchCommissionByProject(orgId: string) {
 // ─── Fetch summary by type (from view) ───
 export async function fetchCommissionByType(orgId: string) {
   const { data, error } = await supabase
-    .schema('reporting')
+    .schema('public')
     .from('v_commission_by_type')
     .select('*')
     .eq('organization_id', orgId);
@@ -293,7 +293,7 @@ export async function fetchCommissionByType(orgId: string) {
 // ─── Fetch status summary (from view) ───
 export async function fetchCommissionStatusSummary(orgId: string) {
   const { data, error } = await supabase
-    .schema('reporting')
+    .schema('public')
     .from('v_commission_status_summary')
     .select('*')
     .eq('organization_id', orgId);

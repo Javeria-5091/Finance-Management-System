@@ -130,9 +130,9 @@ export async function getWithholdingTaxConfig(
       return config;
     }
   } catch (err) {
-    console.error('Failed to fetch WHT config, using defaults:', err);
+    console.error('Failed to fetch WHT config:', err);
   }
-  return { ...DEFAULT_WHT_CONFIG };
+  throw new Error('No active distribution withholding configuration is configured for this organization');
 }
 
 // ─── Calculate Withholding Tax on Distribution Lines ─────────────────────────

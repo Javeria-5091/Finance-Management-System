@@ -327,7 +327,7 @@ export default function TransactionsPage() {
   const limit = 25;
 
   const summary = useTransactionSummary();
-  const { data: rows, isLoading, refetch } = useTransactionList({
+  const { data: rows, isLoading, error, refetch } = useTransactionList({
     search, type: typeFilter, status: statusFilter,
     date_from: dateFrom || null, date_to: dateTo || null,
     limit, offset: (page - 1) * limit,
@@ -467,14 +467,27 @@ export default function TransactionsPage() {
               {isLoading && (
                 <tr><td colSpan={8} className="px-4 py-12 text-center text-gray-400">Loading transactions...</td></tr>
               )}
-              {!isLoading && !rows?.length && (
+              {!isLoading && error && (
+                <tr><td colSpan={8} className="px-4 py-16 text-center">
+                  <FileText className="w-10 h-10 text-red-300 dark:text-red-800 mx-auto mb-3" />
+                  <p className="text-red-500 dark:text-red-400 font-medium">Couldn't load transactions</p>
+                  <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 max-w-md mx-auto">
+                    {error instanceof Error ? error.message : 'Something went wrong while fetching the ledger.'}
+                  </p>
+                  <button onClick={() => refetch()}
+                    className="mt-3 px-3 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors">
+                    Retry
+                  </button>
+                </td></tr>
+              )}
+              {!isLoading && !error && !rows?.length && (
                 <tr><td colSpan={8} className="px-4 py-16 text-center">
                   <FileText className="w-10 h-10 text-gray-300 dark:text-gray-600 mx-auto mb-3" />
                   <p className="text-gray-500 dark:text-gray-400 font-medium">No transactions found</p>
                   <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Journal entries will appear here once posted from Invoices, Bills, or manual Journals</p>
                 </td></tr>
               )}
-              {rows?.map(t => {
+              {!error && rows?.map(t => {
                 const sc = statusConfig[t.status] || statusConfig.DRAFT;
                 const src = sourceConfig[t.source_type] || sourceConfig.JOURNAL;
                 const isInflow = t.net_amount > 0;

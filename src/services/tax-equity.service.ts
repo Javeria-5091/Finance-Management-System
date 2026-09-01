@@ -412,8 +412,16 @@ export const createProfitDistribution = async (orgId: string, payload: any) => {
 };
 
 export const updateProfitDistribution = async (id: string, payload: any) => {
-  const orgId = await getCurrentOrgId();
-  const { data, error } = await db.from('profit_distributions').update({ ...payload, updated_at: new Date().toISOString() }).eq('organization_id', orgId).eq('id', id).select().single();
+  const status = payload?.status;
+  if (!status || !['DECLARED', 'APPROVED', 'CANCELLED'].includes(status)) {
+    return { data: null, error: new Error('Only DECLARED, APPROVED, or CANCELLED transitions are supported') };
+  }
+
+  const { data, error } = await db.rpc('transition_profit_distribution', {
+    p_distribution_id: id,
+    p_status: status,
+    p_reason: status === 'CANCELLED' ? payload?.reason || null : null,
+  });
   return { data: data as ProfitDistribution, error };
 };
 

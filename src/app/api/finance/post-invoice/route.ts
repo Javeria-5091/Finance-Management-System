@@ -77,12 +77,17 @@ export async function POST(req: NextRequest) {
     // For invoices, budget check is informational only — invoices generate revenue and do NOT
     // consume expense budgets. However, we still check project budgets to provide visibility
     // and create threshold notifications if relevant. Budget is never BLOCKED for invoices.
+    // AP-04 FIX: budgets are PKR-only but invoice.total_amount is in the
+    // invoice's own currency. Convert to base currency using
+    // invoice.exchange_rate (validated above) before comparing, same as
+    // post-expense/post-vendor-bill.
     let budgetCheckResult: any = null;
     if (invoice.project_id) {
+      const totalInvoiceAmountPKR = (Number(invoice.total_amount) || 0) * (Number(invoice.exchange_rate) || 1);
       const budgetCheck = await checkBudgetForTransaction({
         project_id: invoice.project_id,
-        amount: Number(invoice.total_amount) || 0,
-        currency: invoice.currency || 'PKR',
+        amount: totalInvoiceAmountPKR,
+        currency: 'PKR',
         organization_id: orgId,
         // BUG-007 FIX: pass server-side authenticated supabase client.
         supabaseClient: supabase,

@@ -20,7 +20,27 @@ export interface BudgetCheckInput {
   project_id?: string;
   department?: string;
   category?: string;
+  /**
+   * AP-04 FIX: MUST already be converted to the organization's base
+   * currency (PKR) — e.g. `amount_in_original_currency * exchange_rate`.
+   * public.budgets has no currency column at all (every budget is a PKR
+   * ceiling), and finance.budget_lines/reporting.budget_gl_actual are
+   * likewise base-currency only (the latter reads journal_lines'
+   * base_debit/base_credit). There is nowhere in this function to convert
+   * a foreign-currency amount, so it does not attempt to — see `currency`
+   * below for the guard that catches a caller who forgets to convert.
+   */
   amount: number;
+  /**
+   * AP-04 FIX: informational/defensive only — NOT used to convert `amount`.
+   * If provided and not 'PKR', checkBudgetForTransaction throws rather than
+   * silently comparing a foreign-currency `amount` against a PKR budget
+   * ceiling (which is exactly how AP-04 happened: callers passed
+   * expense.amount/bill.total_amount/invoice.total_amount — all in the
+   * transaction's own currency — straight through with `currency` set to
+   * that same non-PKR code, and this function ignored the field entirely).
+   * Omit this (or pass 'PKR') once `amount` has been converted.
+   */
   currency?: string;
   organization_id: string | null;
   /**
@@ -265,6 +285,54 @@ function buildNotifications(
   return notifications;
 }
 
+// ─── Resolve Applicable Budget (used by encumbrance sources) ───────────────
+
+/**
+ * AP-03 FIX: finds the single APPROVED budget that a purchase request (or
+ * similar not-yet-posted commitment) should encumber, using the same
+ * project-first-then-category resolution order checkBudgetForTransaction
+ * uses for its own project/category checks above. Returns null if nothing
+ * matches, so callers can treat "no budget configured for this scope" as a
+ * no-op rather than an error — mirrors checkBudgetForTransaction's own
+ * behavior of simply not adding a check when no budget row is found.
+ */
+export async function resolveApplicableBudgetId(
+  supabase: SClient,
+  input: { organization_id: string | null; project_id?: string | null; category?: string | null }
+): Promise<string | null> {
+  const { organization_id, project_id, category } = input;
+
+  if (project_id) {
+    // .limit(1) instead of .maybeSingle(): unlike the project-budget check
+    // in checkBudgetForTransaction (which relies on there being at most one
+    // APPROVED budget per project), this helper must not throw if that
+    // invariant is ever violated — it just needs *a* budget to encumber.
+    const { data: budgets, error } = await supabase
+      .from('budgets')
+      .select('id')
+      .eq('project_id', project_id)
+      .eq('organization_id', organization_id)
+      .eq('status', 'APPROVED')
+      .limit(1);
+    if (error) throw new Error(`Budget lookup failed: ${error.message}`);
+    if (budgets && budgets.length > 0) return budgets[0].id;
+  }
+
+  if (category) {
+    const { data: budgets, error } = await supabase
+      .from('budgets')
+      .select('id')
+      .eq('category', category)
+      .eq('organization_id', organization_id)
+      .eq('status', 'APPROVED')
+      .limit(1);
+    if (error) throw new Error(`Budget lookup failed: ${error.message}`);
+    if (budgets && budgets.length > 0) return budgets[0].id;
+  }
+
+  return null;
+}
+
 // ─── Core: checkBudgetForTransaction ────────────────────────────────────────
 
 export async function checkBudgetForTransaction(
@@ -273,6 +341,25 @@ export async function checkBudgetForTransaction(
   const { budget_id, project_id, department, category, amount, organization_id, supabaseClient } = input;
   const transactionAmount = Number(amount);
   const supabase = resolveClient(supabaseClient);
+
+  // AP-04 FIX: budgets (public.budgets.total_amount), the committed figure
+  // (finance.budget_lines.committed_amount) and the actual figure
+  // (reporting.budget_gl_actual.actual_spent, sourced from journal_lines'
+  // base_debit/base_credit) are ALL in the organization's base currency
+  // (PKR) — there is no per-budget currency. Previously this function
+  // accepted a `currency` field and never looked at it again, so callers
+  // that passed a foreign-currency transaction amount (e.g. a $1,000 USD
+  // expense) had it compared directly against a PKR budget ceiling as if
+  // $1,000 == PKR 1,000. Fail closed instead: a non-PKR `currency` means
+  // the caller forgot to convert `amount` first.
+  const inputCurrency = (input.currency || 'PKR').toUpperCase();
+  if (inputCurrency !== 'PKR') {
+    throw new Error(
+      `Budget check received a ${inputCurrency} amount, but budgets are tracked in PKR (base currency) only. ` +
+      `Convert the amount to PKR first (amount × exchange_rate, e.g. expense.base_amount / bill.base_total_amount / invoice.base_total_amount) ` +
+      `and pass currency: 'PKR' (or omit currency).`
+    );
+  }
 
   if (!organization_id) {
     return {

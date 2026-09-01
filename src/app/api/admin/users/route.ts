@@ -150,11 +150,39 @@ export async function POST(req: NextRequest) {
           userId: existing.id,
         }, { status: 400 });
       }
+
+      // AUTH-01 FIX (bug #1): the previous code never created an auth
+      // account at all — it inserted straight into profiles, so the
+      // invited person had no credential and could never sign in.
+      // auth.admin.* calls require the service-role key, not the
+      // request-scoped anon-key client (same pattern already used in
+      // src/app/api/health/route.ts).
+      const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      if (!serviceRoleKey) {
+        console.error('Admin invite failed: SUPABASE_SERVICE_ROLE_KEY is not configured');
+        return NextResponse.json({ error: 'Server is not configured to create user accounts' }, { status: 500 });
+      }
+      const adminClient = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        serviceRoleKey,
+        { auth: { autoRefreshToken: false, persistSession: false } }
+      );
+
+      const { data: inviteData, error: inviteError } = await adminClient.auth.admin.inviteUserByEmail(email, {
+        data: { full_name: fullName || null },
+      });
+      if (inviteError || !inviteData?.user) {
+        console.error('Auth invite failed:', inviteError?.message);
+        return NextResponse.json({ error: inviteError?.message || 'Failed to create auth account for invited user' }, { status: 502 });
+      }
+      const authUserId = inviteData.user.id;
  
-      // Create profile entry
+      // AUTH-01 FIX (bug #2): profiles.user_id is NOT NULL with a FK to
+      // auth.users(id) — must be set to the auth account just created.
       const { data: profile, error: profileErr } = await supabase
         .from('profiles')
         .insert({
+          user_id: authUserId,
           email,
           full_name: fullName || null,
           role: role || 'EMPLOYEE',
@@ -166,21 +194,31 @@ export async function POST(req: NextRequest) {
         .single();
  
       if (profileErr) {
+        // Roll back the auth account so a failed invite doesn't leave an
+        // orphaned auth.users row with no profile behind it.
+        await adminClient.auth.admin.deleteUser(authUserId).catch((cleanupErr: any) =>
+          console.error('Rollback of auth account after failed profile insert also failed:', cleanupErr?.message)
+        );
         return NextResponse.json({ error: profileErr.message }, { status: 500 });
       }
  
-      // Assign role via user_roles table
+      // AUTH-01 FIX (bug #3): core.user_roles has no role/assigned_by/
+      // organization_id columns, and its user_id column is a FK to
+      // auth.users(id), not profiles.id — a raw insert here could never
+      // succeed. core.admin_assign_user_role() is a SECURITY DEFINER RPC
+      // that resolves role_id correctly and writes to the right columns
+      // (it also bypasses a separate RLS gap where every core.roles row
+      // is seeded with organization_id = NULL, which the table's own
+      // policy could never match against the caller's org).
       if (role) {
         const { error: roleErr } = await supabase
-          .schema('core').from('user_roles')
-          .insert({
-            user_id: profile.id,
-            role,
-            is_active: true,
-            effective_from: effectiveFrom || new Date().toISOString().split('T')[0],
-            effective_to: effectiveTo || null,
-            assigned_by: auth.userId,
-            organization_id: auth.orgId,
+          .schema('core')
+          .rpc('admin_assign_user_role', {
+            p_user_id: authUserId,
+            p_organization_id: organizationId,
+            p_role_name: role,
+            p_effective_from: effectiveFrom || new Date().toISOString().split('T')[0],
+            p_effective_to: effectiveTo || null,
           });
         if (roleErr) {
           console.error('Role assignment failed:', roleErr.message);
@@ -194,12 +232,12 @@ export async function POST(req: NextRequest) {
           p_action: 'USER_CREATED',
           p_entity_type: 'user',
           p_entity_id: profile.id,
-          p_description: `Admin created user: ${email} with role ${role || 'EMPLOYEE'}`,
+          p_description: `Admin invited user: ${email} with role ${role || 'EMPLOYEE'}`,
           p_previous_status: null,
-          p_new_status: 'ACTIVE',
+          p_new_status: 'INVITED',
           p_source_module: 'admin',
           p_severity: 'high',
-          p_new_values: { email, role, organization_id: organizationId || auth.orgId },
+          p_new_values: { email, role, organization_id: organizationId || auth.orgId, auth_user_id: authUserId },
         });
       } catch (auditErr: any) {
         console.error('Audit log failed:', auditErr);
@@ -208,7 +246,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         user: profile,
-        message: `User ${email} created successfully`,
+        message: `Invitation email sent to ${email}`,
       });
     }
  
@@ -223,54 +261,41 @@ export async function POST(req: NextRequest) {
       // organization before modifying their role. Without this check an
       // admin from Organization A could assign roles to a user in
       // Organization B by guessing/enumerating a userId.
+      // AUTH-01 FIX: also select user_id — `userId` here is profiles.id
+      // (this endpoint's own convention), but core.user_roles.user_id
+      // must be the real auth.users id (profiles.user_id), not
+      // profiles.id itself.
       const targetProfile = getData(await supabase
         .from('profiles')
-        .select('id, email, organization_id')
+        .select('id, user_id, email, organization_id')
         .eq('id', userId)
         .maybeSingle());
       if (!targetProfile || targetProfile.organization_id !== organizationId) {
         return NextResponse.json({ error: 'User not found in your organization' }, { status: 404 });
       }
  
-      // Deactivate existing active roles
-      const { error: deactivateErr } = await supabase
-        .schema('core').from('user_roles')
-        .update({ is_active: false, effective_to: new Date().toISOString().split('T')[0] })
-        .eq('user_id', userId)
-        .eq('organization_id', organizationId)
-        .eq('is_active', true);
- 
-      if (deactivateErr) {
-        console.error('Deactivation of old roles failed:', deactivateErr.message);
-      }
- 
-      // Insert new role assignment
+      // AUTH-01 FIX (bug #3, same as invite): replaced the raw
+      // deactivate-then-insert against core.user_roles (nonexistent
+      // role/assigned_by/organization_id columns, wrong user_id) with
+      // the SECURITY DEFINER RPC, which also updates public.profiles.role
+      // for us under the existing guard-bypass mechanism.
       const { data: newRole, error: roleErr } = await supabase
-        .schema('core').from('user_roles')
-        .insert({
-          user_id: userId,
-          role,
-          is_active: true,
-          effective_from: effectiveFrom || new Date().toISOString().split('T')[0],
-          effective_to: effectiveTo || null,
-          assigned_by: auth.userId,
-          organization_id: auth.orgId,
+        .schema('core')
+        .rpc('admin_assign_user_role', {
+          p_user_id: targetProfile.user_id,
+          p_organization_id: organizationId,
+          p_role_name: role,
+          p_effective_from: effectiveFrom || new Date().toISOString().split('T')[0],
+          p_effective_to: effectiveTo || null,
         })
-        .select()
         .single();
  
       if (roleErr) {
         return NextResponse.json({ error: roleErr.message }, { status: 500 });
       }
  
-      // Update profile role
-      await supabase
-        .from('profiles')
-        .update({ role })
-        .eq('id', userId);
- 
       try {
-  await       supabase.schema('audit').rpc('log_action', {
+        await supabase.schema('audit').rpc('log_action', {
           p_user_id: auth.userId,
           p_action: 'ROLE_ASSIGNED',
           p_entity_type: 'user',

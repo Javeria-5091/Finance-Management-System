@@ -30,7 +30,7 @@ export async function PUT(req:NextRequest){
   const {supabase}=await getAuthSupabase(req); const {data:run,error}=await supabase.from('payroll_runs').select('*').eq('id',parsed.data.runId).eq('organization_id',auth.orgId).single();
   if(error||!run)return NextResponse.json({error:'Payroll run not found'},{status:404});
   if(parsed.data.action==='approve'){
-    if(run.status!=='UNDER_REVIEW'&&run.status!=='CALCULATED')return NextResponse.json({error:'Only calculated/review payroll runs can be approved'},{status:400});
+    if(run.status!=='UNDER_REVIEW')return NextResponse.json({error:'Only UNDER_REVIEW payroll runs can be approved'},{status:400});
     if(run.created_by===auth.userId)return NextResponse.json({error:'Maker-checker: requester cannot approve own payroll run'},{status:400});
     const {data,error:e}=await supabase.from('payroll_runs').update({status:'APPROVED',approved_by:auth.userId,approved_at:new Date().toISOString()}).eq('id',run.id).eq('organization_id',auth.orgId).select().single();
     if(e)return NextResponse.json({error:e.message},{status:400}); return NextResponse.json({data:e?null:data,message:'Payroll approved'});

@@ -83,7 +83,30 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     status: 'APPROVED', approved_by: auth.userId, approved_at: new Date().toISOString(), rejection_reason: null, updated_at: new Date().toISOString()
   }).eq('id', params.id).eq('organization_id', auth.orgId).eq('status', 'SUBMITTED').select().single();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ success: true, budget: data });
+
+  // AP-03 FIX: approving a budget previously never created the
+  // finance.budget_lines row that reporting.budget_gl_actual (Actual) and
+  // finance.budget_commitments (Committed, via the
+  // trg_sync_budget_line_committed_amount trigger) both depend on — so
+  // every budget's Committed/Actual stayed 0 forever, no matter how much
+  // GL activity or purchase-request encumbrance happened against it. This
+  // RPC upserts that budget line, keyed to the budget's control account.
+  // A budget with no control_account_id configured yet is left as-is
+  // (approval still succeeds) and surfaced as a warning instead of a hard
+  // failure, since that's an existing-setup gap, not a reason to block
+  // approval.
+  let budgetLineWarning: string | undefined;
+  const { data: budgetLineId, error: lineError } = await supabase
+    .schema('finance')
+    .rpc('ensure_budget_line', { p_budget_id: params.id });
+  if (lineError) {
+    console.error('Failed to create/update budget line on approval:', lineError);
+    budgetLineWarning = 'Budget approved, but the GL-tracking budget line could not be created. Committed/Actual figures may not update for this budget.';
+  } else if (!budgetLineId) {
+    budgetLineWarning = 'Budget approved, but it has no control account configured, so Committed/Actual cannot be tracked for it. Set a control account and re-save to enable tracking.';
+  }
+
+  return NextResponse.json({ success: true, budget: data, budget_line_warning: budgetLineWarning });
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: { id: string } }) {

@@ -183,8 +183,9 @@ export async function POST(req: NextRequest) {
       description: line.description,
     }));
  
-    // 6. BUG-001 FIX: Single atomic RPC call with CORRECT signature
-    //    (replaces: manual header insert + manual lines insert + wrong RPC)
+    // 6. PE-05 FIX: atomic GL posting + source-header finalization. The RPC locks the
+    //    APPROVED distribution, creates the journal, and marks the same header POSTED
+    //    with posted_by/posted_at/journal_entry_id/period_id in one database transaction.
     // BUG-016 FIX (defect b): the p_lines param is `jsonb` in the SQL
     // function signature. Passing JSON.stringify(rpcLines) sends a JSON
     // *string* value for that key, so PostgREST binds p_lines as a jsonb
@@ -193,15 +194,14 @@ export async function POST(req: NextRequest) {
     // because a scalar has no array length. Pass the array/object
     // directly and let the client's own JSON body encoding handle it, the
     // same way the already-correct finance/post-vendor-bill route does.
-    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_journal_entry', {
-      p_description: description || `Profit Distribution: ${distribution_id.slice(0, 8)}`,
-      p_transaction_date: distribution_date || new Date().toISOString().split('T')[0],
+    const { data: journalId, error: postErr } = await supabase.schema('finance').rpc('post_profit_distribution_atomic', {
+      p_distribution_id: distribution_id,
       p_period_id: period.id,
-      p_lines: rpcLines,
+      p_transaction_date: distribution_date || new Date().toISOString().split('T')[0],
+      p_description: description || `Profit Distribution: ${distribution_id.slice(0, 8)}`,
       p_currency: distribution.currency || 'PKR',
       p_exchange_rate: distribution.exchange_rate || 1,
-      p_source_type: 'PROFIT_DISTRIBUTION',
-      p_source_id: distribution_id,
+      p_lines: rpcLines,
     });
  
     if (postErr || !journalId) {

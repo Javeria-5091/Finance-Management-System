@@ -82,7 +82,7 @@ const REIMBURSEMENT_CATEGORIES = [
 // MAIN COMPONENT
 // ==========================================
 export default function PayrollPage() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const { hasPermission } = usePermissions();
   const canAdd = hasPermission("PAYROLL_CREATE");
   const canUpdate = hasPermission("PAYROLL_UPDATE");
@@ -448,6 +448,7 @@ export default function PayrollPage() {
       return;
     }
     try {
+      if (!profile?.organization_id) throw new Error("Organization context is required");
       const { error } = await supabase.from("payroll_advances").insert({
         employee_id: advForm.employee_id,
         amount: parseFloat(advForm.amount),
@@ -458,6 +459,7 @@ export default function PayrollPage() {
         start_deduction_month: advForm.start_deduction_month || null,
         remaining_balance: parseFloat(advForm.amount),
         created_by: user?.id,
+        organization_id: profile.organization_id,
       });
       if (error) throw error;
       toast.success("Advance created");
@@ -501,6 +503,7 @@ export default function PayrollPage() {
       return;
     }
     try {
+      if (!profile?.organization_id) throw new Error("Organization context is required");
       const { error } = await supabase.from("payroll_commissions").insert({
         employee_id: commForm.employee_id,
         commission_type: commForm.commission_type,
@@ -513,6 +516,7 @@ export default function PayrollPage() {
         description: commForm.description || null,
         status: "PENDING",
         created_by: user?.id,
+        organization_id: profile.organization_id,
       });
       if (error) throw error;
       toast.success("Commission created");
@@ -580,6 +584,7 @@ export default function PayrollPage() {
       return;
     }
     try {
+      if (!profile?.organization_id) throw new Error("Organization context is required");
       const { error } = await supabase.from("payroll_reimbursements").insert({
         employee_id: reimbForm.employee_id,
         amount: parseFloat(reimbForm.amount),
@@ -589,6 +594,7 @@ export default function PayrollPage() {
         expense_date: reimbForm.expense_date || new Date().toISOString().split("T")[0],
         status: "PENDING",
         created_by: user?.id,
+        organization_id: profile.organization_id,
       });
       if (error) throw error;
       toast.success("Reimbursement submitted");
