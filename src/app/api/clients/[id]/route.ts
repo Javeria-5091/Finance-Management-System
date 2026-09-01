@@ -62,10 +62,14 @@ export async function PATCH(
     }
     const body = parsed.data;
  
-    // Check client exists and belongs to org
+    // Check client exists and belongs to org.
+    // FND-BUD-03 FIX: public.clients has no is_active column -- selecting it
+    // errored on every single request, so `existing` was always null and
+    // every PATCH returned 404 regardless of whether the client existed.
+    // The real status column is `status`.
     const existing = getData(await supabase
       .from('clients')
-      .select('id, name, is_active')
+      .select('id, name, status')
       .eq('id', id)
       .eq('organization_id', auth.orgId)
       .single());
@@ -97,8 +101,8 @@ export async function PATCH(
         p_entity_type: 'client',
         p_entity_id: id,
         p_description: `Client updated: ${existing.name}`,
-        p_previous_status: null,
-        p_new_status: null,
+        p_previous_status: existing.status,
+        p_new_status: updated.status,
         p_source_module: 'client',
         p_severity: 'info',
         p_new_values: updates,
@@ -156,9 +160,18 @@ export async function DELETE(
       }, { status: 400 });
     }
  
+    // FND-BUD-03 FIX: public.clients has no is_active column, so this
+    // update always failed (client stayed active, nothing was recorded).
+    // Soft-delete it the way this table is actually built for: flip status
+    // to INACTIVE and stamp deleted_at/deleted_by (both previously never
+    // written by this route at all).
     const { data: client, error } = await supabase
       .from('clients')
-      .update({ is_active: false })
+      .update({
+        status: 'INACTIVE',
+        deleted_at: new Date().toISOString(),
+        deleted_by: auth.userId,
+      })
       .eq('id', id)
       .eq('organization_id', auth.orgId)
       .select()
@@ -169,7 +182,7 @@ export async function DELETE(
     }
  
     try {
-await       supabase.schema('audit').rpc('log_action', {
+      await supabase.schema('audit').rpc('log_action', {
         p_user_id: auth.userId,
         p_action: 'CLIENT_DEACTIVATED',
         p_entity_type: 'client',
@@ -179,7 +192,7 @@ await       supabase.schema('audit').rpc('log_action', {
         p_new_status: 'INACTIVE',
         p_source_module: 'client',
         p_severity: 'medium',
-        p_new_values: { name: client.name, client_code: client.client_code },
+        p_new_values: { name: client.name },
       });
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);

@@ -105,26 +105,27 @@ export default function InvoicesPage() {
     setSaving(invoiceId);
 
     try {
-      // Map to workflow action
+      // Map to workflow action.
+      // FND-AR-02 FIX: VOID used to be a direct, unaudited client-side
+      // update. It's now a real workflow transition (see
+      // src/app/api/finance/workflow/route.ts), so every status change on
+      // this page — including VOID — goes through callWorkflow().
       const actionMap: Record<string, string> = {
-        SUBMITTED: 'submit', APPROVED: 'approve', ISSUED: 'issue', REJECTED: 'reject',
+        SUBMITTED: 'submit', APPROVED: 'approve', ISSUED: 'issue', REJECTED: 'reject', VOID: 'void',
       };
       const action = actionMap[newStatus];
 
-      if (action) {
-        const result = await callWorkflow('invoice', invoiceId, action as any, reason);
-        if (result.success) {
-          toast.success(result.message || `Invoice ${newStatus} successfully`);
-          fetchInvoices();
-        } else {
-          toast.error(result.error || 'Action failed');
-        }
-      } else {
-        // VOID etc - direct update
-        const { error } = await supabase.from("invoices").update({ status: newStatus, void_reason: reason }).eq("id", invoiceId);
-        if (error) throw error;
-        toast.success(`Invoice ${newStatus} successfully`);
+      if (!action) {
+        toast.error(`Unsupported status change: ${newStatus}`);
+        return;
+      }
+
+      const result = await callWorkflow('invoice', invoiceId, action as any, reason);
+      if (result.success) {
+        toast.success(result.message || `Invoice ${newStatus} successfully`);
         fetchInvoices();
+      } else {
+        toast.error(result.error || 'Action failed');
       }
 
       if (reason && reasonModal.recordId === invoiceId) {
@@ -148,10 +149,8 @@ export default function InvoicesPage() {
     }
     setSaving(deleteId);
     try {
-      const { error } = await supabase.from("invoices")
-        .update({ status: 'VOID', void_reason: 'Deleted by user' })
-        .eq("id", deleteId);
-      if (error) throw error;
+      const result = await callWorkflow('invoice', deleteId, 'void', 'Deleted by user');
+      if (!result.success) throw new Error(result.error || 'Failed to void invoice');
       toast.success("Invoice voided");
       setDeleteId(null);
       fetchInvoices();
@@ -162,43 +161,39 @@ export default function InvoicesPage() {
     }
   };
 
-  const handleSubmit = async (formData: any) => {
+  const handleSubmit = async (payload: any) => {
     setSaving('submit');
-    
+
     try {
-      let result;
-      
-      if (editingInvoice) {
-        if (editingInvoice.status !== 'DRAFT') {
-          toast.error("Only DRAFT invoices can be edited.");
-          setSaving(null);
-          return;
-        }
-        result = await supabase.from("invoices")
-          .update({ ...formData })
-          .eq("id", editingInvoice.id)
-          .select()
-          .single();
-      } else {
-        result = await supabase.from("invoices")
-          .insert({
-            ...formData,
-            status: 'DRAFT',
-            outstanding_amount: formData.total_amount,
-            base_outstanding_amount: formData.total_amount,
-          })
-          .select()
-          .single();
+      if (editingInvoice && editingInvoice.status !== 'DRAFT') {
+        toast.error("Only DRAFT invoices can be edited.");
+        setSaving(null);
+        return;
       }
 
-      const { data, error } = result;
-      if (error) throw error;
-      
+      // FND-AR-02 FIX: this used to insert/update public.invoices directly
+      // from the browser, which (a) never set invoice_number — a NOT NULL
+      // column with no default, so every create failed with 23502 — and
+      // (b) let the client dictate organization_id/status and derived
+      // base_outstanding_amount from the original-currency total instead
+      // of the exchange-rate-converted one. Both create and edit now go
+      // through /api/finance/invoices, which generates the invoice number,
+      // pins organization_id/status server-side, and recomputes every
+      // base_* amount from exchange_rate.
+      const res = await fetch('/api/finance/invoices', {
+        method: editingInvoice ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editingInvoice ? { id: editingInvoice.id, ...payload } : payload),
+      });
+      const result = await res.json();
+
+      if (!res.ok) throw new Error(result.error || 'Failed to save invoice');
+
       toast.success(editingInvoice ? "Invoice updated" : "Invoice created as DRAFT");
       setShowForm(false);
       setEditingInvoice(null);
       fetchInvoices();
-      return data?.id;
+      return result.data?.id;
     } catch (error: any) {
       toast.error(`Failed to save: ${error.message}`);
     } finally {
@@ -491,29 +486,28 @@ export default function InvoicesPage() {
                     if (!/^[A-Z]{3}$/.test(formData.currency)) { toast.error('Currency must be a 3-letter ISO code'); return; }
                     if (exchangeRate <= 0 || (formData.currency === 'PKR' && Math.abs(exchangeRate - 1) > 0.000001)) { toast.error('Invalid exchange rate'); return; }
                     const totalAmount = amount + taxAmount;
-                    const baseSubtotal = amount * exchangeRate;
-                    const baseTaxAmount = taxAmount * exchangeRate;
-                    const baseTotalAmount = totalAmount * exchangeRate;
-                    
-                    handleSubmit(editingInvoice ? 
-                      { ...editingInvoice, client_name: formData.client_name, amount, subtotal: amount, tax_amount: taxAmount, currency: formData.currency, exchange_rate: exchangeRate, base_subtotal: baseSubtotal, base_tax_amount: baseTaxAmount, base_total_amount: baseTotalAmount, base_outstanding_amount: baseTotalAmount, due_date: formData.due_date, notes: formData.notes, total_amount: totalAmount } : {
+
+                    // FND-AR-02 fix: only the raw, original-currency inputs
+                    // go over the wire. organization_id, status,
+                    // outstanding_amount, and every base_* (converted)
+                    // amount are derived server-side in
+                    // /api/finance/invoices from exchange_rate — sending
+                    // them from here was exactly the bug (base_outstanding_
+                    // amount was silently overwritten with the original-
+                    // currency total further down the old code path).
+                    handleSubmit({
                       client_name: formData.client_name,
+                      client_id: editingInvoice?.client_id ?? null,
+                      project_id: editingInvoice?.project_id ?? null,
                       amount,
                       subtotal: amount,
                       tax_amount: taxAmount,
+                      total_amount: totalAmount,
                       currency: formData.currency,
                       exchange_rate: exchangeRate,
-                      base_subtotal: baseSubtotal,
-                      base_tax_amount: baseTaxAmount,
-                      base_total_amount: baseTotalAmount,
-                      total_amount: totalAmount,
                       due_date: formData.due_date,
                       notes: formData.notes,
-                      outstanding_amount: totalAmount,
-                      base_outstanding_amount: baseTotalAmount,
-                      organization_id: profile?.organization_id,
-                    }
-                  );
+                    });
                   }} 
                   disabled={!!saving}
                   className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium disabled:opacity-50"

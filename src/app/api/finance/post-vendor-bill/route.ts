@@ -15,7 +15,15 @@ function getData<T = any>(res: any): T | null {
 // BUG-001 FIX: Use RPC with CORRECT signature (p_description, p_transaction_date, p_period_id, p_lines, ...)
 // BUG-005 FIX: WHT journal lines constructed explicitly, no pop() on wrong line
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('APPROVE_VENDOR_BILL');
+  // FND-AP-03 FIX: 'APPROVE_VENDOR_BILL' (singular) was never a seeded
+  // permission code (catalogue has 'VENDOR_BILL_APPROVE' and the newer
+  // 'APPROVE_VENDOR_BILLS', see seed_data.sql:1038/1885) — every non-CEO
+  // user 403'd here regardless of role. Posting is also a distinct action
+  // from approving (spec 7.2 lists post/approve separately), so this now
+  // checks the dedicated, already role-granted 'VENDOR_BILL_POST' permission
+  // (seed_data.sql:1039; granted to ACCOUNTANT/FINANCE_HEAD in the
+  // role_permissions seed) instead of reusing the approval permission.
+  const auth = await requirePermission('VENDOR_BILL_POST');
   if (auth instanceof NextResponse) return auth;
   // H3 FIX: Enforce MFA for financial posting
   const mfaCheck = await enforceMFA(auth);
@@ -236,13 +244,21 @@ export async function POST(req: NextRequest) {
     }
     if (totalTax > 0) rpcLines.push({ account_id: inputTaxAccount.id, debit_amount: totalTax, credit_amount: 0, description: `Input tax: ${bill.bill_number || 'N/A'}` });
 
-    // FC-02 FIX: no DR line for WHT here (see comment above). Debit side is
-    // just expenseTotal (== subtotal) + totalTax, so AP must be credited for
-    // the NET amount (totalAmount - withholdingAmount) to keep the journal
-    // balanced; the WHT Payable credit below picks up the remaining
-    // withholdingAmount so total credits still equal totalAmount.
-    if (withholdingAmount > totalAmount) return NextResponse.json({ error: 'Withholding amount cannot exceed vendor bill total.' }, { status: 400 });
-    rpcLines.push({ account_id: creditAccountId, debit_amount: 0, credit_amount: totalAmount - withholdingAmount, description: `Vendor payable (net of WHT): ${bill.bill_number || 'N/A'}` });
+    // FND-AP-02 FIX: bill.total_amount is already NET of WHT — the UI
+    // computes it as subtotal + tax_amount - withholding_amount (see
+    // vendor-bills/page.tsx handleSubmit: `total = subtotal + taxTotal -
+    // whtTotal`). The debit side here is expenseTotal (== subtotal) +
+    // totalTax, i.e. GROSS = totalAmount + withholdingAmount. Crediting AP
+    // for (totalAmount - withholdingAmount) subtracted the WHT a second
+    // time, so total credits came out short by exactly withholdingAmount
+    // and finance.post_journal_entry's balance check rejected every bill
+    // with withholding_amount > 0. AP must be credited for the bill's own
+    // (already-net) total_amount; the WHT Payable credit below then makes
+    // up the remaining withholdingAmount so credits equal the gross debit
+    // total, same as a WHT=0 bill balanced "by coincidence" before.
+    const grossAmount = subtotal + totalTax;
+    if (withholdingAmount > grossAmount) return NextResponse.json({ error: 'Withholding amount cannot exceed vendor bill subtotal plus tax.' }, { status: 400 });
+    rpcLines.push({ account_id: creditAccountId, debit_amount: 0, credit_amount: totalAmount, description: `Vendor payable (net of WHT): ${bill.bill_number || 'N/A'}` });
 
     // Credit the WHT Payable liability for the amount withheld — this is
     // remitted to the tax authority separately, not owed to the vendor.
@@ -301,9 +317,12 @@ export async function POST(req: NextRequest) {
     const journalId = journal.id;
     const reference = journal.reference || `JE-VB-${journalId}`;
     // The GL engine's own balance trigger (trg_check_journal_balance)
-    // guarantees debits === credits === totalAmount for what we submitted.
-    const totalDebit = totalAmount;
-    const totalCredit = totalAmount;
+    // guarantees debits === credits for what we submitted. That balanced
+    // figure is the GROSS amount (subtotal + tax), not bill.total_amount —
+    // total_amount is net of WHT, and WHT is split across two credit lines
+    // (AP net + WHT Payable) rather than being netted out of the journal.
+    const totalDebit = grossAmount;
+    const totalCredit = grossAmount;
 
     // 11. Audit log
     // BUG-023 FIX: surface a failed audit write via audit_log_warning

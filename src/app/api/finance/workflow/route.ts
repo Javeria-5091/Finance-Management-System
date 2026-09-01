@@ -42,6 +42,13 @@ const MODULES: Record<string, {
       issue:   { from: ['APPROVED'], perm: 'INVOICE_UPDATE' },
       reject:  { from: ['SUBMITTED'], perm: 'INVOICE_UPDATE' },
       reopen:  { from: ['REJECTED'], perm: 'INVOICE_UPDATE' },
+      // FND-AR-02 FIX: previously the invoices dashboard page voided an
+      // invoice with a direct, unaudited supabase.from('invoices').update()
+      // call from the browser (no permission re-check server-side, no
+      // maker-checker, no audit log). Routing VOID through this table gives
+      // it the same permission check, org scoping, TOCTOU-safe conditional
+      // update, and audit.log_action() entry as every other transition.
+      void:    { from: ['DRAFT', 'SUBMITTED', 'APPROVED', 'ISSUED'], perm: 'INVOICE_UPDATE' },
     },
   },
   vendor_bill: {
@@ -49,11 +56,28 @@ const MODULES: Record<string, {
     periodDateField: 'bill_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'VENDOR_BILL_UPDATE' },
-      verify:  { from: ['SUBMITTED'], perm: 'APPROVE_VENDOR_BILL' },
-      approve: { from: ['SUBMITTED', 'VERIFIED'], perm: 'APPROVE_VENDOR_BILL' },
+      // FND-AP-03 FIX: 'APPROVE_VENDOR_BILL' (singular) is not a seeded
+      // permission code at all — the catalogue only has 'VENDOR_BILL_APPROVE'
+      // (seed_data.sql:1038) and the newer 'APPROVE_VENDOR_BILLS' (plural,
+      // seed_data.sql:1885). Every non-CEO caller (CEO bypasses permission
+      // checks entirely — see requirePermission) 403'd on verify/approve
+      // because the code they were actually granted never matched what was
+      // checked. Use the dedicated, already role-granted vendor_bill-prefixed
+      // codes (VENDOR_BILL_VERIFY / VENDOR_BILL_APPROVE — see
+      // seed_data.sql:1105-1120 role_permissions for ACCOUNTANT/FINANCE_HEAD)
+      // instead of the unseeded ad-hoc name.
+      verify:  { from: ['SUBMITTED'], perm: 'VENDOR_BILL_VERIFY' },
+      approve: { from: ['SUBMITTED', 'VERIFIED'], perm: 'VENDOR_BILL_APPROVE' },
       reject:  { from: ['SUBMITTED', 'VERIFIED'], perm: 'VENDOR_BILL_UPDATE' },
       reverse: { from: ['POSTED'], perm: 'VENDOR_BILL_UPDATE' },
       cancel:  { from: ['DRAFT', 'SUBMITTED', 'VERIFIED', 'APPROVED'], perm: 'VENDOR_BILL_UPDATE' },
+      // NOTE: 'post' is intentionally NOT a transition here. Posting a
+      // vendor bill isn't a plain status flip (this route's generic handler
+      // below just sets `status` and returns) — it requires resolving GL
+      // accounts, coding split lines, handling WHT, and running the budget
+      // check inside finance.post_vendor_bill_atomic, all of which already
+      // lives in /api/finance/post-vendor-bill. The UI now calls that route
+      // directly for the Post action instead of routing 'post' through here.
     },
   },
   journal_entry: {
@@ -279,6 +303,7 @@ export async function POST(req: NextRequest) {
       if (reversalJournalId) updateData.journal_entry_id = reversalJournalId;
     }
     else if (action === 'cancel') { updateData.status = 'CANCELLED'; updateData.rejection_reason = reason; }
+    else if (action === 'void') { updateData.status = 'VOID'; updateData.void_reason = reason || 'Voided'; updateData.voided_by = auth.userId; updateData.voided_at = now; }
     else {
       const statusMap: Record<string, string> = { submit: 'SUBMITTED', verify: 'VERIFIED', approve: 'APPROVED', issue: 'ISSUED' };
       updateData.status = statusMap[action] || action.toUpperCase();

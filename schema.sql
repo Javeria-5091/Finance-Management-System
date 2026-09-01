@@ -77,6 +77,13 @@ CREATE EXTENSION IF NOT EXISTS "pg_stat_statements" WITH SCHEMA "extensions";
 
 
 
+CREATE EXTENSION IF NOT EXISTS "pg_trgm" WITH SCHEMA "extensions";
+
+
+
+
+
+
 CREATE EXTENSION IF NOT EXISTS "pgcrypto" WITH SCHEMA "extensions";
 
 
@@ -645,6 +652,92 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
 ALTER TABLE "public"."profiles" OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "core"."admin_set_user_role"("p_user_id" "uuid", "p_new_role" "text") RETURNS "public"."profiles"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'core', 'audit'
+    AS $$
+DECLARE
+  v_caller_org uuid;
+  v_target_org uuid;
+  v_old_role text;
+  v_target public.profiles;
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'admin_set_user_role: must be called by an authenticated user';
+  END IF;
+
+  IF p_user_id = auth.uid() THEN
+    RAISE EXCEPTION 'admin_set_user_role: cannot change your own role; ask another CEO'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Deliberately does NOT use core.has_role()/core.is_finance_head(), because
+  -- those fall back to reading public.profiles.role for users not yet present
+  -- in core.user_roles -- exactly the column this function exists to guard.
+  -- Only an explicit, active core.user_roles grant of 'CEO' counts here.
+  IF NOT EXISTS (
+    SELECT 1
+    FROM core.user_roles ur
+    JOIN core.roles r ON r.id = ur.role_id
+    WHERE ur.user_id = auth.uid()
+      AND ur.is_active = true
+      AND CURRENT_DATE >= ur.effective_from
+      AND (ur.effective_to IS NULL OR ur.effective_to >= CURRENT_DATE)
+      AND r.name = 'CEO'
+  ) THEN
+    RAISE EXCEPTION 'admin_set_user_role: only a CEO with a core.user_roles grant may change user roles'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT organization_id INTO v_caller_org FROM public.profiles WHERE user_id = auth.uid();
+
+  SELECT organization_id, role INTO v_target_org, v_old_role
+  FROM public.profiles WHERE user_id = p_user_id;
+
+  IF v_caller_org IS NULL OR v_target_org IS NULL OR v_caller_org <> v_target_org THEN
+    RAISE EXCEPTION 'admin_set_user_role: target user is not in your organization';
+  END IF;
+
+  -- profiles_role_check still enforces the allowed role values.
+  PERFORM set_config('core.profiles_guard_bypass', 'on', true);
+
+  UPDATE public.profiles
+  SET role = p_new_role
+  WHERE user_id = p_user_id
+    AND organization_id = v_caller_org
+  RETURNING * INTO v_target;
+
+  PERFORM set_config('core.profiles_guard_bypass', 'off', true);
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'admin_set_user_role: target user is not in your organization';
+  END IF;
+
+  PERFORM audit.log_action(
+    p_user_id := auth.uid(),
+    p_action := 'ADMIN_USER_ROLE_CHANGED',
+    p_entity_type := 'public.profiles',
+    p_entity_id := v_target.id,
+    p_description := 'CEO changed a user role',
+    p_old_values := jsonb_build_object('role', v_old_role),
+    p_new_values := jsonb_build_object('role', v_target.role),
+    p_source_module := 'admin.user_role',
+    p_status := 'success',
+    p_severity := 'warning'
+  );
+
+  RETURN v_target;
+END;
+$$;
+
+
+ALTER FUNCTION "core"."admin_set_user_role"("p_user_id" "uuid", "p_new_role" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "core"."admin_set_user_role"("p_user_id" "uuid", "p_new_role" "text") IS 'FND-RLS-01 fix: the only supported way to change another user''s public.profiles.role. Requires the caller to hold an active CEO grant in core.user_roles (not the profiles.role fallback), and only within the caller''s own organization. Cannot be used on yourself.';
+
+
+
 CREATE OR REPLACE FUNCTION "core"."admin_update_user_profile"("p_user_id" "uuid", "p_department_id" "uuid" DEFAULT NULL::"uuid", "p_manager_id" "uuid" DEFAULT NULL::"uuid", "p_employment_status" "text" DEFAULT NULL::"text", "p_clear_department" boolean DEFAULT false, "p_clear_manager" boolean DEFAULT false) RETURNS "public"."profiles"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'public', 'core', 'finance', 'audit'
@@ -695,6 +788,10 @@ BEGIN
     RAISE EXCEPTION 'employment_status must be ACTIVE, INACTIVE, or TERMINATED';
   END IF;
 
+  -- FND-RLS-01 fix: authorize this statement's own UPDATE past the new
+  -- BEFORE UPDATE guard trigger (permission was already checked above).
+  PERFORM set_config('core.profiles_guard_bypass', 'on', true);
+
   UPDATE public.profiles
   SET department_id = CASE WHEN p_clear_department THEN NULL ELSE COALESCE(p_department_id, department_id) END,
       manager_id = CASE WHEN p_clear_manager THEN NULL ELSE COALESCE(p_manager_id, manager_id) END,
@@ -702,6 +799,8 @@ BEGIN
   WHERE user_id = p_user_id
     AND organization_id = v_org
   RETURNING * INTO v_target;
+
+  PERFORM set_config('core.profiles_guard_bypass', 'off', true);
 
   PERFORM audit.log_action(
     p_user_id := auth.uid(),
@@ -980,6 +1079,65 @@ END;
 
 
 ALTER FUNCTION "core"."get_user_permissions"("p_user_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "core"."guard_profiles_privilege_columns"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  -- Set only by core.admin_set_user_role() / core.admin_update_user_profile()
+  -- for the duration of their own UPDATE statement (SET LOCAL => resets at
+  -- end of transaction automatically). PostgREST/direct client updates never
+  -- set this, so this branch cannot be reached by an ordinary self-update.
+  IF current_setting('core.profiles_guard_bypass', true) = 'on' THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW."role" IS DISTINCT FROM OLD."role" THEN
+    RAISE EXCEPTION 'profiles.role cannot be changed directly; use core.admin_set_user_role()'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW."organization_id" IS DISTINCT FROM OLD."organization_id" THEN
+    RAISE EXCEPTION 'profiles.organization_id cannot be changed directly'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW."department_id" IS DISTINCT FROM OLD."department_id"
+     OR NEW."manager_id" IS DISTINCT FROM OLD."manager_id"
+     OR NEW."employment_status" IS DISTINCT FROM OLD."employment_status" THEN
+    RAISE EXCEPTION 'profiles.department_id/manager_id/employment_status cannot be changed directly; use core.admin_update_user_profile()'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW."mfa_required" IS DISTINCT FROM OLD."mfa_required"
+     OR NEW."can_create_project"  IS DISTINCT FROM OLD."can_create_project"
+     OR NEW."can_delete_project"  IS DISTINCT FROM OLD."can_delete_project"
+     OR NEW."can_add_income"      IS DISTINCT FROM OLD."can_add_income"
+     OR NEW."can_add_expense"     IS DISTINCT FROM OLD."can_add_expense"
+     OR NEW."can_create_invoice"  IS DISTINCT FROM OLD."can_create_invoice"
+     OR NEW."can_delete_invoice"  IS DISTINCT FROM OLD."can_delete_invoice"
+     OR NEW."can_edit_project"    IS DISTINCT FROM OLD."can_edit_project"
+     OR NEW."can_edit_income"     IS DISTINCT FROM OLD."can_edit_income"
+     OR NEW."can_edit_expense"    IS DISTINCT FROM OLD."can_edit_expense"
+     OR NEW."can_edit_invoice"    IS DISTINCT FROM OLD."can_edit_invoice"
+     OR NEW."can_delete_income"   IS DISTINCT FROM OLD."can_delete_income"
+     OR NEW."can_delete_expense"  IS DISTINCT FROM OLD."can_delete_expense"
+     OR NEW."can_manage_budgets"  IS DISTINCT FROM OLD."can_manage_budgets" THEN
+    RAISE EXCEPTION 'profiles permission flags cannot be self-modified; use an admin RPC'
+      USING ERRCODE = '42501';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "core"."guard_profiles_privilege_columns"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "core"."guard_profiles_privilege_columns"() IS 'FND-RLS-01 fix: blocks direct UPDATEs to role/organization_id/department_id/manager_id/employment_status/mfa_required/can_* on public.profiles. Bypassed only by SECURITY DEFINER admin RPCs that set core.profiles_guard_bypass for the duration of their own UPDATE.';
+
 
 
 CREATE OR REPLACE FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permission_code" "text") RETURNS boolean
@@ -2242,9 +2400,28 @@ $$;
 ALTER FUNCTION "finance"."create_fixed_asset"("p_input" "jsonb", "p_created_by" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."derive_credit_note_base_amount"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  IF NEW."base_amount" IS NULL THEN
+    NEW."base_amount" := NEW."amount" * COALESCE(NEW."exchange_rate", 1);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."derive_credit_note_base_amount"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."derive_credit_note_base_amount"() IS 'FND-AR-03 fix: derives base_amount = amount * exchange_rate whenever an INSERT/UPDATE (including through the public.credit_notes view) omits it. base_amount is NOT NULL with no column default, and src/app/api/finance/credit-notes/route.ts never supplied it, so every create previously failed with 23502.';
+
+
+
 CREATE OR REPLACE FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    SET "search_path" TO 'pg_catalog', 'extensions', 'finance', 'public', 'core'
     AS $$ DECLARE v_count INT; v_org uuid;
 BEGIN
     -- BUG-026 FIX: same cross-tenant gap as auto_match_statement_lines -- no
@@ -2275,6 +2452,10 @@ END;
 
 
 ALTER FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."detect_duplicate_statement_lines"("p_statement_id" "uuid") IS 'FND-BANK-03 FIX: search_path now includes "extensions" (see CREATE EXTENSION pg_trgm above), so SIMILARITY() actually resolves. Previously raised "function similarity(text, text) does not exist" on every call because pg_trgm was never installed anywhere in this schema -- the "Detect Duplicates" button in ReconciliationTable.tsx has never worked until now.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."enforce_base_amounts_on_post"() RETURNS "trigger"
@@ -2652,7 +2833,7 @@ ALTER FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid",
 
 CREATE OR REPLACE FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
 DECLARE
   v_batch RECORD;
@@ -2665,6 +2846,43 @@ DECLARE
   v_journal_id UUID;
   v_lines JSONB;
 BEGIN
+  -- FND-RLS-03 FIX: authenticate and authorize inside the function itself
+  -- instead of trusting p_user_id/p_organization_id as free client
+  -- parameters, or relying on the app route (which an authenticated
+  -- caller can bypass by calling this RPC directly via PostgREST).
+
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'finalize_platform_settlement: must be called by an authenticated user'
+      USING ERRCODE = '28000';
+  END IF;
+
+  -- p_organization_id must be the caller's own organization -- never
+  -- trust it as a free client parameter, or an authenticated user in one
+  -- tenant could post a balanced journal into a victim tenant's books by
+  -- supplying that tenant's organization_id.
+  IF p_organization_id IS DISTINCT FROM core.current_user_org_id() THEN
+    RAISE EXCEPTION 'finalize_platform_settlement: p_organization_id does not match the caller''s organization'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- p_user_id must be the caller themselves. This is not just cosmetic:
+  -- it's also load-bearing for the maker-checker check further down
+  -- (v_batch.created_by = p_user_id) -- if a caller could pass an
+  -- arbitrary p_user_id, they could defeat that check by claiming to be
+  -- someone other than themselves.
+  IF p_user_id IS DISTINCT FROM auth.uid() THEN
+    RAISE EXCEPTION 'finalize_platform_settlement: p_user_id must match the authenticated caller'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Same permission the app route already enforces
+  -- (SETTLEMENT_RECONCILE) -- now also enforced here, so it can't be
+  -- bypassed by calling the RPC directly.
+  IF NOT core.has_permission(auth.uid(), 'SETTLEMENT_RECONCILE') THEN
+    RAISE EXCEPTION 'finalize_platform_settlement: SETTLEMENT_RECONCILE permission required'
+      USING ERRCODE = '42501';
+  END IF;
+
   SELECT * INTO v_batch
   FROM finance.settlement_batches
   WHERE id = p_batch_id AND organization_id = p_organization_id
@@ -2768,6 +2986,10 @@ $$;
 
 
 ALTER FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") IS 'FND-RLS-03 fix: now requires auth.uid() IS NOT NULL, p_organization_id = core.current_user_org_id(), p_user_id = auth.uid(), and core.has_permission(auth.uid(),''SETTLEMENT_RECONCILE'') before touching any data. Previously trusted p_user_id/p_organization_id as ordinary client parameters, which let a caller both defeat the maker-checker check (by lying about p_user_id) and post into another tenant''s books (by lying about p_organization_id).';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."fn_add_accumulated_depreciation"("p_asset_id" "uuid", "p_amount" numeric) RETURNS "void"
@@ -3344,7 +3566,9 @@ BEGIN
     END AS balance
   FROM finance.chart_of_accounts coa
   LEFT JOIN finance.journal_lines jl ON jl.account_id=coa.id
-  LEFT JOIN finance.journal_entries je ON je.id=jl.journal_entry_id
+  -- FND-GL-02 fix: INNER JOIN (was LEFT JOIN) so status/fiscal_year/org
+  -- actually filter which lines get summed.
+  INNER JOIN finance.journal_entries je ON je.id=jl.journal_entry_id
     AND je.status='POSTED' AND je.fiscal_year_id=p_fiscal_year_id AND je.organization_id=p_organization_id
   WHERE coa.organization_id=p_organization_id AND ((p_account_type='REVENUE' AND coa.account_type IN ('REVENUE','OTHER_INCOME')) OR (p_account_type='EXPENSE' AND coa.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE')))
   GROUP BY coa.id,coa.code,coa.name
@@ -3356,7 +3580,129 @@ $$;
 ALTER FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p_organization_id" "uuid", "p_account_type" "text") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p_organization_id" "uuid", "p_account_type" "text") IS 'Confirmed audit fix: organization-scoped P&L balances for fiscal close.';
+COMMENT ON FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p_organization_id" "uuid", "p_account_type" "text") IS 'FND-GL-02 fix: journal_entries status/fiscal_year/org predicate moved onto an INNER JOIN so it actually filters journal_lines, instead of being a dead condition on a LEFT JOIN. Previously fed DRAFT/SUBMITTED/REVERSED and cross-fiscal-year lines into the year-end close''s P&L balances, which were then posted as a real retained-earnings journal.';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."import_bank_statement"("p_financial_account_id" "uuid", "p_statement_date" "date", "p_opening_balance" numeric, "p_closing_balance" numeric, "p_currency" "text", "p_file_name" "text", "p_lines" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org uuid;
+  v_account RECORD;
+  v_statement_id uuid;
+  v_lines_submitted int;
+  v_inserted int;
+  v_duplicates int;
+BEGIN
+  v_org := core.current_user_org_id();
+  IF v_org IS NULL THEN RAISE EXCEPTION 'Organization context is required'; END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to import a bank statement';
+  END IF;
+
+  IF p_lines IS NULL OR jsonb_typeof(p_lines) <> 'array' OR jsonb_array_length(p_lines) = 0 THEN
+    RAISE EXCEPTION 'At least one statement line is required';
+  END IF;
+  v_lines_submitted := jsonb_array_length(p_lines);
+
+  IF p_opening_balance IS NULL OR p_closing_balance IS NULL THEN
+    RAISE EXCEPTION 'Opening and closing balances are required';
+  END IF;
+
+  -- Row-lock the target account for the duration of the import so two
+  -- concurrent imports for the same account can't race each other's
+  -- dedupe check.
+  SELECT * INTO v_account
+  FROM finance.financial_accounts
+  WHERE id = p_financial_account_id AND organization_id = v_org AND is_active = true
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Financial account not found, inactive, or access denied';
+  END IF;
+
+  INSERT INTO finance.bank_statements (
+    financial_account_id, statement_date, opening_balance, closing_balance,
+    currency, imported_by, file_name, organization_id
+  ) VALUES (
+    p_financial_account_id, p_statement_date, p_opening_balance, p_closing_balance,
+    COALESCE(NULLIF(p_currency, ''), v_account.currency), auth.uid(), p_file_name, v_org
+  ) RETURNING id INTO v_statement_id;
+
+  -- Single set-based INSERT for every line: a NOT NULL / type-cast
+  -- failure on any one row aborts the whole statement (including the
+  -- header just inserted above), rather than leaving a partially
+  -- imported file behind. Only exact duplicates (per the unique index)
+  -- are silently skipped -- everything else that's wrong about the file
+  -- fails the entire import.
+  WITH parsed AS (
+    SELECT row_number() OVER () AS line_number, x.*
+    FROM jsonb_to_recordset(p_lines) AS x(
+      transaction_date date,
+      description text,
+      reference text,
+      counterparty text,
+      transaction_identifier text,
+      amount numeric,
+      balance_after numeric
+    )
+  ),
+  ins AS (
+    INSERT INTO finance.statement_lines (
+      bank_statement_id, financial_account_id, line_number, transaction_date,
+      description, reference, counterparty, transaction_identifier,
+      amount, balance_after, reconciliation_status
+    )
+    SELECT v_statement_id, p_financial_account_id, line_number, transaction_date,
+           description, reference, counterparty, transaction_identifier,
+           amount, balance_after, 'UNRECONCILED'
+    FROM parsed
+    ON CONFLICT (
+      financial_account_id, transaction_date, amount,
+      (md5(COALESCE(transaction_identifier, '') || '|' || COALESCE(reference, '') || '|' || COALESCE(description, '')))
+    ) DO NOTHING
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_inserted FROM ins;
+
+  v_duplicates := v_lines_submitted - v_inserted;
+
+  IF v_inserted = 0 THEN
+    -- Every submitted line already exists for this account -- treat the
+    -- whole call as a no-op error instead of leaving an empty statement
+    -- header behind (the INSERT above rolls back along with everything
+    -- else in this function on RAISE EXCEPTION).
+    RAISE EXCEPTION 'All % line(s) in this file already exist for this account (duplicate import)', v_lines_submitted;
+  END IF;
+
+  UPDATE finance.bank_statements bs
+  SET total_debits = COALESCE(t.total_debits, 0),
+      total_credits = COALESCE(t.total_credits, 0),
+      line_count = COALESCE(t.line_count, 0)
+  FROM (
+    SELECT sum(amount) FILTER (WHERE amount > 0) AS total_debits,
+           sum(abs(amount)) FILTER (WHERE amount < 0) AS total_credits,
+           count(*) AS line_count
+    FROM finance.statement_lines
+    WHERE bank_statement_id = v_statement_id
+  ) t
+  WHERE bs.id = v_statement_id;
+
+  RETURN jsonb_build_object(
+    'statement_id', v_statement_id,
+    'lines_submitted', v_lines_submitted,
+    'lines_inserted', v_inserted,
+    'duplicates_skipped', v_duplicates
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."import_bank_statement"("p_financial_account_id" "uuid", "p_statement_date" "date", "p_opening_balance" numeric, "p_closing_balance" numeric, "p_currency" "text", "p_file_name" "text", "p_lines" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."import_bank_statement"("p_financial_account_id" "uuid", "p_statement_date" "date", "p_opening_balance" numeric, "p_closing_balance" numeric, "p_currency" "text", "p_file_name" "text", "p_lines" "jsonb") IS 'FND-BANK-03 FIX: atomic replacement for StatementImport.tsx''s previous two-step create-statement-then-batch-insert-lines flow. organization_id is now always resolved server-side from the caller''s session (the old client insert omitted it entirely, which the bank_statements_org_required_going_forward CHECK always rejected). Header + all lines are written in one transaction, and duplicate lines (per statement_lines_dedupe_key) are skipped via ON CONFLICT DO NOTHING instead of silently re-inserted on a repeat import.';
 
 
 
@@ -3601,45 +3947,74 @@ ALTER FUNCTION "finance"."mark_paid_invoices"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."open_period"("p_period_id" "uuid", "p_opened_by" "uuid" DEFAULT NULL::"uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
-    AS $$ 
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
 DECLARE
     v_period RECORD;
     v_user_id UUID;
+    v_org_id UUID;
 BEGIN
-    -- ✅ FIX: Resolve user ID
-    v_user_id := COALESCE(p_opened_by, auth.uid());
-    
-    -- ✅ FIX: Set for audit trigger
+    -- FND-RLS-04 FIX: authenticate, scope to the caller's own
+    -- organization, and require the same role finance.close_period()
+    -- already requires -- instead of trusting p_opened_by and running an
+    -- unscoped, unauthenticated UPDATE against any organization's period.
+
+    v_org_id := core.current_user_org_id();
+    v_user_id := auth.uid();
+
+    IF v_org_id IS NULL OR v_user_id IS NULL THEN
+        RAISE EXCEPTION 'Authentication and organization context are required';
+    END IF;
+
+    IF NOT core.is_finance_head() THEN
+        RAISE EXCEPTION 'Only CEO or Finance Head may open an accounting period';
+    END IF;
+
+    -- p_opened_by, if supplied, must match the authenticated caller --
+    -- it's only accepted at all for backward compatibility with existing
+    -- callers; it can no longer be used to attribute the action to
+    -- someone else.
+    IF p_opened_by IS NOT NULL AND p_opened_by IS DISTINCT FROM v_user_id THEN
+        RAISE EXCEPTION 'open_period: p_opened_by must match the authenticated caller'
+          USING ERRCODE = '42501';
+    END IF;
+
     PERFORM set_config('app.current_user_id', v_user_id::TEXT, true);
 
     SELECT ap.*, fy.status AS fy_status, fy.name AS fy_name
     INTO v_period
     FROM finance.accounting_periods ap
     JOIN finance.fiscal_years fy ON ap.fiscal_year_id = fy.id
-    WHERE ap.id = p_period_id;
-    
+    WHERE ap.id = p_period_id
+      AND ap.organization_id = v_org_id
+    FOR UPDATE OF ap;
+
     IF NOT FOUND THEN
-        RAISE EXCEPTION 'Period not found';
+        RAISE EXCEPTION 'Period not found or access denied';
     END IF;
-    
+
     IF v_period.fy_status != 'OPEN' THEN
         RAISE EXCEPTION 'Cannot open period: fiscal year "%" is not open', v_period.fy_name;
     END IF;
-    
+
     IF v_period.status != 'PENDING' THEN
         RAISE EXCEPTION 'Period is not in PENDING status (current: %)', v_period.status;
     END IF;
-    
+
     UPDATE finance.accounting_periods
     SET status = 'OPEN',
         updated_at = NOW()
-    WHERE id = p_period_id;
+    WHERE id = p_period_id
+      AND organization_id = v_org_id;
 END;
  $$;
 
 
 ALTER FUNCTION "finance"."open_period"("p_period_id" "uuid", "p_opened_by" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."open_period"("p_period_id" "uuid", "p_opened_by" "uuid") IS 'FND-RLS-04 fix: now requires auth.uid() IS NOT NULL, an organization context, and core.is_finance_head() before touching any period -- and the target period is looked up scoped to the caller''s own organization_id (previously unscoped, so any period UUID in any tenant could be matched). Previously had no explicit GRANT/REVOKE, leaving Postgres''s default PUBLIC EXECUTE in place, so anon could call it too.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."peek_next_number"("p_type" "text") RETURNS "text"
@@ -4002,6 +4377,7 @@ DECLARE
     v_to_base NUMERIC(18,2);
     v_from_rate NUMERIC(18,6);
     v_to_rate NUMERIC(18,6);
+    v_journal_id UUID;
 BEGIN
     -- BUG-025 FIX (four issues in this one check, all from the same missing
     -- guard block):
@@ -4027,6 +4403,19 @@ BEGIN
     IF v_t.status <> 'APPROVED' THEN RAISE EXCEPTION 'Must be approved, status: %', v_t.status; END IF;
     IF v_t.requires_dual_approval AND v_t.second_approved_by IS NULL THEN
         RAISE EXCEPTION 'This transfer requires a second approval before it can be posted';
+    END IF;
+
+    -- FND-BANK-01 FIX: explicit idempotency guard, matching the pattern
+    -- used by post_income_atomic / post_expense_atomic. Belt-and-suspenders
+    -- alongside the status re-check on the UPDATE below -- either one alone
+    -- would already stop a duplicate posting, but this gives a clearer
+    -- error message than a generic "Must be approved" would once the
+    -- status has already flipped to POSTED.
+    IF EXISTS (
+        SELECT 1 FROM finance.journal_entries
+        WHERE source_type = 'BANK_TRANSFER' AND source_id = p_transfer_id
+    ) THEN
+        RAISE EXCEPTION 'This transfer has already been posted to the general ledger';
     END IF;
 
     SELECT fiscal_year_id INTO v_fy_id FROM finance.accounting_periods WHERE id = p_period_id;
@@ -4077,12 +4466,38 @@ BEGIN
     END IF;
 
     --  CORRECT PARAMETER ORDER
-    RETURN finance.post_journal_entry('Bank Transfer: ' || v_t.transfer_number, p_transaction_date, p_period_id, v_lines, 'PKR', 1.0000, 'BANK_TRANSFER', p_transfer_id, NULL, NULL);
+    v_journal_id := finance.post_journal_entry('Bank Transfer: ' || v_t.transfer_number, p_transaction_date, p_period_id, v_lines, 'PKR', 1.0000, 'BANK_TRANSFER', p_transfer_id, NULL, NULL);
+
+    -- FND-BANK-01 FIX: finalize the transfer row in the SAME transaction as
+    -- the journal insert above. If this UPDATE fails or matches zero rows
+    -- (status changed under us despite the earlier FOR UPDATE lock), the
+    -- RAISE EXCEPTION below rolls back the journal insert too, so we never
+    -- end up with a posted journal and a transfer still stuck at APPROVED.
+    UPDATE finance.bank_transfers
+    SET status = 'POSTED',
+        journal_entry_id = v_journal_id,
+        period_id = p_period_id,
+        posted_by = auth.uid(),
+        posted_at = now(),
+        updated_at = now()
+    WHERE id = p_transfer_id
+      AND organization_id = v_org
+      AND status = 'APPROVED';
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Bank transfer status update failed while posting to GL';
+    END IF;
+
+    RETURN v_journal_id;
 END;
 $$;
 
 
 ALTER FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'FND-BANK-01 FIX: now atomic. Previously created the GL journal via finance.post_journal_entry() and returned its id but never updated finance.bank_transfers itself, leaving the row at status=APPROVED with journal_entry_id=NULL forever. Because the only guard was "status <> APPROVED", every retry (double-click, network retry) passed the guard again and posted another duplicate journal, with no journal_entry_id ever recorded. Now updates the transfer row to status=POSTED with journal_entry_id/period_id/posted_by/posted_at in the same transaction as the journal insert, re-checking status=APPROVED under the row lock so a race rolls back the journal too, plus an explicit idempotency guard against finance.journal_entries.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_credit_note"("p_cn_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
@@ -6270,11 +6685,15 @@ CREATE TABLE IF NOT EXISTS "finance"."vendor_bills" (
     "rate_date" "date",
     "rate_source" "text",
     "rate_snapshot" "jsonb",
-    CONSTRAINT "vendor_bills_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'PARTIALLY_PAID'::"text", 'PAID'::"text", 'REVERSED'::"text", 'CANCELLED'::"text"])))
+    CONSTRAINT "vendor_bills_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'REJECTED'::"text", 'POSTED'::"text", 'PARTIALLY_PAID'::"text", 'PAID'::"text", 'REVERSED'::"text", 'CANCELLED'::"text"])))
 );
 
 
 ALTER TABLE "finance"."vendor_bills" OWNER TO "postgres";
+
+
+COMMENT ON CONSTRAINT "vendor_bills_status_check" ON "finance"."vendor_bills" IS 'FND-AP-04: widened to include REJECTED, which the application workflow route and the uq_vendor_bill_number partial index already assumed existed.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."save_vendor_bill_atomic"("p_bill_id" "uuid", "p_payload" "jsonb", "p_lines" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "finance"."vendor_bills"
@@ -6455,6 +6874,23 @@ $$;
 
 
 ALTER FUNCTION "finance"."set_fx_snapshot"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."set_statement_line_financial_account"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    AS $$
+BEGIN
+  IF NEW.financial_account_id IS NULL THEN
+    SELECT financial_account_id INTO NEW.financial_account_id
+    FROM finance.bank_statements WHERE id = NEW.bank_statement_id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."set_statement_line_financial_account"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."snapshot_tax_rule_set"() RETURNS "trigger"
@@ -7136,7 +7572,7 @@ COMMENT ON TABLE "public"."payroll_runs" IS 'A payroll run is a batch calculatio
 
 CREATE OR REPLACE FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") RETURNS "public"."payroll_runs"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public'
+    SET "search_path" TO 'pg_catalog', 'public', 'core'
     AS $$
 DECLARE
   v_run public.payroll_runs;
@@ -7156,6 +7592,39 @@ DECLARE
   v_ded_snapshot JSONB;
   v_lines_written INT := 0;
 BEGIN
+  -- FND-RLS-02 FIX: authenticate and authorize inside the function itself,
+  -- rather than trusting the caller's p_org_id/p_actor or relying on an
+  -- application-layer check that a direct PostgREST/RPC call bypasses.
+
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'calculate_payroll_run: must be called by an authenticated user'
+      USING ERRCODE = '28000';
+  END IF;
+
+  -- p_org_id must be the caller's own organization -- never trust it as a
+  -- free client parameter, or any authenticated user could recalculate
+  -- another tenant's payroll by guessing/enumerating org UUIDs.
+  IF p_org_id IS DISTINCT FROM core.current_user_org_id() THEN
+    RAISE EXCEPTION 'calculate_payroll_run: p_org_id does not match the caller''s organization'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- p_actor must be the caller themselves -- never let a client stamp an
+  -- arbitrary calculated_by.
+  IF p_actor IS DISTINCT FROM auth.uid() THEN
+    RAISE EXCEPTION 'calculate_payroll_run: p_actor must match the authenticated caller'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Same permission the app route already enforces
+  -- (src/app/api/finance/payroll/route.ts requires PAYROLL_UPDATE for the
+  -- 'calculate' action) -- now also enforced here, so it can't be
+  -- bypassed by calling the RPC directly.
+  IF NOT core.has_permission(auth.uid(), 'PAYROLL_UPDATE') THEN
+    RAISE EXCEPTION 'calculate_payroll_run: PAYROLL_UPDATE permission required'
+      USING ERRCODE = '42501';
+  END IF;
+
   SELECT * INTO v_run FROM public.payroll_runs WHERE id = p_run_id AND organization_id = p_org_id FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Payroll run not found';
@@ -7298,6 +7767,10 @@ $$;
 
 
 ALTER FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") IS 'FND-RLS-02 fix: now requires auth.uid() IS NOT NULL, p_org_id = core.current_user_org_id(), p_actor = auth.uid(), and core.has_permission(auth.uid(),''PAYROLL_UPDATE'') before touching any payroll data. Previously trusted p_org_id/p_actor as ordinary client parameters with no auth check at all, and was grantable to anon.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."cash_flow"("p_start" "date" DEFAULT NULL::"date", "p_end" "date" DEFAULT NULL::"date") RETURNS json
@@ -9056,7 +9529,7 @@ CREATE OR REPLACE FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$ BEGIN
   RETURN QUERY
-  SELECT 
+  SELECT
     coa.id,
     coa.code,
     coa.name,
@@ -9064,14 +9537,17 @@ CREATE OR REPLACE FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"
     coa.normal_balance,
     COALESCE(SUM(COALESCE(jl.base_debit, jl.debit_amount)), 0) AS total_debit,
     COALESCE(SUM(COALESCE(jl.base_credit, jl.credit_amount)), 0) AS total_credit,
-    CASE 
-      WHEN coa.normal_balance = 'DEBIT' 
+    CASE
+      WHEN coa.normal_balance = 'DEBIT'
         THEN COALESCE(SUM(COALESCE(jl.base_debit, jl.debit_amount)), 0) - COALESCE(SUM(COALESCE(jl.base_credit, jl.credit_amount)), 0)
       ELSE COALESCE(SUM(COALESCE(jl.base_credit, jl.credit_amount)), 0) - COALESCE(SUM(COALESCE(jl.base_debit, jl.debit_amount)), 0)
     END AS net_balance
   FROM finance.chart_of_accounts coa
   LEFT JOIN finance.journal_lines jl ON jl.account_id = coa.id
-  LEFT JOIN finance.journal_entries je ON je.id = jl.journal_entry_id 
+  -- FND-GL-01 fix: INNER JOIN (was LEFT JOIN) so a non-matching status/period
+  -- actually removes the line from the sums instead of silently passing it
+  -- through with je.* = NULL.
+  INNER JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
     AND je.status = 'POSTED'
     AND je.period_id = ANY(p_period_ids)
   WHERE coa.is_active = true
@@ -9079,7 +9555,7 @@ CREATE OR REPLACE FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"
     AND p_organization_id = core.current_user_org_id()
     AND coa.posting_allowed = true
   GROUP BY coa.id, coa.code, coa.name, coa.account_type, coa.normal_balance
-  HAVING COALESCE(SUM(COALESCE(jl.base_debit, jl.debit_amount)), 0) > 0 
+  HAVING COALESCE(SUM(COALESCE(jl.base_debit, jl.debit_amount)), 0) > 0
       OR COALESCE(SUM(COALESCE(jl.base_credit, jl.credit_amount)), 0) > 0
   ORDER BY coa.code;
 END;
@@ -9087,6 +9563,10 @@ END;
 
 
 ALTER FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[], "p_organization_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[], "p_organization_id" "uuid") IS 'FND-GL-01 fix: journal_entries status/period predicate moved onto an INNER JOIN so it actually filters journal_lines, instead of being a dead condition on a LEFT JOIN. Previously summed lines from every entry status and every period regardless of p_period_ids.';
+
 
 
 CREATE OR REPLACE FUNCTION "reporting"."pending_approvals_list"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
@@ -11656,6 +12136,7 @@ CREATE TABLE IF NOT EXISTS "finance"."statement_lines" (
     "exclusion_reason" "text",
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
+    "financial_account_id" "uuid",
     CONSTRAINT "statement_lines_match_method_check" CHECK ((("match_method" IS NULL) OR ("match_method" = ANY (ARRAY['AUTO_AMOUNT_DATE'::"text", 'AUTO_AMOUNT_REF'::"text", 'AUTO_AMOUNT_DESC'::"text", 'AUTO_IDENTIFIER'::"text", 'MANUAL'::"text"])))),
     CONSTRAINT "statement_lines_reconciliation_status_check" CHECK (("reconciliation_status" = ANY (ARRAY['UNRECONCILED'::"text", 'MATCHED'::"text", 'EXCLUDED'::"text", 'DUPLICATE'::"text", 'MANUAL_MATCH'::"text"])))
 );
@@ -12698,6 +13179,11 @@ CREATE TABLE IF NOT EXISTS "public"."invoices" (
     "rate_date" "date",
     "rate_source" "text",
     "rate_snapshot" "jsonb",
+    "submitted_by" "uuid",
+    "submitted_at" timestamp with time zone,
+    "verified_by" "uuid",
+    "verified_at" timestamp with time zone,
+    "rejection_reason" "text",
     CONSTRAINT "invoices_amounts_non_negative_check" CHECK ((("amount" >= (0)::numeric) AND ("subtotal" >= (0)::numeric) AND ("tax_amount" >= (0)::numeric) AND ("discount_amount" >= (0)::numeric) AND ("total_amount" >= (0)::numeric) AND ("base_subtotal" >= (0)::numeric) AND ("base_tax_amount" >= (0)::numeric) AND ("base_discount_amount" >= (0)::numeric) AND ("base_total_amount" >= (0)::numeric) AND ("amount_paid" >= (0)::numeric) AND ("base_amount_paid" >= (0)::numeric) AND ("outstanding_amount" >= (0)::numeric) AND ("base_outstanding_amount" >= (0)::numeric))),
     CONSTRAINT "invoices_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'SUBMITTED'::character varying, 'PENDING_APPROVAL'::character varying, 'VERIFIED'::character varying, 'APPROVED'::character varying, 'ISSUED'::character varying, 'PARTIALLY_PAID'::character varying, 'PAID'::character varying, 'OVERDUE'::character varying, 'VOID'::character varying, 'CREDITED'::character varying, 'REFUNDED'::character varying])::"text"[])))
 );
@@ -12707,6 +13193,26 @@ ALTER TABLE "public"."invoices" OWNER TO "postgres";
 
 
 COMMENT ON COLUMN "public"."invoices"."organization_id" IS 'Added migration 036 (Compliance Audit Finding 4.1). Backfilled from public.profiles via user_id; must be NOT NULL + FK after migration 037 verifies clean data.';
+
+
+
+COMMENT ON COLUMN "public"."invoices"."submitted_by" IS 'FND-AR-01 fix: set by /api/finance/workflow on submit (DRAFT -> SUBMITTED). Previously missing, which made PostgREST reject every submit with PGRST204.';
+
+
+
+COMMENT ON COLUMN "public"."invoices"."submitted_at" IS 'FND-AR-01 fix: timestamp paired with submitted_by.';
+
+
+
+COMMENT ON COLUMN "public"."invoices"."verified_by" IS 'FND-AR-01 fix: reserved for parity with expenses/incomes/vendor_bills workflow shape. The invoice module currently has no verify step (DRAFT -> SUBMITTED -> APPROVED -> ISSUED), so this stays NULL today but is safe for a future verify step without another migration.';
+
+
+
+COMMENT ON COLUMN "public"."invoices"."verified_at" IS 'FND-AR-01 fix: timestamp paired with verified_by.';
+
+
+
+COMMENT ON COLUMN "public"."invoices"."rejection_reason" IS 'FND-AR-01 fix: set by /api/finance/workflow on reject, cleared on reopen. Previously missing, which made PostgREST reject every reject/reopen with PGRST204.';
 
 
 
@@ -12914,11 +13420,16 @@ CREATE OR REPLACE VIEW "public"."payment_receipts" WITH ("security_invoker"='tru
     "posted_by",
     "posted_at",
     "created_at",
-    "updated_at"
+    "updated_at",
+    "organization_id"
    FROM "finance"."payment_receipts";
 
 
 ALTER VIEW "public"."payment_receipts" OWNER TO "postgres";
+
+
+COMMENT ON VIEW "public"."payment_receipts" IS 'FND-AR-04 fix: added organization_id, which was previously missing from this view. src/app/api/finance/payment-reversals/route.ts (and any other caller filtering by organization_id) failed with PGRST/42703 "column payment_receipts.organization_id does not exist" on every call.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."payments" (
@@ -14347,7 +14858,7 @@ CREATE OR REPLACE VIEW "reporting"."reconciliation_summary" WITH ("security_invo
      LEFT JOIN LATERAL ( SELECT "sum"(("jl"."debit_amount" - "jl"."credit_amount")) AS "ledger_balance"
            FROM ("finance"."journal_lines" "jl"
              JOIN "finance"."journal_entries" "je" ON (("je"."id" = "jl"."journal_entry_id")))
-          WHERE (("jl"."account_id" = "fa"."linked_ledger_account_id") AND ("je"."status" = 'posted'::"text"))) "ledger" ON (true))
+          WHERE (("jl"."account_id" = "fa"."linked_ledger_account_id") AND ("je"."status" = 'POSTED'::"text"))) "ledger" ON (true))
      LEFT JOIN LATERAL ( SELECT "bank_statements"."closing_balance",
             "bank_statements"."statement_date"
            FROM "finance"."bank_statements"
@@ -16330,6 +16841,10 @@ CREATE INDEX "settlement_lines_org_id_idx" ON "finance"."settlement_lines" USING
 
 
 
+CREATE UNIQUE INDEX "statement_lines_dedupe_key" ON "finance"."statement_lines" USING "btree" ("financial_account_id", "transaction_date", "amount", "md5"(((((COALESCE("transaction_identifier", ''::"text") || '|'::"text") || COALESCE("reference", ''::"text")) || '|'::"text") || COALESCE("description", ''::"text"))));
+
+
+
 CREATE UNIQUE INDEX "tax_payments_idempotency_uq" ON "finance"."tax_payments_and_refunds" USING "btree" ("organization_id", "idempotency_key") WHERE ("idempotency_key" IS NOT NULL);
 
 
@@ -17185,6 +17700,10 @@ CREATE OR REPLACE TRIGGER "trg_depreciation_schedule_ts" BEFORE UPDATE ON "finan
 
 
 
+CREATE OR REPLACE TRIGGER "trg_derive_credit_note_base_amount" BEFORE INSERT OR UPDATE ON "finance"."credit_notes" FOR EACH ROW EXECUTE FUNCTION "finance"."derive_credit_note_base_amount"();
+
+
+
 CREATE CONSTRAINT TRIGGER "trg_enforce_base_amounts_on_post" AFTER INSERT OR UPDATE ON "finance"."journal_lines" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION "finance"."enforce_base_amounts_on_post"();
 
 
@@ -17314,6 +17833,10 @@ CREATE OR REPLACE TRIGGER "trg_sl_updated_at" BEFORE UPDATE ON "finance"."statem
 
 
 CREATE OR REPLACE TRIGGER "trg_snapshot_tax_rule_set" BEFORE INSERT ON "finance"."tax_computations" FOR EACH ROW EXECUTE FUNCTION "finance"."snapshot_tax_rule_set"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_statement_line_financial_account" BEFORE INSERT ON "finance"."statement_lines" FOR EACH ROW EXECUTE FUNCTION "finance"."set_statement_line_financial_account"();
 
 
 
@@ -17574,6 +18097,10 @@ CREATE OR REPLACE TRIGGER "trg_contractors_updated" BEFORE UPDATE ON "public"."c
 
 
 CREATE OR REPLACE TRIGGER "trg_expenses_fx_snapshot" BEFORE INSERT ON "public"."expenses" FOR EACH ROW EXECUTE FUNCTION "finance"."set_fx_snapshot"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_guard_profiles_privilege_columns" BEFORE UPDATE ON "public"."profiles" FOR EACH ROW EXECUTE FUNCTION "core"."guard_profiles_privilege_columns"();
 
 
 
@@ -18594,6 +19121,11 @@ ALTER TABLE ONLY "finance"."payment_receipts"
 
 
 ALTER TABLE ONLY "finance"."payment_receipts"
+    ADD CONSTRAINT "payment_receipts_journal_entry_id_fkey" FOREIGN KEY ("journal_entry_id") REFERENCES "finance"."journal_entries"("id") ON DELETE SET NULL NOT VALID;
+
+
+
+ALTER TABLE ONLY "finance"."payment_receipts"
     ADD CONSTRAINT "payment_receipts_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE SET NULL;
 
 
@@ -18725,6 +19257,11 @@ ALTER TABLE ONLY "finance"."settlement_lines"
 
 ALTER TABLE ONLY "finance"."statement_lines"
     ADD CONSTRAINT "statement_lines_bank_statement_id_fkey" FOREIGN KEY ("bank_statement_id") REFERENCES "finance"."bank_statements"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "finance"."statement_lines"
+    ADD CONSTRAINT "statement_lines_financial_account_id_fkey" FOREIGN KEY ("financial_account_id") REFERENCES "finance"."financial_accounts"("id");
 
 
 
@@ -21864,6 +22401,10 @@ GRANT ALL ON TABLE "public"."profiles" TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "core"."admin_set_user_role"("p_user_id" "uuid", "p_new_role" "text") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "core"."admin_update_user_profile"("p_user_id" "uuid", "p_department_id" "uuid", "p_manager_id" "uuid", "p_employment_status" "text", "p_clear_department" boolean, "p_clear_manager" boolean) TO "authenticated";
 
 
@@ -21892,7 +22433,6 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
-
 
 
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
@@ -21954,7 +22494,9 @@ GRANT ALL ON FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" 
 
 
 
+REVOKE ALL ON FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") TO "service_role";
 
 
 
@@ -21978,6 +22520,11 @@ GRANT ALL ON FUNCTION "finance"."get_pnl_accounts"("p_fiscal_year_id" "uuid", "p
 
 
 
+REVOKE ALL ON FUNCTION "finance"."import_bank_statement"("p_financial_account_id" "uuid", "p_statement_date" "date", "p_opening_balance" numeric, "p_closing_balance" numeric, "p_currency" "text", "p_file_name" "text", "p_lines" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."import_bank_statement"("p_financial_account_id" "uuid", "p_statement_date" "date", "p_opening_balance" numeric, "p_closing_balance" numeric, "p_currency" "text", "p_file_name" "text", "p_lines" "jsonb") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "finance"."import_opening_balance_atomic"("p_batch_id" "text", "p_fiscal_year_id" "uuid", "p_rows" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
 
@@ -21997,6 +22544,12 @@ GRANT ALL ON FUNCTION "finance"."mark_overdue_invoices"() TO "authenticated";
 
 REVOKE ALL ON FUNCTION "finance"."mark_paid_invoices"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."mark_paid_invoices"() TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."open_period"("p_period_id" "uuid", "p_opened_by" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."open_period"("p_period_id" "uuid", "p_opened_by" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "finance"."open_period"("p_period_id" "uuid", "p_opened_by" "uuid") TO "service_role";
 
 
 
@@ -22151,7 +22704,6 @@ GRANT ALL ON TABLE "public"."payroll_runs" TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") TO "service_role";
 

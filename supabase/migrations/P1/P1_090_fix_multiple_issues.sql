@@ -411,3 +411,369 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION finance.save_vendor_bill_atomic(uuid,jsonb,jsonb,uuid,uuid) TO authenticated;
+
+
+-- =====================================================================
+-- Finance Management System — Critical Fixes
+--   FND-RLS-01 (P0): profiles self-promotion -> full RBAC/tenant compromise
+--   FND-GL-01  (P0): reporting.get_trial_balance ignores POSTED/period filter
+--
+-- Safe to run more than once (CREATE OR REPLACE, DROP ... IF EXISTS,
+-- DROP TRIGGER IF EXISTS + CREATE TRIGGER).
+-- Run this directly in the Supabase SQL editor or via
+-- `supabase db execute -f P2_008_fnd_rls01_fnd_gl01_critical_fixes.sql`.
+-- =====================================================================
+
+BEGIN;
+
+-- ---------------------------------------------------------------------
+-- FND-RLS-01, part 1: lock down the privileged columns on public.profiles
+--
+-- Root cause: "profiles_modify_org_scoped" allows any user to UPDATE their
+-- own row (auth.uid() = user_id), and there is no column-level guard, so a
+-- PATCH to /rest/v1/profiles?user_id=eq.<self> with {"role":"CEO"} (or a
+-- different organization_id) is accepted. core.has_role()/is_finance_head()
+-- then trust that same profiles.role as a fallback, so the forged row
+-- immediately unlocks every role-gated policy in (or outside, via
+-- organization_id) the user's tenant.
+--
+-- Fix: a BEFORE UPDATE trigger blocks any change to role, organization_id,
+-- department_id, manager_id, employment_status, mfa_required, or any
+-- can_* legacy permission flag unless the session has been explicitly
+-- authorized to bypass the guard. The only code paths that authorize the
+-- bypass are the SECURITY DEFINER functions below, which perform their own
+-- permission checks against core.user_roles/core.permissions directly
+-- (never against public.profiles.role), so the check cannot be defeated by
+-- first forging the very column it protects.
+-- ---------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION "core"."guard_profiles_privilege_columns"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  -- Set only by core.admin_set_user_role() / core.admin_update_user_profile()
+  -- for the duration of their own UPDATE statement (SET LOCAL => resets at
+  -- end of transaction automatically). PostgREST/direct client updates never
+  -- set this, so this branch cannot be reached by an ordinary self-update.
+  IF current_setting('core.profiles_guard_bypass', true) = 'on' THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW."role" IS DISTINCT FROM OLD."role" THEN
+    RAISE EXCEPTION 'profiles.role cannot be changed directly; use core.admin_set_user_role()'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW."organization_id" IS DISTINCT FROM OLD."organization_id" THEN
+    RAISE EXCEPTION 'profiles.organization_id cannot be changed directly'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW."department_id" IS DISTINCT FROM OLD."department_id"
+     OR NEW."manager_id" IS DISTINCT FROM OLD."manager_id"
+     OR NEW."employment_status" IS DISTINCT FROM OLD."employment_status" THEN
+    RAISE EXCEPTION 'profiles.department_id/manager_id/employment_status cannot be changed directly; use core.admin_update_user_profile()'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW."mfa_required" IS DISTINCT FROM OLD."mfa_required"
+     OR NEW."can_create_project"  IS DISTINCT FROM OLD."can_create_project"
+     OR NEW."can_delete_project"  IS DISTINCT FROM OLD."can_delete_project"
+     OR NEW."can_add_income"      IS DISTINCT FROM OLD."can_add_income"
+     OR NEW."can_add_expense"     IS DISTINCT FROM OLD."can_add_expense"
+     OR NEW."can_create_invoice"  IS DISTINCT FROM OLD."can_create_invoice"
+     OR NEW."can_delete_invoice"  IS DISTINCT FROM OLD."can_delete_invoice"
+     OR NEW."can_edit_project"    IS DISTINCT FROM OLD."can_edit_project"
+     OR NEW."can_edit_income"     IS DISTINCT FROM OLD."can_edit_income"
+     OR NEW."can_edit_expense"    IS DISTINCT FROM OLD."can_edit_expense"
+     OR NEW."can_edit_invoice"    IS DISTINCT FROM OLD."can_edit_invoice"
+     OR NEW."can_delete_income"   IS DISTINCT FROM OLD."can_delete_income"
+     OR NEW."can_delete_expense"  IS DISTINCT FROM OLD."can_delete_expense"
+     OR NEW."can_manage_budgets"  IS DISTINCT FROM OLD."can_manage_budgets" THEN
+    RAISE EXCEPTION 'profiles permission flags cannot be self-modified; use an admin RPC'
+      USING ERRCODE = '42501';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+ALTER FUNCTION "core"."guard_profiles_privilege_columns"() OWNER TO "postgres";
+
+COMMENT ON FUNCTION "core"."guard_profiles_privilege_columns"() IS
+  'FND-RLS-01 fix: blocks direct UPDATEs to role/organization_id/department_id/manager_id/employment_status/mfa_required/can_* on public.profiles. Bypassed only by SECURITY DEFINER admin RPCs that set core.profiles_guard_bypass for the duration of their own UPDATE.';
+
+DROP TRIGGER IF EXISTS "trg_guard_profiles_privilege_columns" ON "public"."profiles";
+
+CREATE TRIGGER "trg_guard_profiles_privilege_columns"
+    BEFORE UPDATE ON "public"."profiles"
+    FOR EACH ROW
+    EXECUTE FUNCTION "core"."guard_profiles_privilege_columns"();
+
+
+-- ---------------------------------------------------------------------
+-- FND-RLS-01, part 2: authorized role-change RPC (CEO only), and patch
+-- the existing admin_update_user_profile() to set the bypass flag now
+-- that the trigger above blocks its own UPDATE.
+-- ---------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION "core"."admin_set_user_role"("p_user_id" "uuid", "p_new_role" "text") RETURNS "public"."profiles"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'core', 'audit'
+    AS $$
+DECLARE
+  v_caller_org uuid;
+  v_target_org uuid;
+  v_old_role text;
+  v_target public.profiles;
+BEGIN
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'admin_set_user_role: must be called by an authenticated user';
+  END IF;
+
+  IF p_user_id = auth.uid() THEN
+    RAISE EXCEPTION 'admin_set_user_role: cannot change your own role; ask another CEO'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Deliberately does NOT use core.has_role()/core.is_finance_head(), because
+  -- those fall back to reading public.profiles.role for users not yet present
+  -- in core.user_roles -- exactly the column this function exists to guard.
+  -- Only an explicit, active core.user_roles grant of 'CEO' counts here.
+  IF NOT EXISTS (
+    SELECT 1
+    FROM core.user_roles ur
+    JOIN core.roles r ON r.id = ur.role_id
+    WHERE ur.user_id = auth.uid()
+      AND ur.is_active = true
+      AND CURRENT_DATE >= ur.effective_from
+      AND (ur.effective_to IS NULL OR ur.effective_to >= CURRENT_DATE)
+      AND r.name = 'CEO'
+  ) THEN
+    RAISE EXCEPTION 'admin_set_user_role: only a CEO with a core.user_roles grant may change user roles'
+      USING ERRCODE = '42501';
+  END IF;
+
+  SELECT organization_id INTO v_caller_org FROM public.profiles WHERE user_id = auth.uid();
+
+  SELECT organization_id, role INTO v_target_org, v_old_role
+  FROM public.profiles WHERE user_id = p_user_id;
+
+  IF v_caller_org IS NULL OR v_target_org IS NULL OR v_caller_org <> v_target_org THEN
+    RAISE EXCEPTION 'admin_set_user_role: target user is not in your organization';
+  END IF;
+
+  -- profiles_role_check still enforces the allowed role values.
+  PERFORM set_config('core.profiles_guard_bypass', 'on', true);
+
+  UPDATE public.profiles
+  SET role = p_new_role
+  WHERE user_id = p_user_id
+    AND organization_id = v_caller_org
+  RETURNING * INTO v_target;
+
+  PERFORM set_config('core.profiles_guard_bypass', 'off', true);
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'admin_set_user_role: target user is not in your organization';
+  END IF;
+
+  PERFORM audit.log_action(
+    p_user_id := auth.uid(),
+    p_action := 'ADMIN_USER_ROLE_CHANGED',
+    p_entity_type := 'public.profiles',
+    p_entity_id := v_target.id,
+    p_description := 'CEO changed a user role',
+    p_old_values := jsonb_build_object('role', v_old_role),
+    p_new_values := jsonb_build_object('role', v_target.role),
+    p_source_module := 'admin.user_role',
+    p_status := 'success',
+    p_severity := 'warning'
+  );
+
+  RETURN v_target;
+END;
+$$;
+
+ALTER FUNCTION "core"."admin_set_user_role"("p_user_id" "uuid", "p_new_role" "text") OWNER TO "postgres";
+
+COMMENT ON FUNCTION "core"."admin_set_user_role"("p_user_id" "uuid", "p_new_role" "text") IS
+  'FND-RLS-01 fix: the only supported way to change another user''s public.profiles.role. Requires the caller to hold an active CEO grant in core.user_roles (not the profiles.role fallback), and only within the caller''s own organization. Cannot be used on yourself.';
+
+GRANT EXECUTE ON FUNCTION "core"."admin_set_user_role"("p_user_id" "uuid", "p_new_role" "text") TO "authenticated";
+
+
+CREATE OR REPLACE FUNCTION "core"."admin_update_user_profile"("p_user_id" "uuid", "p_department_id" "uuid" DEFAULT NULL::"uuid", "p_manager_id" "uuid" DEFAULT NULL::"uuid", "p_employment_status" "text" DEFAULT NULL::"text", "p_clear_department" boolean DEFAULT false, "p_clear_manager" boolean DEFAULT false) RETURNS "public"."profiles"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'public', 'core', 'finance', 'audit'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_target public.profiles;
+  v_status text;
+BEGIN
+  IF v_org IS NULL OR NOT core.has_permission(auth.uid(), 'ADMIN_USERS') THEN
+    RAISE EXCEPTION 'Access denied: ADMIN_USERS permission required';
+  END IF;
+
+  SELECT * INTO v_target
+  FROM public.profiles
+  WHERE user_id = p_user_id
+    AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Target user is not in the current organization';
+  END IF;
+
+  IF p_manager_id IS NOT NULL AND p_manager_id = p_user_id THEN
+    RAISE EXCEPTION 'A user cannot be their own manager';
+  END IF;
+
+  IF p_department_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM finance.dimensions d
+    WHERE d.id = p_department_id
+      AND d.organization_id = v_org
+      AND d.type = 'DEPARTMENT'
+      AND d.is_active = true
+  ) THEN
+    RAISE EXCEPTION 'Department is not active or does not belong to the organization';
+  END IF;
+
+  IF p_manager_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM public.profiles m
+    WHERE m.user_id = p_manager_id
+      AND m.organization_id = v_org
+  ) THEN
+    RAISE EXCEPTION 'Manager is not in the current organization';
+  END IF;
+
+  v_status := COALESCE(p_employment_status, v_target.employment_status, 'ACTIVE');
+  IF v_status NOT IN ('ACTIVE','INACTIVE','TERMINATED') THEN
+    RAISE EXCEPTION 'employment_status must be ACTIVE, INACTIVE, or TERMINATED';
+  END IF;
+
+  -- FND-RLS-01 fix: authorize this statement's own UPDATE past the new
+  -- BEFORE UPDATE guard trigger (permission was already checked above).
+  PERFORM set_config('core.profiles_guard_bypass', 'on', true);
+
+  UPDATE public.profiles
+  SET department_id = CASE WHEN p_clear_department THEN NULL ELSE COALESCE(p_department_id, department_id) END,
+      manager_id = CASE WHEN p_clear_manager THEN NULL ELSE COALESCE(p_manager_id, manager_id) END,
+      employment_status = v_status
+  WHERE user_id = p_user_id
+    AND organization_id = v_org
+  RETURNING * INTO v_target;
+
+  PERFORM set_config('core.profiles_guard_bypass', 'off', true);
+
+  PERFORM audit.log_action(
+    p_user_id := auth.uid(),
+    p_action := 'ADMIN_USER_PROFILE_UPDATED',
+    p_entity_type := 'public.profiles',
+    p_entity_id := v_target.id,
+    p_description := 'Admin updated user department, manager, or employment status',
+    p_old_values := jsonb_build_object(
+      'department_id', CASE WHEN p_clear_department THEN v_target.department_id ELSE NULL END,
+      'manager_id', CASE WHEN p_clear_manager THEN v_target.manager_id ELSE NULL END
+    ),
+    p_new_values := jsonb_build_object(
+      'department_id', v_target.department_id,
+      'manager_id', v_target.manager_id,
+      'employment_status', v_target.employment_status
+    ),
+    p_source_module := 'admin.user_profile',
+    p_status := 'success',
+    p_severity := 'medium'
+  );
+
+  RETURN v_target;
+END;
+$$;
+
+ALTER FUNCTION "core"."admin_update_user_profile"("p_user_id" "uuid", "p_department_id" "uuid", "p_manager_id" "uuid", "p_employment_status" "text", "p_clear_department" boolean, "p_clear_manager" boolean) OWNER TO "postgres";
+
+GRANT EXECUTE ON FUNCTION "core"."admin_update_user_profile"("p_user_id" "uuid", "p_department_id" "uuid", "p_manager_id" "uuid", "p_employment_status" "text", "p_clear_department" boolean, "p_clear_manager" boolean) TO "authenticated";
+
+
+-- ---------------------------------------------------------------------
+-- FND-GL-01: reporting.get_trial_balance ignored POSTED-status / period
+-- filters because they were attached as ON-conditions of a LEFT JOIN to
+-- finance.journal_entries, while the SELECT/SUM only ever reference
+-- finance.journal_lines. In a LEFT JOIN, a failing ON-condition does not
+-- drop the joined row from the result set -- it just nulls out je.*  --
+-- so journal_lines from DRAFT/APPROVED/REVERSED entries, and from every
+-- period, were summed into the "Trial Balance" regardless of the caller's
+-- p_period_ids / POSTED-only intent.
+--
+-- Fix: make the entries join an INNER JOIN carrying the same status/period
+-- predicate. Accounts with zero POSTED activity are (as before) dropped by
+-- the existing HAVING clause, so this is a behavior-preserving tightening,
+-- not a scope change.
+-- ---------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[], "p_organization_id" "uuid") RETURNS TABLE("account_id" "uuid", "code" "text", "name" "text", "account_type" "text", "normal_balance" "text", "total_debit" numeric, "total_credit" numeric, "net_balance" numeric)
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
+    AS $$ BEGIN
+  RETURN QUERY
+  SELECT
+    coa.id,
+    coa.code,
+    coa.name,
+    coa.account_type,
+    coa.normal_balance,
+    COALESCE(SUM(COALESCE(jl.base_debit, jl.debit_amount)), 0) AS total_debit,
+    COALESCE(SUM(COALESCE(jl.base_credit, jl.credit_amount)), 0) AS total_credit,
+    CASE
+      WHEN coa.normal_balance = 'DEBIT'
+        THEN COALESCE(SUM(COALESCE(jl.base_debit, jl.debit_amount)), 0) - COALESCE(SUM(COALESCE(jl.base_credit, jl.credit_amount)), 0)
+      ELSE COALESCE(SUM(COALESCE(jl.base_credit, jl.credit_amount)), 0) - COALESCE(SUM(COALESCE(jl.base_debit, jl.debit_amount)), 0)
+    END AS net_balance
+  FROM finance.chart_of_accounts coa
+  LEFT JOIN finance.journal_lines jl ON jl.account_id = coa.id
+  -- FND-GL-01 fix: INNER JOIN (was LEFT JOIN) so a non-matching status/period
+  -- actually removes the line from the sums instead of silently passing it
+  -- through with je.* = NULL.
+  INNER JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
+    AND je.status = 'POSTED'
+    AND je.period_id = ANY(p_period_ids)
+  WHERE coa.is_active = true
+    AND coa.organization_id = p_organization_id
+    AND p_organization_id = core.current_user_org_id()
+    AND coa.posting_allowed = true
+  GROUP BY coa.id, coa.code, coa.name, coa.account_type, coa.normal_balance
+  HAVING COALESCE(SUM(COALESCE(jl.base_debit, jl.debit_amount)), 0) > 0
+      OR COALESCE(SUM(COALESCE(jl.base_credit, jl.credit_amount)), 0) > 0
+  ORDER BY coa.code;
+END;
+ $$;
+
+ALTER FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[], "p_organization_id" "uuid") OWNER TO "postgres";
+
+COMMENT ON FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[], "p_organization_id" "uuid") IS
+  'FND-GL-01 fix: journal_entries status/period predicate moved onto an INNER JOIN so it actually filters journal_lines, instead of being a dead condition on a LEFT JOIN. Previously summed lines from every entry status and every period regardless of p_period_ids.';
+
+COMMIT;
+
+-- ---------------------------------------------------------------------
+-- Verification (run manually, not part of the transaction above):
+--
+-- 1) Self-promotion is blocked:
+--      -- as a non-admin authenticated user:
+--      update public.profiles set role = 'CEO' where user_id = auth.uid();
+--      -- expect: ERROR  profiles.role cannot be changed directly...
+--
+-- 2) Tenant pivot is blocked:
+--      update public.profiles set organization_id = '<other-org-uuid>' where user_id = auth.uid();
+--      -- expect: ERROR  profiles.organization_id cannot be changed directly
+--
+-- 3) A real CEO can still promote a teammate:
+--      select * from core.admin_set_user_role('<teammate-user-id>', 'FINANCE_HEAD');
+--
+-- 4) Trial balance no longer includes DRAFT/other-period lines:
+--      select * from reporting.get_trial_balance(array['<current-period-id>']::uuid[], '<org-id>');
+--      -- total_debit should now equal total_credit for a balanced ledger,
+--      -- and should drop if you previously had unposted DRAFT journal_lines
+--      -- inflating the old numbers.
+-- ---------------------------------------------------------------------

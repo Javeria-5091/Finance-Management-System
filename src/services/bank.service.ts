@@ -69,6 +69,7 @@ export interface BankStatement {
 export interface StatementLine {
   id: string;
   bank_statement_id: string;
+  financial_account_id?: string;
   line_number: number | null;
   transaction_date: string;
   description: string | null;
@@ -247,29 +248,56 @@ export const getBankStatements = async (orgId: string, accountId: string) => {
   return { data: data as BankStatement[], error };
 };
 
-export const createBankStatement = async (payload: {
+// FND-BANK-03 FIX: createBankStatement()/importStatementLines() used to
+// insert directly into finance.bank_statements / finance.statement_lines
+// from the browser client, in two separate, non-transactional calls:
+//   1) createBankStatement() never included organization_id, which
+//      bank_statements_org_required_going_forward (CHECK organization_id
+//      IS NOT NULL) rejects unconditionally -- every import failed here.
+//   2) importStatementLines() then inserted lines in client-side batches
+//      with no transactional link to the header row and no duplicate
+//      defense, so a failure partway left an orphan statement, and a
+//      repeat import silently duplicated everything.
+// Both calls are replaced by one atomic RPC -- see finance.import_
+// bank_statement() (P2_009 migration) -- that resolves organization_id
+// server-side and writes the header + every line in a single DB
+// transaction, skipping exact-duplicate lines via ON CONFLICT DO NOTHING.
+export interface ImportBankStatementPayload {
   financial_account_id: string;
   statement_date: string;
   opening_balance: number;
   closing_balance: number;
   currency: string;
-  imported_by: string;
-  file_name?: string;
-}) => {
-  const { data, error } = await db
-    .from('bank_statements')
-    .insert(payload)
-    .select()
-    .single();
-  return { data: data as BankStatement, error };
-};
+  file_name?: string | null;
+  lines: Array<{
+    transaction_date: string;
+    description?: string | null;
+    reference?: string | null;
+    counterparty?: string | null;
+    transaction_identifier?: string | null;
+    amount: number;
+    balance_after?: number | null;
+  }>;
+}
 
-export const importStatementLines = async (lines: Omit<StatementLine, 'id' | 'created_at' | 'updated_at'>[]) => {
-  const { data, error } = await db
-    .from('statement_lines')
-    .insert(lines)
-    .select();
-  return { data, error };
+export interface ImportBankStatementResult {
+  statement_id: string;
+  lines_submitted: number;
+  lines_inserted: number;
+  duplicates_skipped: number;
+}
+
+export const importBankStatement = async (payload: ImportBankStatementPayload) => {
+  const { data, error } = await db.rpc('import_bank_statement', {
+    p_financial_account_id: payload.financial_account_id,
+    p_statement_date: payload.statement_date,
+    p_opening_balance: payload.opening_balance,
+    p_closing_balance: payload.closing_balance,
+    p_currency: payload.currency,
+    p_file_name: payload.file_name ?? null,
+    p_lines: payload.lines,
+  });
+  return { data: data as ImportBankStatementResult | null, error };
 };
 
 // ==================== STATEMENT LINES ====================

@@ -28,10 +28,17 @@ export async function POST(req: NextRequest) {
     const payment_receipt_id = validation.data.paymentId;
     const { reason } = validation.data;
 
-    // Fetch the original payment receipt
+    // FND-AR-04 FIX: this used to select organization_id from the
+    // public.payment_receipts view (which didn't expose it -- 42703 on
+    // every call) and embed finance.journal_entries via journal_entry_id
+    // (which had no FK, so PostgREST couldn't resolve it -- PGRST200).
+    // The embedded journal_entry/journal_lines data was never actually
+    // used below (the real reversal journal is looked up separately,
+    // after the atomic RPC, by the returned journalId) so it's dropped
+    // rather than fixed in place.
     const receipt = getData(await supabase
       .from('payment_receipts')
-      .select('*, journal_entry:finance.journal_entries(id, reference, journal_lines(account_id, debit_amount, credit_amount, description))')
+      .select('*')
       .eq('id', payment_receipt_id)
       .eq('organization_id', auth.orgId)
       .single());

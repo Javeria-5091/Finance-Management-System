@@ -445,6 +445,89 @@ export async function POST(req: Request) {
     } else {
       // --- Fallback: Ad-hoc Text-to-SQL (Spec 9.5) ---
       toolUsed = 'ad_hoc_sql';
+
+      // FND-AI-01 FIX: this fallback previously ran with NO permission
+      // check at all — hasPermission() was only ever called inside the
+      // `if (selectedTool in AI_TOOLS)` branch above. Any authenticated
+      // user (EMPLOYEE/VIEWER included) whose question the classifier
+      // routed to 'ad_hoc_sql' could have the model generate and execute
+      // a SELECT over any allowlisted reporting.* view for their org —
+      // cash/bank, GL, tax, AR/AP, project profitability — bypassing the
+      // exact same RBAC that gates the three canned tools above.
+      //
+      // The registry already defines a tool for exactly this capability —
+      // query_reporting_view ("Query approved reporting views for
+      // flexible read-only analysis") — with
+      // requiredPermission: ['REPORT_READ','BANK_READ','EXPENSE_READ',
+      // 'PROJECT_READ','TAX_READ','JOURNAL_READ','BUDGET_READ']. It was
+      // simply never wired up to gate this branch. Reuse it here rather
+      // than inventing a new permission code, so a user needs at least
+      // one baseline reporting permission before free-form querying is
+      // allowed at all (on top of execute_ai_readonly_query()'s own
+      // organization_id scoping and reporting.-only restriction).
+      const adHocToolDef = AI_TOOL_REGISTRY.query_reporting_view;
+      const adHocAllowed = (await Promise.all(
+        adHocToolDef.requiredPermission.map((permission) => hasPermission(supabase, user.id, permission))
+      )).some(Boolean);
+
+      if (!adHocAllowed) {
+        await supabase.schema('ai').from('ai_tool_calls').insert({
+          message_id: userMsgId,
+          conversation_id: convId,
+          user_id: user.id,
+          organization_id: orgId,
+          tool_name: toolUsed,
+          input_params: { orgId, tool: adHocToolDef.name },
+          permission_check: 'denied',
+          user_role: userRole,
+          status: 'blocked',
+          latency_ms: 0,
+          model: null,
+        });
+
+        await logAIEvent({
+          action: 'AI_QUERY',
+          status: 'denied',
+          severity: 'medium',
+          question: userQuestion,
+          selectedTool: toolUsed,
+          refusalReason: `Missing permission: ${adHocToolDef.requiredPermission.join(' or ')}`,
+          requestId,
+          userId: user.id,
+          userEmail: user.email,
+        });
+
+        const deniedText = "Your role does not have permission to view this data.";
+        const { data: msgData } = await supabase
+          .schema('ai')
+          .from('ai_messages')
+          .insert({
+            conversation_id: convId,
+            role: 'assistant',
+            content: deniedText,
+            content_type: 'text',
+            classification: 'denied',
+            metadata: { tool: toolUsed, confidence: 'high', warnings: ['Permission denied.'] }
+          })
+          .select('id')
+          .single();
+
+        return sendResponse({
+          id: msgData?.id,
+          answer: deniedText,
+          metric_or_report: toolUsed,
+          period: null,
+          currency: 'PKR',
+          filters: [],
+          data_as_of: nowIso,
+          confidence: 'high' as const,
+          warnings: ['Permission denied by server-side check.'],
+          source_rows_or_report: null,
+          suggested_safe_actions: [],
+          conversation_id: convId,
+        });
+      }
+
       const sqlModel = await getActiveModel(supabase, 'text_to_sql');
       const sqlPromptRaw = await getActivePrompt(supabase, 'text_to_sql', DEFAULT_TEXT_TO_SQL_PROMPT);
       // ✅ FIX (Gap 3): {{SCHEMA}} placeholder is now filled here for BOTH

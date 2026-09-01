@@ -7,7 +7,7 @@
 // ═════════════════════════════════════════════════════════════════════
 
 export type WorkflowModule = 'expense' | 'income' | 'invoice' | 'vendor_bill' | 'journal_entry';
-export type WorkflowAction = 'submit' | 'verify' | 'approve' | 'post' | 'reject' | 'reverse' | 'reopen' | 'issue' | 'cancel';
+export type WorkflowAction = 'submit' | 'verify' | 'approve' | 'post' | 'reject' | 'reverse' | 'reopen' | 'issue' | 'cancel' | 'void';
 
 export async function callWorkflow(
   module: WorkflowModule,

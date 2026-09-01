@@ -167,11 +167,16 @@ export default function TransfersPage() {
           alert('No open accounting period found. Cannot post.');
           return;
         }
-        updates.status = 'POSTED';
-        updates.period_id = openPeriod.id;
-        updates.posted_by = user?.id;
-        updates.posted_at = now;
-
+        // FND-BANK-01 FIX: status/period_id/posted_by/posted_at are no
+        // longer set here — they never reached the database anyway,
+        // since the code path below returns before the
+        // updateStatus.mutateAsync() call further down, and
+        // update_bank_transfer_status() doesn't even accept 'POSTED' as
+        // a transition. finance.post_bank_transfer() now sets all of
+        // these columns itself, atomically, alongside the journal it
+        // creates — see schema.sql / P2_008 migration. Leaving the dead
+        // assignments here previously made it look like this page was
+        // finalizing the transfer, masking the real bug.
         const { error: postErr } = await postTransfer.mutateAsync({
           transferId,
           periodId: openPeriod.id,

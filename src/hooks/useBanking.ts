@@ -41,7 +41,7 @@ export const useDeactivateAccount = () => {
   return useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) => {
       if (!orgId) throw new Error('Organization context is required');
-      return bankService.deactivateFinancialAccount(id, orgId);
+      return bankService.deactivateFinancialAccount(id, orgId, reason);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['financial_accounts'] });
@@ -81,23 +81,17 @@ export const useStatementLines = (statementId: string) => {
   });
 };
 
-export const useCreateStatement = () => {
+// FND-BANK-03 FIX: single atomic import (statement header + every line
+// in one DB transaction, server-resolved organization_id, duplicate
+// lines skipped) replacing the previous two-hook / two-request flow.
+export const useImportBankStatement = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: bankService.createBankStatement,
+    mutationFn: bankService.importBankStatement,
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: ['bank_statements', variables.financial_account_id] });
-    },
-  });
-};
-
-export const useImportLines = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: bankService.importStatementLines,
-    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['statement_lines'] });
-      qc.invalidateQueries({ queryKey: ['bank_statements'] });
+      qc.invalidateQueries({ queryKey: ['reconciliation_summary'] });
     },
   });
 };

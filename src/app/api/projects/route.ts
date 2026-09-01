@@ -130,8 +130,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: parsed.error.issues[0]?.message || 'Invalid project data' }, { status: 400 });
     }
     const {
-      name, client_id, manager_id, platform, contract_value,
-      currency, start_date, end_date, description, budget_amount,
+      name, client_id, client_name, manager_id, platform, contract_value,
+      currency, start_date, end_date, description, budget_amount, budget_id,
       department, cost_center, is_confidential,
     } = parsed.data;
 
@@ -139,7 +139,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Confidential project rate fields require PROJECT_RATE_VIEW permission' }, { status: 403 });
     }
  
-    let clientName: string | null = null;
+    // FND-BUD-01: if a client is linked by id, the name is always
+    // authoritatively re-derived from the clients table (never trusts the
+    // client_name the browser sent for a linked client). Only fall back to
+    // the submitted free-text client_name when no client_id is selected.
+    let clientName: string | null = client_name?.trim() || null;
     if (client_id) {
       const { data: client, error: clientError } = await supabase
         .from('clients')
@@ -150,6 +154,17 @@ export async function POST(req: NextRequest) {
       if (clientError) return NextResponse.json({ error: clientError.message }, { status: 500 });
       if (!client) return NextResponse.json({ error: 'Selected client was not found in your organization' }, { status: 400 });
       clientName = client.name;
+    }
+
+    if (budget_id) {
+      const { data: budget, error: budgetError } = await supabase
+        .from('budgets')
+        .select('id')
+        .eq('id', budget_id)
+        .eq('organization_id', auth.orgId)
+        .maybeSingle();
+      if (budgetError) return NextResponse.json({ error: budgetError.message }, { status: 500 });
+      if (!budget) return NextResponse.json({ error: 'Selected budget was not found in your organization' }, { status: 400 });
     }
 
     // Generate project code
@@ -171,6 +186,7 @@ export async function POST(req: NextRequest) {
         end_date: end_date || null,
         description: description || null,
         budget_amount: budget_amount ?? 0,
+        budget_id: budget_id || null,
         department: department || null,
         cost_center: cost_center || null,
         is_confidential: is_confidential ?? false,

@@ -68,7 +68,7 @@ export const workflowActionSchema = z.object({
   // (silently disabling budget enforcement system-wide).
   module: z.enum(['expense', 'income', 'invoice', 'vendor_bill', 'journal_entry', 'budget', 'credit_note']),
   recordId: uuidSchema,
-  action: z.enum(['submit', 'verify', 'approve', 'post', 'reject', 'reverse', 'reopen', 'issue', 'cancel']),
+  action: z.enum(['submit', 'verify', 'approve', 'post', 'reject', 'reverse', 'reopen', 'issue', 'cancel', 'void']),
   reason: z.string().max(500).optional(),
 });
  
@@ -182,9 +182,15 @@ export const invoiceCreateSchema = z.object({
 }).strict();
 
 // ─── Project Create / Update ───────────────────────────────────────────────
+// FND-BUD-01 (P0): ProjectForm (src/components/sections/ProjectForm.tsx)
+// always sends client_name, budget_id, status (create) and override_reason
+// alongside the other fields. These schemas were .strict() without those
+// keys, so every POST/PATCH from the Projects page was rejected with
+// "Unrecognized key". Keep this list in sync with ProjectForm's submitData.
 export const projectCreateSchema = z.object({
   name: z.string().trim().min(1).max(255),
   client_id: uuidSchema.nullable().optional(),
+  client_name: z.string().trim().max(255).nullable().optional(),
   manager_id: uuidSchema.nullable().optional(),
   platform: z.string().max(100).nullable().optional(),
   contract_value: nonNegativeAmount.optional().default(0),
@@ -193,14 +199,18 @@ export const projectCreateSchema = z.object({
   end_date: isoDate.nullable().optional(),
   description: z.string().max(5000).nullable().optional(),
   budget_amount: nonNegativeAmount.optional().default(0),
+  budget_id: uuidSchema.nullable().optional(),
   department: z.string().max(100).nullable().optional(),
   cost_center: z.string().max(100).nullable().optional(),
   is_confidential: z.boolean().optional().default(false),
+  status: z.enum(['ACTIVE', 'ON_HOLD', 'CLOSED', 'CANCELLED']).optional(),
+  override_reason: z.string().max(1000).nullable().optional(),
 }).strict();
 
 export const projectUpdateSchema = z.object({
   name: z.string().trim().min(1).max(255).optional(),
   client_id: uuidSchema.nullable().optional(),
+  client_name: z.string().trim().max(255).nullable().optional(),
   manager_id: uuidSchema.nullable().optional(),
   platform: z.string().max(100).nullable().optional(),
   contract_value: nonNegativeAmount.optional(),
@@ -209,14 +219,17 @@ export const projectUpdateSchema = z.object({
   end_date: isoDate.nullable().optional(),
   description: z.string().max(5000).nullable().optional(),
   budget_amount: nonNegativeAmount.optional(),
+  budget_id: uuidSchema.nullable().optional(),
   department: z.string().max(100).nullable().optional(),
   cost_center: z.string().max(100).nullable().optional(),
   is_confidential: z.boolean().optional(),
   status: z.enum(['ACTIVE', 'ON_HOLD', 'CLOSED', 'CANCELLED']).optional(),
   closure_reason: z.string().max(1000).nullable().optional(),
+  override_reason: z.string().max(1000).nullable().optional(),
 }).strict();
 
 // ─── Client Update ─────────────────────────────────────────────────────────
+
 export const clientUpdateSchema = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   contact_person: z.string().max(200).nullable().optional(),
@@ -225,13 +238,8 @@ export const clientUpdateSchema = z.object({
   address: z.string().max(500).nullable().optional(),
   city: z.string().max(100).nullable().optional(),
   country: z.string().max(100).nullable().optional(),
-  tax_registration: z.string().max(100).nullable().optional(),
-  tax_type: z.string().max(100).nullable().optional(),
-  payment_terms: z.string().max(50).optional(),
-  default_currency: currencyCode.optional(),
-  notes: z.string().max(2000).nullable().optional(),
-  website: z.string().url().nullable().optional(),
-  is_active: z.boolean().optional(),
+  tax_id: z.string().max(100).nullable().optional(),
+  status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
 }).strict();
 
 // ─── Admin User Management ─────────────────────────────────────────────────

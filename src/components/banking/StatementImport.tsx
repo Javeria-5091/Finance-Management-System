@@ -1,7 +1,7 @@
 'use client';
 import { useState, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { useCreateStatement, useImportLines } from '@/hooks/useBanking';
+import { useImportBankStatement } from '@/hooks/useBanking';
 import { Upload, FileText, Loader2, AlertCircle, CheckCircle } from 'lucide-react';
 
 interface Props {
@@ -19,6 +19,54 @@ interface ParseResult {
   rowCount: number;
 }
 
+// FND-BANK-03 FIX: the previous parser did `lines[i].split(',')` per
+// text line, which breaks on any quoted field containing a comma (e.g.
+// a description like `"Doe, John - salary"`) and on CRLF exports (a
+// trailing \r ended up glued onto the last column). This is a small
+// RFC4180-ish tokenizer: handles quoted fields, embedded commas,
+// embedded newlines inside quotes, escaped `""` quotes, and CRLF/LF
+// line endings.
+function parseCSVRows(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  for (let i = 0; i < normalized.length; i++) {
+    const char = normalized[i];
+    if (inQuotes) {
+      if (char === '"') {
+        if (normalized[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += char;
+      }
+    } else if (char === '"') {
+      inQuotes = true;
+    } else if (char === ',') {
+      row.push(field);
+      field = '';
+    } else if (char === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else {
+      field += char;
+    }
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows.filter((r) => !(r.length === 1 && r[0].trim() === ''));
+}
+
 function formatCurrency(amount: number) {
   return new Intl.NumberFormat('en-PK', {
     style: 'currency',
@@ -29,8 +77,7 @@ function formatCurrency(amount: number) {
 
 export default function StatementImport({ accountId, currency, onSuccess }: Props) {
   const { user } = useAuth();
-  const createStmt = useCreateStatement();
-  const importLines = useImportLines();
+  const importStatement = useImportBankStatement();
 
   const [step, setStep] = useState<'upload' | 'preview' | 'done'>('upload');
   const [isImporting, setIsImporting] = useState(false);  // ✅ Separate state
@@ -40,24 +87,28 @@ export default function StatementImport({ accountId, currency, onSuccess }: Prop
   const [closingBalance, setClosingBalance] = useState('');
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [parsedLines, setParsedLines] = useState<any[]>([]);
+  const [importSummary, setImportSummary] = useState<{
+    lines_inserted: number;
+    duplicates_skipped: number;
+  } | null>(null);
   const [error, setError] = useState('');
 
   const parseCSV = useCallback((text: string): ParseResult => {
-    const lines = text.trim().split('\n');
+    const rows = parseCSVRows(text);
     const errors: string[] = [];
     const result: any[] = [];
     let totalDebits = 0;
     let totalCredits = 0;
 
-    for (let i = 1; i < lines.length; i++) {
-      const parts = lines[i].split(',').map((s) => s.trim().replace(/^"|"$/g, ''));
+    for (let i = 1; i < rows.length; i++) {
+      const parts = rows[i].map((s) => s.trim());
       if (parts.length < 4) {
         errors.push(`Row ${i + 1}: Not enough columns`);
         continue;
       }
 
       const [dateStr, desc, ref, amountStr, balanceStr] = parts;
-      const amount = parseFloat(amountStr.replace(/[^0-9.-]/g, ''));
+      const amount = parseFloat((amountStr || '').replace(/[^0-9.-]/g, ''));
 
       if (isNaN(amount)) {
         errors.push(`Row ${i + 1}: Invalid amount "${amountStr}"`);
@@ -132,29 +183,32 @@ export default function StatementImport({ accountId, currency, onSuccess }: Prop
     setError('');
 
     try {
-      const { data: stmt, error: stmtErr } = await createStmt.mutateAsync({
+      // FND-BANK-03 FIX: one atomic RPC call instead of a create-
+      // statement-then-batch-insert-lines flow. organization_id is
+      // resolved server-side (never sent from here), the header and
+      // every line commit in a single DB transaction, and duplicate
+      // lines from a repeat import are skipped rather than duplicated.
+      const { data, error: importErr } = await importStatement.mutateAsync({
         financial_account_id: accountId,
         statement_date: statementDate,
         opening_balance: parseFloat(openingBalance),
         closing_balance: parseFloat(closingBalance),
         currency,
-        imported_by: user.id,
         file_name: fileName,
+        lines: parsedLines.map((l) => ({
+          transaction_date: l.transaction_date,
+          description: l.description,
+          reference: l.reference,
+          counterparty: l.counterparty,
+          transaction_identifier: l.transaction_identifier,
+          amount: l.amount,
+          balance_after: l.balance_after,
+        })),
       });
 
-      if (stmtErr) throw new Error(stmtErr.message);
+      if (importErr) throw new Error(importErr.message);
 
-      const linesWithId = parsedLines.map((l) => ({
-        ...l,
-        bank_statement_id: stmt.id,
-      }));
-
-      for (let i = 0; i < linesWithId.length; i += 100) {
-        const batch = linesWithId.slice(i, i + 100);
-        const { error: lineErr } = await importLines.mutateAsync(batch);
-        if (lineErr) throw new Error(`Line import failed at row ${i + 1}: ${lineErr.message}`);
-      }
-
+      setImportSummary(data);
       setStep('done');
       onSuccess();
     } catch (err: any) {
@@ -174,14 +228,20 @@ export default function StatementImport({ accountId, currency, onSuccess }: Prop
         <CheckCircle className="w-12 h-12 text-green-500 mx-auto mb-3" />
         <h3 className="text-lg font-bold text-green-700 dark:text-green-400">Import Complete!</h3>
         <p className="text-sm text-green-600 dark:text-green-400 mt-1">
-          {parsedLines.length} lines imported from {fileName}
+          {importSummary ? importSummary.lines_inserted : parsedLines.length} lines imported from {fileName}
         </p>
+        {!!importSummary?.duplicates_skipped && (
+          <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+            {importSummary.duplicates_skipped} line(s) were already imported previously and were skipped.
+          </p>
+        )}
         <button
           onClick={() => {
             setStep('upload');
             setParseResult(null);
             setParsedLines([]);
             setFileName('');
+            setImportSummary(null);
           }}
           className="mt-4 text-sm text-green-700 dark:text-green-400 underline hover:no-underline"
         >

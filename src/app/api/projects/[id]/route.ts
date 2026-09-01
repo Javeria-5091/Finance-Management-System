@@ -114,6 +114,29 @@ export async function PATCH(
     if (!canViewRates && (body.contract_value !== undefined || body.budget_amount !== undefined || body.is_confidential !== undefined)) {
       return NextResponse.json({ error: 'Confidential project rate fields require PROJECT_RATE_VIEW permission' }, { status: 403 });
     }
+
+    // FND-BUD-01: validate a re-linked client/budget the same way POST does,
+    // so an update can't silently attach a project to another org's record.
+    if (body.client_id) {
+      const { data: client, error: clientError } = await supabase
+        .from('clients')
+        .select('id, name')
+        .eq('id', body.client_id)
+        .eq('organization_id', auth.orgId)
+        .maybeSingle();
+      if (clientError) return NextResponse.json({ error: clientError.message }, { status: 500 });
+      if (!client) return NextResponse.json({ error: 'Selected client was not found in your organization' }, { status: 400 });
+    }
+    if (body.budget_id) {
+      const { data: budget, error: budgetError } = await supabase
+        .from('budgets')
+        .select('id')
+        .eq('id', body.budget_id)
+        .eq('organization_id', auth.orgId)
+        .maybeSingle();
+      if (budgetError) return NextResponse.json({ error: budgetError.message }, { status: 500 });
+      if (!budget) return NextResponse.json({ error: 'Selected budget was not found in your organization' }, { status: 400 });
+    }
  
     const existing = getData(await supabase
       .from('projects')
@@ -128,12 +151,19 @@ export async function PATCH(
  
     // If closing project, check for unresolved items. A FINANCE_HEAD/CEO may
     // explicitly override the guard, but the reason must be recorded.
+    // FND-BUD-02: the guard previously only looked at invoices in
+    // ISSUED/PARTIALLY_PAID, missing OVERDUE invoices entirely, and never
+    // checked vendor bills or open budget commitments (encumbrances) on the
+    // project - so a project could be closed while still owing money or
+    // holding reserved budget. It also under-enforced: override_reason was
+    // read here but the (now fixed) schema previously stripped it, so the
+    // guard could never actually be satisfied even by an authorized user.
     if (body.status === 'CLOSED' && existing.status !== 'CLOSED') {
       const { count: outstandingInvoices } = await supabase
         .from('invoices')
         .select('id', { count: 'exact', head: true })
         .eq('project_id', id)
-        .in('status', ['ISSUED', 'PARTIALLY_PAID']);
+        .in('status', ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE']);
  
       const { count: pendingExpenses } = await supabase
         .from('expenses')
@@ -141,17 +171,61 @@ export async function PATCH(
         .eq('project_id', id)
         .in('status', ['DRAFT', 'SUBMITTED', 'VERIFIED', 'APPROVED']);
  
-      const hasUnresolvedItems = (outstandingInvoices || 0) > 0 || (pendingExpenses || 0) > 0;
+      const { count: pendingVendorBills } = await supabase
+        .schema('finance')
+        .from('vendor_bills')
+        .select('id', { count: 'exact', head: true })
+        .eq('project_id', id)
+        .eq('organization_id', auth.orgId)
+        .in('status', ['DRAFT', 'SUBMITTED', 'VERIFIED', 'APPROVED', 'POSTED', 'PARTIALLY_PAID']);
+ 
+      // Open budget commitments (encumbrances) are attached to a budget
+      // line, not the project directly: projects -> budgets (project_id)
+      // -> budget_lines (budget_id) -> budget_commitments (budget_line_id).
+      let openCommitments = 0;
+      const { data: projectBudgets } = await supabase
+        .from('budgets')
+        .select('id')
+        .eq('project_id', id)
+        .eq('organization_id', auth.orgId);
+      const budgetIds = (projectBudgets || []).map((b: any) => b.id);
+      if (budgetIds.length) {
+        const { data: budgetLines } = await supabase
+          .schema('finance')
+          .from('budget_lines')
+          .select('id')
+          .in('budget_id', budgetIds)
+          .eq('organization_id', auth.orgId);
+        const lineIds = (budgetLines || []).map((l: any) => l.id);
+        if (lineIds.length) {
+          const { count } = await supabase
+            .schema('finance')
+            .from('budget_commitments')
+            .select('id', { count: 'exact', head: true })
+            .in('budget_line_id', lineIds)
+            .eq('organization_id', auth.orgId)
+            .eq('status', 'OPEN');
+          openCommitments = count || 0;
+        }
+      }
+ 
+      const hasUnresolvedItems =
+        (outstandingInvoices || 0) > 0 ||
+        (pendingExpenses || 0) > 0 ||
+        (pendingVendorBills || 0) > 0 ||
+        openCommitments > 0;
       const overrideReason = body.override_reason?.trim();
       const canOverrideClosure = auth.role === 'CEO' || auth.role === 'FINANCE_HEAD';
 
       if (hasUnresolvedItems && (!overrideReason || !canOverrideClosure)) {
         return NextResponse.json({
           error: canOverrideClosure
-            ? 'Cannot close project with unresolved receivables or pending expenses without an override reason.'
+            ? 'Cannot close project with unresolved receivables, pending expenses/bills, or open budget commitments without an override reason.'
             : 'Cannot override unresolved project items. Only CEO or FINANCE_HEAD can approve a closure override.',
           outstandingInvoices,
           pendingExpenses,
+          pendingVendorBills,
+          openCommitments,
           override_required: true,
         }, { status: 400 });
       }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase } from '@/lib/api-auth';
-import { getAuthUser, requirePermission } from '@/lib/api-auth';
+import { requirePermission } from '@/lib/api-auth';
 import { sanitizeSearch } from '@/lib/validations';
 import { z } from 'zod';
  
@@ -19,7 +19,13 @@ export async function GET(req: NextRequest) {
     const page = parseInt(searchParams.get('page') || '1');
     const pageSize = parseInt(searchParams.get('pageSize') || '20');
     const search = searchParams.get('search') || '';
-    const isActive = searchParams.get('is_active');
+    // FND-BUD-03 FIX: public.clients has no is_active column -- it has
+    // status ('ACTIVE' | 'INACTIVE', see clients_status_check). Accept
+    // ?status=ACTIVE|INACTIVE going forward; still accept the old
+    // ?is_active=true|false param (mapped to the equivalent status) so any
+    // existing bookmarked/linked URL keeps working.
+    const statusParam = searchParams.get('status');
+    const isActiveParam = searchParams.get('is_active');
     const projectFilter = searchParams.get('project_id') || '';
  
     let query = supabase
@@ -32,11 +38,17 @@ export async function GET(req: NextRequest) {
       // injection. Without sanitization, a search term containing ',', '.', '(',
       // or ')' could be parsed as additional filter clauses, leaking data or
       // breaking the query.
+      // FND-BUD-03 FIX: client_code and tax_registration are not columns on
+      // public.clients (they never existed on this table) -- searching them
+      // made every search request error. Search the real columns instead:
+      // name, tax_id, email, phone.
       const s = sanitizeSearch(search);
-      query = query.or(`name.ilike.%${s}%,client_code.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%,tax_registration.ilike.%${s}%`);
+      query = query.or(`name.ilike.%${s}%,tax_id.ilike.%${s}%,email.ilike.%${s}%,phone.ilike.%${s}%`);
     }
-    if (isActive !== null && isActive !== undefined) {
-      query = query.eq('is_active', isActive === 'true');
+    if (statusParam === 'ACTIVE' || statusParam === 'INACTIVE') {
+      query = query.eq('status', statusParam);
+    } else if (isActiveParam !== null && isActiveParam !== undefined) {
+      query = query.eq('status', isActiveParam === 'true' ? 'ACTIVE' : 'INACTIVE');
     }
  
     const from = (page - 1) * pageSize;
@@ -61,10 +73,23 @@ export async function GET(req: NextRequest) {
   }
 }
  
+// FND-BUD-03 FIX: rewritten to match public.clients' real columns (schema.sql):
+// id, name, contact_person, email, phone, address, city, country, tax_id,
+// status, user_id, organization_id, created_at, updated_at, deleted_at,
+// deleted_by. There is no client_code, tax_registration, tax_type,
+// payment_terms, default_currency, website, notes, is_active, or created_by
+// column -- every one of those in the previous insert made PostgREST reject
+// the request with PGRST204 ("column does not exist").
 const clientCreateSchema = z.object({
-  name: z.string().trim().min(1).max(200), contact_person: z.string().max(200).optional().nullable(), email: z.string().email().optional().nullable(), phone: z.string().max(50).optional().nullable(),
-  address: z.string().max(500).optional().nullable(), city: z.string().max(100).optional().nullable(), country: z.string().max(100).optional().nullable(),
-  tax_registration: z.string().max(100).optional().nullable(), tax_type: z.string().max(100).optional().nullable(), payment_terms: z.string().max(50).optional(), default_currency: z.string().length(3).optional(), notes: z.string().max(2000).optional().nullable(), website: z.string().url().optional().nullable()
+  name: z.string().trim().min(1).max(200),
+  contact_person: z.string().max(200).optional().nullable(),
+  email: z.string().email().optional().nullable(),
+  phone: z.string().max(50).optional().nullable(),
+  address: z.string().max(500).optional().nullable(),
+  city: z.string().max(100).optional().nullable(),
+  country: z.string().max(100).optional().nullable(),
+  tax_id: z.string().max(100).optional().nullable(),
+  status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
 });
 
 // ─── POST: Create a new client ───
@@ -78,22 +103,16 @@ export async function POST(req: NextRequest) {
     if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message || 'Invalid client data' }, { status: 400 });
     const {
       name, contact_person, email, phone, address, city, country,
-      tax_registration, tax_type, payment_terms, default_currency,
-      notes, website,
+      tax_id, status,
     } = parsed.data;
  
     if (!name) {
       return NextResponse.json({ error: 'Client name is required' }, { status: 400 });
     }
  
-    // Generate client code using DB sequence
-    const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'CLT' });
-    const clientCode = numData || `CLT-${Date.now().toString().slice(-6)}`;
- 
     const { data: client, error } = await supabase
       .from('clients')
       .insert({
-        client_code: clientCode,
         name,
         contact_person: contact_person || null,
         email: email || null,
@@ -101,15 +120,11 @@ export async function POST(req: NextRequest) {
         address: address || null,
         city: city || null,
         country: country || null,
-        tax_registration: tax_registration || null,
-        tax_type: tax_type || null,
-        payment_terms: payment_terms || 'NET_30',
-        default_currency: default_currency || 'PKR',
-        notes: notes || null,
-        website: website || null,
-        is_active: true,
+        tax_id: tax_id || null,
+        status: status || 'ACTIVE',
         organization_id: auth.orgId,
-        created_by: auth.userId,
+        // public.clients tracks the creating user as user_id, not created_by.
+        user_id: auth.userId,
       })
       .select()
       .single();
@@ -124,12 +139,12 @@ export async function POST(req: NextRequest) {
         p_action: 'CLIENT_CREATED',
         p_entity_type: 'client',
         p_entity_id: client.id,
-        p_description: `Client created: ${name} (${clientCode})`,
+        p_description: `Client created: ${name}`,
         p_previous_status: null,
-        p_new_status: 'ACTIVE',
+        p_new_status: client.status,
         p_source_module: 'client',
         p_severity: 'info',
-        p_new_values: { name, client_code: clientCode, email, currency: default_currency || 'PKR' },
+        p_new_values: { name, email, tax_id },
       });
     } catch (auditErr: any) {
       console.error('Audit log failed:', auditErr);
@@ -138,10 +153,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       client,
-      message: `Client ${name} created with code ${clientCode}`,
+      message: `Client ${name} created`,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
- 
