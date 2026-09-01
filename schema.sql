@@ -1875,6 +1875,11 @@ DECLARE
   v_current_status   TEXT;
 BEGIN
   -- Calculate outstanding (original currency and base/PKR currency)
+  -- AR-04 FIX: joined ONLY on ACTIVE allocations -- a REVERSED
+  -- allocation's allocated_amount is intentionally kept as an audit
+  -- trail, so without this filter a reversed row was still being summed
+  -- into "money paid", leaving outstanding_amount permanently stale
+  -- after any reversal.
   SELECT
     i.total_amount - COALESCE(SUM(pa.allocated_amount), 0),
     i.base_total_amount - COALESCE(SUM(pa.base_allocated_amount), 0),
@@ -1883,18 +1888,13 @@ BEGIN
     i.status
   INTO v_outstanding, v_base_outstanding, v_total, v_base_total, v_current_status
   FROM public.invoices i
-  LEFT JOIN finance.payment_allocations pa ON pa.invoice_id = i.id
+  LEFT JOIN finance.payment_allocations pa
+    ON pa.invoice_id = i.id AND pa.status = 'ACTIVE'
   WHERE i.id = NEW.invoice_id
   GROUP BY i.total_amount, i.base_total_amount, i.status;
 
-  -- AR-03 FIX: this trigger is the actual, final write path for
-  -- invoices.status whenever a payment_allocations row is inserted or
-  -- updated, regardless of which caller created that row. Both RPCs that
-  -- normally create these rows (allocate_payment_atomic and
-  -- post_payment_receipt_atomic) now reject DRAFT/VOID/etc. invoices
-  -- before inserting -- this is the backstop that still blocks it here
-  -- even if some future/other code path inserts directly into
-  -- finance.payment_allocations without going through either RPC.
+  -- AR-03 backstop guard (unchanged): only a payable invoice may have its
+  -- balance moved by an allocation insert/update.
   IF TG_OP IN ('INSERT', 'UPDATE') AND v_current_status NOT IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE') THEN
     RAISE EXCEPTION 'Cannot allocate payment to invoice % -- it is % status. Only ISSUED, PARTIALLY_PAID, or OVERDUE invoices can receive payments.', NEW.invoice_id, v_current_status;
   END IF;
@@ -1919,7 +1919,7 @@ $$;
 ALTER FUNCTION "finance"."auto_update_invoice_status"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "finance"."auto_update_invoice_status"() IS 'Fixed 2026: base_amount_paid previously always computed as 0 due to variable reuse. See migration 016. AR-03 fix: added a backstop invoice-status guard on INSERT/UPDATE so no caller -- current or future -- can push a DRAFT/VOID/etc. invoice to PARTIALLY_PAID/PAID via finance.payment_allocations.';
+COMMENT ON FUNCTION "finance"."auto_update_invoice_status"() IS 'Fixed 2026: base_amount_paid previously always computed as 0 due to variable reuse. See migration 016. AR-03 fix: backstop invoice-status guard on INSERT/UPDATE. AR-04 fix: JOIN now filters to pa.status = ''ACTIVE'' so reversed allocations no longer count toward amount_paid/outstanding_amount, which had left outstanding_amount permanently stale after a payment reversal.';
 
 
 
@@ -5142,8 +5142,7 @@ DECLARE
   v_period uuid;
   v_journal_id uuid;
   v_reference text;
-  v_new_outstanding numeric(18,2);
-  v_new_base_outstanding numeric(18,2);
+  v_already_refunded numeric(18,2);
   v_new_status text;
   v_lines jsonb;
 BEGIN
@@ -5164,8 +5163,19 @@ BEGIN
   WHERE id=v_refund.invoice_id AND organization_id=v_org
   FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'Linked invoice not found or access denied'; END IF;
-  IF v_refund.amount > coalesce(v_invoice.amount_paid,0) + 0.01 THEN
-    RAISE EXCEPTION 'Refund amount % exceeds amount already paid %',v_refund.amount,v_invoice.amount_paid;
+
+  -- AR-05 FIX: cumulative check (not just this single refund) against
+  -- amount already paid, re-verified here at posting time -- closes the
+  -- TOCTOU gap the route-level check at refunds/route.ts:82 can't cover
+  -- by itself (two refunds each individually valid at creation time can
+  -- still combine to exceed amount_paid by the time both are posted).
+  SELECT COALESCE(SUM(amount),0) INTO v_already_refunded
+  FROM finance.invoice_refunds
+  WHERE invoice_id=v_refund.invoice_id AND organization_id=v_org AND status='POSTED';
+
+  IF v_already_refunded + v_refund.amount > coalesce(v_invoice.amount_paid,0) + 0.01 THEN
+    RAISE EXCEPTION 'Cumulative refunds (%) would exceed amount already paid (%) for invoice %',
+      v_already_refunded + v_refund.amount, v_invoice.amount_paid, v_invoice.id;
   END IF;
 
   SELECT id INTO v_period
@@ -5187,6 +5197,11 @@ BEGIN
     RAISE EXCEPTION 'Refund is already posted';
   END IF;
 
+  -- Cash already fully collected for this invoice; refunding part of it
+  -- back out is a revenue reversal + cash outflow. This intentionally
+  -- never touches the Accounts Receivable control account (1210) -- no
+  -- new receivable is created, the client isn't being asked to pay
+  -- again.
   v_lines := jsonb_build_array(
     jsonb_build_object('account_id',v_revenue,'debit_amount',v_refund.amount,'credit_amount',0,'description','Refund: '||v_refund.refund_number),
     jsonb_build_object('account_id',v_cash,'debit_amount',0,'credit_amount',v_refund.amount,'description','Cash refund: '||v_refund.refund_number)
@@ -5197,16 +5212,24 @@ BEGIN
     current_date,v_period,v_lines,v_refund.currency,coalesce(v_refund.exchange_rate,1),'INVOICE_REFUND',p_refund_id,NULL,NULL
   );
 
-  -- Do not rewrite invoice total_amount. The subledger balance is adjusted
-  -- through outstanding_amount only, preserving the original billed amount.
-  v_new_outstanding := greatest(0,coalesce(v_invoice.outstanding_amount,0)-v_refund.amount);
-  v_new_base_outstanding := greatest(0,coalesce(v_invoice.base_outstanding_amount,0)-(v_refund.amount*coalesce(v_invoice.exchange_rate,1)));
-  v_new_status := CASE WHEN v_new_outstanding <= 0.01 THEN 'REFUNDED' ELSE v_invoice.status END;
+  -- AR-05 FIX: no longer touches amount_paid / outstanding_amount /
+  -- base_outstanding_amount. The GL journal above never posts to the AR
+  -- control account (1210), so the AR subledger must not move either --
+  -- that symmetry is what keeps reporting.receivable_aging (subledger)
+  -- and the 1210 GL balance (control account) reconciled. total_amount
+  -- was already correctly left alone by the prior FND-FIN-006/007 fix.
+  --
+  -- status may still move to REFUNDED, purely as a lifecycle/reporting
+  -- marker once cumulative POSTED refunds reach what was actually paid
+  -- (same exclusion treatment as VOID/CREDITED in reporting.receivable_aging) --
+  -- this does not change any dollar figure, only the status column.
+  v_new_status := CASE
+    WHEN (v_already_refunded + v_refund.amount) >= coalesce(v_invoice.amount_paid,0) - 0.01 THEN 'REFUNDED'
+    ELSE v_invoice.status
+  END;
 
   UPDATE public.invoices
-  SET outstanding_amount=v_new_outstanding,
-      base_outstanding_amount=v_new_base_outstanding,
-      status=v_new_status
+  SET status=v_new_status
   WHERE id=v_invoice.id AND organization_id=v_org;
 
   UPDATE finance.invoice_refunds
@@ -5215,12 +5238,24 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'Refund status update failed'; END IF;
 
   SELECT reference INTO v_reference FROM finance.journal_entries WHERE id=v_journal_id;
-  RETURN jsonb_build_object('journal_id',v_journal_id,'reference',v_reference,'outstanding_amount',v_new_outstanding);
+  -- outstanding_amount echoed back unchanged (kept in the response shape
+  -- for API/frontend compatibility) -- it is, by design, no longer
+  -- affected by posting a refund.
+  RETURN jsonb_build_object(
+    'journal_id',v_journal_id,
+    'reference',v_reference,
+    'outstanding_amount',v_invoice.outstanding_amount,
+    'invoice_status',v_new_status
+  );
 END;
 $$;
 
 
 ALTER FUNCTION "finance"."post_invoice_refund_atomic"("p_refund_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_invoice_refund_atomic"("p_refund_id" "uuid") IS 'AR-05 fix: stopped mutating invoices.amount_paid/outstanding_amount/base_outstanding_amount on refund posting -- the GL journal (DR Revenue / CR Cash) never posts to the AR control account (1210), so the subledger must stay untouched too, or the two permanently drift apart. status may still move to REFUNDED (lifecycle marker only, no dollar impact) once cumulative POSTED refunds reach amount_paid. Also added a cumulative-refund-vs-amount_paid guard at posting time, closing a TOCTOU gap the route-level check (refunds/route.ts) cannot cover alone. Supersedes the outstanding_amount-reduction behavior introduced by FND-FIN-006/FND-FIN-007, which correctly stopped total_amount from being rewritten but left this reconciliation break in place.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_journal_entry"("p_description" "text", "p_transaction_date" "date", "p_period_id" "uuid", "p_lines" "jsonb", "p_currency" "text" DEFAULT 'PKR'::"text", "p_exchange_rate" numeric DEFAULT 1.0000, "p_source_type" "text" DEFAULT 'MANUAL'::"text", "p_source_id" "uuid" DEFAULT NULL::"uuid", "p_project_id" "uuid" DEFAULT NULL::"uuid", "p_department_id" "uuid" DEFAULT NULL::"uuid") RETURNS "uuid"
@@ -6761,16 +6796,43 @@ BEGIN
   SET status='REVERSED',reversed_at=now(),reversed_by=p_reversed_by
   WHERE pa.payment_receipt_id=p_receipt_id AND pa.status='ACTIVE';
 
+  -- AR-04 FIX: previously this only decremented amount_paid/base_amount_paid
+  -- by the just-reversed total and reset status -- outstanding_amount and
+  -- base_outstanding_amount were never touched, so they stayed at whatever
+  -- (stale) value the buggy trigger had last written, understating AR aging
+  -- for every invoice this receipt had paid down.
+  --
+  -- Fixed as a full, authoritative recompute (not an incremental subtract)
+  -- from the ACTIVE allocations that remain after this reversal, for every
+  -- invoice this receipt touched. This is idempotent regardless of whether
+  -- the auto_update_invoice_status trigger above already applied the same
+  -- correction via the payment_allocations UPDATE just above -- both now
+  -- converge on the same, correct numbers instead of double-subtracting.
   UPDATE public.invoices i
-  SET amount_paid=greatest(0,coalesce(i.amount_paid,0)-x.allocated_amount),
-      base_amount_paid=greatest(0,coalesce(i.base_amount_paid,0)-x.base_allocated_amount),
-      status=CASE WHEN greatest(0,coalesce(i.amount_paid,0)-x.allocated_amount)<=0.01 THEN 'ISSUED' ELSE 'PARTIALLY_PAID' END
+  SET
+    amount_paid              = COALESCE(agg.paid, 0),
+    base_amount_paid         = COALESCE(agg.base_paid, 0),
+    outstanding_amount       = GREATEST(i.total_amount - COALESCE(agg.paid, 0), 0),
+    base_outstanding_amount  = GREATEST(i.base_total_amount - COALESCE(agg.base_paid, 0), 0),
+    status = CASE
+      WHEN GREATEST(i.total_amount - COALESCE(agg.paid, 0), 0) <= 0.01 THEN 'PAID'
+      WHEN COALESCE(agg.paid, 0) > 0 THEN 'PARTIALLY_PAID'
+      ELSE 'ISSUED'
+    END
   FROM (
-    SELECT pa.invoice_id,sum(pa.allocated_amount) allocated_amount,sum(pa.base_allocated_amount) base_allocated_amount
-    FROM finance.payment_allocations pa WHERE pa.payment_receipt_id=p_receipt_id AND pa.reversed_by=p_reversed_by AND pa.reversed_at IS NOT NULL
-    GROUP BY pa.invoice_id
-  ) x
-  WHERE i.id=x.invoice_id AND i.organization_id=v_org;
+    SELECT DISTINCT invoice_id
+    FROM finance.payment_allocations
+    WHERE payment_receipt_id = p_receipt_id
+  ) touched
+  LEFT JOIN (
+    SELECT invoice_id,
+           sum(allocated_amount) AS paid,
+           sum(base_allocated_amount) AS base_paid
+    FROM finance.payment_allocations
+    WHERE status = 'ACTIVE'
+    GROUP BY invoice_id
+  ) agg ON agg.invoice_id = touched.invoice_id
+  WHERE i.id = touched.invoice_id AND i.organization_id = v_org;
 
   RETURN v_new;
 END;
@@ -6780,7 +6842,7 @@ $$;
 ALTER FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") IS 'Confirmed audit fix: atomic payment reversal across GL, receipt, allocations and invoice balances.';
+COMMENT ON FUNCTION "finance"."reverse_payment_receipt_atomic"("p_receipt_id" "uuid", "p_period_id" "uuid", "p_reversal_date" "date", "p_reason" "text", "p_reversed_by" "uuid") IS 'Confirmed audit fix: atomic payment reversal across GL, receipt, allocations and invoice balances. AR-04 fix: invoice balance update rewritten as a full recompute from remaining ACTIVE allocations (amount_paid, base_amount_paid, outstanding_amount, base_outstanding_amount, status) instead of an incremental subtract that never touched outstanding_amount/base_outstanding_amount -- those were left stale, understating AR aging after every reversal.';
 
 
 
@@ -22560,6 +22622,7 @@ GRANT USAGE ON SCHEMA "reporting" TO "anon";
 GRANT USAGE ON SCHEMA "reporting" TO "ai_readonly_role";
 
 
+
 REVOKE ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) FROM PUBLIC;
 GRANT ALL ON FUNCTION "ai"."increment_usage"("p_user_id" "uuid", "p_organization_id" "uuid", "p_tokens" integer, "p_cost" numeric) TO "authenticated";
 
@@ -22635,7 +22698,6 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
-
 
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
@@ -24018,12 +24080,6 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
-
-
-
-
-
-
 
 
 
