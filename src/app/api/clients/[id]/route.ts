@@ -31,10 +31,24 @@ export async function GET(
     }
  
     // Get client AR summary
-    const { data: arSummary } = await supabase
-      .schema('reporting').from('v_ar_aging')
+    // AR-01 FIX: reporting.v_ar_aging does not exist -- the real view is
+    // reporting.receivable_aging (see P2_016 migration, which also adds
+    // the client_id column this query needs; the view previously only
+    // exposed client_name). The error was also being silently discarded
+    // (`const { data } = await ...` never checked `error`), so this had
+    // been failing on every request with arSummary always coming back
+    // as []. Now the error is logged instead of swallowed, and the org
+    // filter is added for defense-in-depth even though the view is
+    // security_invoker and public.invoices RLS is already org-scoped.
+    const { data: arSummary, error: arSummaryError } = await supabase
+      .schema('reporting').from('receivable_aging')
       .select('*')
-      .eq('client_id', id);
+      .eq('client_id', id)
+      .eq('organization_id', auth.orgId);
+
+    if (arSummaryError) {
+      console.error('AR summary query failed for client', id, arSummaryError);
+    }
  
     return NextResponse.json({
       client,

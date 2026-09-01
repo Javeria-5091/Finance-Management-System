@@ -240,6 +240,21 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: `Invoice ${alloc.invoice_id} not found` }, { status: 404 });
         }
 
+        // AR-03 FIX: invoice.status was being selected above but never
+        // actually checked, so a DRAFT (never issued) or VOID (cancelled)
+        // invoice could pass the outstanding-amount check below (both still
+        // carry a positive total_amount) and get silently allocated a
+        // payment, flipping it to PARTIALLY_PAID/PAID. Same "payable"
+        // status set used everywhere else in this app for AR (aging view,
+        // CEO dashboard, overdue job). This is now also enforced at the DB
+        // layer (see migration P2_017) so the RPC call below rejects it
+        // too even if this check is ever bypassed.
+        if (!['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'].includes(invoice.status)) {
+          return NextResponse.json({
+            error: `Invoice ${invoice.invoice_number} is ${invoice.status} and cannot receive a payment. Only ISSUED, PARTIALLY_PAID, or OVERDUE invoices can be paid.`,
+          }, { status: 400 });
+        }
+
         const allocAmount = Number(alloc.amount);
         const outstanding = Number(invoice.total_amount) - Number(invoice.amount_paid || 0);
         if (allocAmount <= 0 || allocAmount > outstanding) {

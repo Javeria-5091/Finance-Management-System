@@ -1448,6 +1448,12 @@ BEGIN
       RAISE EXCEPTION 'Invoice % not found', v_alloc->>'invoice_id';
     END IF;
 
+    -- AR-03 FIX: only an invoice that has actually been issued (and not
+    -- yet fully paid or cancelled) can take a payment allocation.
+    IF v_invoice.status NOT IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE') THEN
+      RAISE EXCEPTION 'Cannot allocate payment to invoice % -- it is % status. Only ISSUED, PARTIALLY_PAID, or OVERDUE invoices can receive payments.', v_invoice.invoice_number, v_invoice.status;
+    END IF;
+
     IF v_invoice.client_id <> v_receipt.client_id THEN
       RAISE EXCEPTION 'Invoice % does not belong to the payment receipt client', v_invoice.invoice_number;
     END IF;
@@ -1527,6 +1533,10 @@ $$;
 
 
 ALTER FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") IS 'AR-03 fix: added an invoice-status guard (ISSUED/PARTIALLY_PAID/OVERDUE only) so DRAFT or VOID invoices can no longer be pushed to PARTIALLY_PAID/PAID via allocation.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" "uuid") RETURNS "uuid"
@@ -1861,19 +1871,33 @@ DECLARE
   v_outstanding      NUMERIC(18,2);
   v_base_outstanding NUMERIC(18,2);
   v_total            NUMERIC(18,2);
-  v_base_total        NUMERIC(18,2);
+  v_base_total       NUMERIC(18,2);
+  v_current_status   TEXT;
 BEGIN
   -- Calculate outstanding (original currency and base/PKR currency)
   SELECT
     i.total_amount - COALESCE(SUM(pa.allocated_amount), 0),
     i.base_total_amount - COALESCE(SUM(pa.base_allocated_amount), 0),
     i.total_amount,
-    i.base_total_amount
-  INTO v_outstanding, v_base_outstanding, v_total, v_base_total
+    i.base_total_amount,
+    i.status
+  INTO v_outstanding, v_base_outstanding, v_total, v_base_total, v_current_status
   FROM public.invoices i
   LEFT JOIN finance.payment_allocations pa ON pa.invoice_id = i.id
   WHERE i.id = NEW.invoice_id
-  GROUP BY i.total_amount, i.base_total_amount;
+  GROUP BY i.total_amount, i.base_total_amount, i.status;
+
+  -- AR-03 FIX: this trigger is the actual, final write path for
+  -- invoices.status whenever a payment_allocations row is inserted or
+  -- updated, regardless of which caller created that row. Both RPCs that
+  -- normally create these rows (allocate_payment_atomic and
+  -- post_payment_receipt_atomic) now reject DRAFT/VOID/etc. invoices
+  -- before inserting -- this is the backstop that still blocks it here
+  -- even if some future/other code path inserts directly into
+  -- finance.payment_allocations without going through either RPC.
+  IF TG_OP IN ('INSERT', 'UPDATE') AND v_current_status NOT IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE') THEN
+    RAISE EXCEPTION 'Cannot allocate payment to invoice % -- it is % status. Only ISSUED, PARTIALLY_PAID, or OVERDUE invoices can receive payments.', NEW.invoice_id, v_current_status;
+  END IF;
 
   UPDATE public.invoices SET
     amount_paid              = v_total - v_outstanding,
@@ -1895,7 +1919,7 @@ $$;
 ALTER FUNCTION "finance"."auto_update_invoice_status"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "finance"."auto_update_invoice_status"() IS 'Fixed 2026: base_amount_paid previously always computed as 0 due to variable reuse. See migration 016.';
+COMMENT ON FUNCTION "finance"."auto_update_invoice_status"() IS 'Fixed 2026: base_amount_paid previously always computed as 0 due to variable reuse. See migration 016. AR-03 fix: added a backstop invoice-status guard on INSERT/UPDATE so no caller -- current or future -- can push a DRAFT/VOID/etc. invoice to PARTIALLY_PAID/PAID via finance.payment_allocations.';
 
 
 
@@ -5458,6 +5482,12 @@ BEGIN
         RAISE EXCEPTION 'Invoice % not found in your organization', (v_alloc->>'invoice_id');
       END IF;
 
+      -- AR-03 FIX: only an invoice that has actually been issued (and not
+      -- yet fully paid or cancelled) can take a payment allocation.
+      IF v_invoice.status NOT IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE') THEN
+        RAISE EXCEPTION 'Cannot allocate payment to invoice % -- it is % status. Only ISSUED, PARTIALLY_PAID, or OVERDUE invoices can receive payments.', v_invoice.invoice_number, v_invoice.status;
+      END IF;
+
       IF upper(COALESCE(v_invoice.currency, 'PKR'))
          <> upper(COALESCE(p_currency, 'PKR')) THEN
         RAISE EXCEPTION
@@ -5517,6 +5547,10 @@ $$;
 
 
 ALTER FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") IS 'AR-03 fix: added an invoice-status guard (ISSUED/PARTIALLY_PAID/OVERDUE only) inside the allocation loop so DRAFT or VOID invoices can no longer be pushed to PARTIALLY_PAID/PAID via a new payment receipt.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_payroll_run_atomic"("p_payroll_run_id" "uuid", "p_period_id" "uuid" DEFAULT NULL::"uuid", "p_salary_expense_account_id" "uuid" DEFAULT NULL::"uuid", "p_salary_payable_account_id" "uuid" DEFAULT NULL::"uuid", "p_tax_payable_account_id" "uuid" DEFAULT NULL::"uuid", "p_deductions_payable_account_id" "uuid" DEFAULT NULL::"uuid", "p_staff_advance_account_id" "uuid" DEFAULT NULL::"uuid") RETURNS "jsonb"
@@ -6053,6 +6087,11 @@ BEGIN
    WHERE organization_id=v_org AND (code='4910' OR name ILIKE '%discount%') AND is_active=true AND posting_allowed=true
    ORDER BY (code='4910') DESC LIMIT 1;
 
+  -- AP-01 FIX: finance.vendor_payment_allocations has no organization_id
+  -- column. Org membership of each allocation is established solely by
+  -- joining to finance.vendor_bills (which does have organization_id),
+  -- exactly like this table's own RLS policies (vpa_insert_org_scoped /
+  -- vpa_select_org_scoped) already do.
   SELECT
     COALESCE(SUM(vpa.allocated_amount),0),
     COALESCE(SUM((SELECT COALESCE(SUM(COALESCE(bl.base_withholding_amount,bl.withholding_amount,0)),0)
@@ -6061,9 +6100,18 @@ BEGIN
   INTO v_total_allocated,v_total_withholding,v_total_discount
   FROM finance.vendor_payment_allocations vpa
   JOIN finance.vendor_bills vb ON vb.id=vpa.vendor_bill_id AND vb.organization_id=v_org
-  WHERE vpa.vendor_payment_id=p_payment_id AND vpa.organization_id=v_org;
+  WHERE vpa.vendor_payment_id=p_payment_id;
 
-  IF EXISTS (SELECT 1 FROM finance.vendor_payment_allocations vpa WHERE vpa.vendor_payment_id=p_payment_id AND vpa.organization_id IS DISTINCT FROM v_org) THEN
+  -- AP-01 FIX: same defensive cross-org check as before, rewritten to go
+  -- through the vendor_bills join instead of the nonexistent
+  -- vpa.organization_id column. Catches an allocation whose bill belongs
+  -- to a different organization than the caller's.
+  IF EXISTS (
+    SELECT 1 FROM finance.vendor_payment_allocations vpa
+    JOIN finance.vendor_bills vb ON vb.id = vpa.vendor_bill_id
+    WHERE vpa.vendor_payment_id = p_payment_id
+      AND vb.organization_id IS DISTINCT FROM v_org
+  ) THEN
     RAISE EXCEPTION 'Vendor payment allocation organization mismatch';
   END IF;
 
@@ -6091,7 +6139,157 @@ $$;
 ALTER FUNCTION "finance"."post_vendor_payment"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "finance"."post_vendor_payment"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'BUG-001 fix (database audit): now posts vendor_payment_allocations.discount_amount to a Purchase Discounts Received GL line so debit AP always equals credit Bank + credit Discount, keeping the journal balanced.';
+COMMENT ON FUNCTION "finance"."post_vendor_payment"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'AP-01 FIX (P0): removed two references to vpa.organization_id, a column that does not exist on finance.vendor_payment_allocations (it was never added by any migration in this dump) — every call raised 42703 and every vendor payment GL posting failed end-to-end. Org membership of each allocation is now established solely via the existing JOIN to finance.vendor_bills.organization_id, matching this table''s own RLS policies. The application no longer calls this function directly (see finance.post_vendor_payment_atomic below); kept and fixed in place for any other direct caller. Previously: BUG-001 fix (discount_amount GL line for balance).';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_pay RECORD;
+  v_ap_account uuid;
+  v_bank_account uuid;
+  v_wht_payable uuid;
+  v_discount_account uuid;
+  v_total_allocated numeric(18,2);
+  v_total_withholding numeric(18,2);
+  v_total_discount numeric(18,2);
+  v_lines jsonb := '[]'::jsonb;
+  v_journal_id uuid;
+  v_ref text;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Access denied: no organization context for caller';
+  END IF;
+
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to post vendor payment';
+  END IF;
+
+  SELECT * INTO v_pay
+  FROM finance.vendor_payments
+  WHERE id = p_payment_id AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Payment not found in your organization';
+  END IF;
+
+  IF v_pay.status <> 'APPROVED' THEN
+    RAISE EXCEPTION 'Only APPROVED vendor payments can be posted. Current: %', v_pay.status;
+  END IF;
+
+  -- AP-02 FIX: explicit idempotency guard, defense in depth beyond the
+  -- status check above -- if a prior attempt committed the journal but the
+  -- (now-removed) separate status UPDATE never ran, this stops a retry
+  -- from creating a second journal for the same payment.
+  IF EXISTS (
+    SELECT 1 FROM finance.journal_entries
+    WHERE source_type = 'VENDOR_PAYMENT' AND source_id = p_payment_id
+  ) THEN
+    RAISE EXCEPTION 'Already posted to GL';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM finance.accounting_periods
+    WHERE id = p_period_id AND organization_id = v_org AND status = 'OPEN'
+  ) THEN
+    RAISE EXCEPTION 'Invalid or inaccessible accounting period';
+  END IF;
+
+  SELECT id INTO v_ap_account FROM finance.chart_of_accounts
+   WHERE organization_id = v_org AND code = '2110' AND is_active = true AND posting_allowed = true LIMIT 1;
+  IF v_ap_account IS NULL THEN
+    RAISE EXCEPTION 'AP account 2110 not found for organization';
+  END IF;
+
+  SELECT id INTO v_bank_account FROM finance.chart_of_accounts
+   WHERE organization_id = v_org AND code = '1110' AND is_active = true AND posting_allowed = true LIMIT 1;
+  IF v_bank_account IS NULL THEN
+    RAISE EXCEPTION 'Bank/cash ledger account is not configured for organization';
+  END IF;
+
+  SELECT id INTO v_wht_payable FROM finance.chart_of_accounts
+   WHERE organization_id = v_org AND code = '2210' AND is_active = true AND posting_allowed = true LIMIT 1;
+  SELECT id INTO v_discount_account FROM finance.chart_of_accounts
+   WHERE organization_id = v_org AND (code = '4910' OR name ILIKE '%discount%') AND is_active = true AND posting_allowed = true
+   ORDER BY (code = '4910') DESC LIMIT 1;
+
+  SELECT
+    COALESCE(SUM(vpa.allocated_amount), 0),
+    COALESCE(SUM((SELECT COALESCE(SUM(COALESCE(bl.base_withholding_amount, bl.withholding_amount, 0)), 0)
+      FROM finance.vendor_bill_lines bl WHERE bl.vendor_bill_id = vpa.vendor_bill_id AND bl.organization_id = v_org)), 0),
+    COALESCE(SUM(vpa.discount_amount), 0)
+  INTO v_total_allocated, v_total_withholding, v_total_discount
+  FROM finance.vendor_payment_allocations vpa
+  JOIN finance.vendor_bills vb ON vb.id = vpa.vendor_bill_id AND vb.organization_id = v_org
+  WHERE vpa.vendor_payment_id = p_payment_id AND vpa.organization_id = v_org;
+
+  IF EXISTS (
+    SELECT 1 FROM finance.vendor_payment_allocations vpa
+    WHERE vpa.vendor_payment_id = p_payment_id AND vpa.organization_id IS DISTINCT FROM v_org
+  ) THEN
+    RAISE EXCEPTION 'Vendor payment allocation organization mismatch';
+  END IF;
+
+  IF v_total_discount > 0 AND v_discount_account IS NULL THEN
+    RAISE EXCEPTION 'Discount GL account is not configured for organization';
+  END IF;
+  IF v_total_withholding > 0 AND v_wht_payable IS NULL THEN
+    RAISE EXCEPTION 'Withholding Tax Payable account is not configured for organization';
+  END IF;
+
+  IF v_total_allocated + v_total_discount + v_total_withholding > 0 THEN
+    v_lines := v_lines || jsonb_build_object('account_id', v_ap_account, 'debit_amount', v_total_allocated + v_total_discount + v_total_withholding, 'credit_amount', 0, 'description', 'AP Cleared: ' || v_pay.payment_number);
+  END IF;
+  IF v_total_allocated > 0 THEN
+    v_lines := v_lines || jsonb_build_object('account_id', v_bank_account, 'debit_amount', 0, 'credit_amount', v_total_allocated, 'description', 'Paid to Vendor: ' || v_pay.payment_number);
+  END IF;
+  IF v_total_discount > 0 THEN
+    v_lines := v_lines || jsonb_build_object('account_id', v_discount_account, 'debit_amount', 0, 'credit_amount', v_total_discount, 'description', 'Early Payment Discount Taken: ' || v_pay.payment_number);
+  END IF;
+  IF v_total_withholding > 0 THEN
+    v_lines := v_lines || jsonb_build_object('account_id', v_wht_payable, 'debit_amount', 0, 'credit_amount', v_total_withholding, 'description', 'WHT Deposited: ' || v_pay.payment_number);
+  END IF;
+
+  v_journal_id := finance.post_journal_entry(
+    'Vendor Payment: ' || v_pay.payment_number, p_transaction_date, p_period_id, v_lines,
+    'PKR', 1, 'VENDOR_PAYMENT', p_payment_id, NULL, NULL
+  );
+
+  -- AP-02 FIX: this UPDATE now runs in the SAME transaction as the journal
+  -- insert above (inside finance.post_journal_entry), instead of as a
+  -- second, independent PostgREST call from the route. Either both commit
+  -- or neither does.
+  UPDATE finance.vendor_payments
+  SET status = 'POSTED',
+      journal_entry_id = v_journal_id,
+      period_id = p_period_id,
+      posted_by = auth.uid(),
+      posted_at = now(),
+      updated_at = now()
+  WHERE id = p_payment_id
+    AND organization_id = v_org
+    AND status = 'APPROVED';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Vendor payment status update failed while posting to GL';
+  END IF;
+
+  SELECT reference INTO v_ref FROM finance.journal_entries WHERE id = v_journal_id;
+
+  RETURN jsonb_build_object('journal_id', v_journal_id, 'reference', v_ref);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'AP-02 fix: atomic replacement for the previous post_vendor_payment-then-separate-UPDATE two-step in src/app/api/finance/vendor-payments/[id]/route.ts and src/app/api/finance/vendor-payments/batches/[id]/route.ts. Creates the journal via finance.post_journal_entry() and marks the vendor payment POSTED (with journal_entry_id/period_id linkage) in the same DB transaction. finance.post_vendor_payment() is left in place, unchanged, for backward compatibility; the app no longer calls it.';
 
 
 
@@ -21116,7 +21314,11 @@ CREATE POLICY "je_select" ON "finance"."journal_entries" FOR SELECT USING ((("co
 
 
 
-CREATE POLICY "je_update" ON "finance"."journal_entries" FOR UPDATE USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND ("status" = 'DRAFT'::"text") AND "core"."same_org"("organization_id")));
+CREATE POLICY "je_update" ON "finance"."journal_entries" FOR UPDATE USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND ("status" <> ALL (ARRAY['POSTED'::"text", 'REVERSED'::"text"])) AND "core"."same_org"("organization_id"))) WITH CHECK ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND ("status" <> ALL (ARRAY['POSTED'::"text", 'REVERSED'::"text"])) AND "core"."same_org"("organization_id")));
+
+
+
+COMMENT ON POLICY "je_update" ON "finance"."journal_entries" IS 'AC-01 FIX (P0): previously USING-only with status = ''DRAFT'', which — because PostgreSQL defaults an omitted WITH CHECK to the USING expression — required the post-update row to ALSO be DRAFT, so no workflow transition (submit/verify/approve/reject/reopen) could ever succeed via the shared finance workflow route. Now allows Finance Head/Accountant, in their own org, to update a journal entry in any status except POSTED/REVERSED (both directions of the update are checked), matching the immutability pattern already used by finance.vendor_bills / finance.credit_notes / public.expenses / public.incomes / public.invoices. POSTED and REVERSED remain reachable only through the SECURITY DEFINER RPCs (post_existing_journal_entry / approve_and_post_journal_entry / reverse_journal_entry), which run outside this policy.';
 
 
 
@@ -22625,6 +22827,11 @@ GRANT ALL ON FUNCTION "finance"."post_tax_payment_atomic"("p_tax_computation_id"
 
 REVOKE ALL ON FUNCTION "finance"."post_vendor_bill_atomic"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."post_vendor_bill_atomic"("p_bill_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_lines" "jsonb", "p_currency" "text", "p_exchange_rate" numeric, "p_project_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") TO "authenticated";
 
 
 

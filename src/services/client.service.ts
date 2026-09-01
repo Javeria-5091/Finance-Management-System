@@ -128,7 +128,6 @@ export const clientService = {
   },
 
   async getClientARSummary(clientId: string) {
-    // ISS-017 FIX: The reporting schema exposes receivable_aging, not v_ar_aging.
     const { data, error } = await supabase
       .schema('reporting')
       .from('receivable_aging')

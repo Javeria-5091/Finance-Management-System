@@ -92,22 +92,27 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       return NextResponse.json({ error: 'No OPEN accounting period found for this payment date' }, { status: 400 });
     }
 
-    const { data: journalId, error: postError } = await supabase
-      .schema('finance').rpc('post_vendor_payment', {
+    // AP-01 FIX: post_vendor_payment_atomic folds GL journal creation and
+    // the vendor_payments status flip into a single DB transaction (also
+    // fixes the vpa.organization_id reference to a nonexistent column
+    // that previously made every posting attempt fail with 42703).
+    const { data: postResult, error: postError } = await supabase
+      .schema('finance').rpc('post_vendor_payment_atomic', {
         p_payment_id: payment.id,
         p_period_id: period.id,
         p_transaction_date: payment.payment_date,
       });
-    if (postError || !journalId) {
+    if (postError || !postResult?.journal_id) {
       return NextResponse.json({ error: `GL posting failed: ${postError?.message || 'Unknown error'}` }, { status: 400 });
     }
+    const journalId = postResult.journal_id;
 
     const { data, error } = await supabase
       .schema('finance').from('vendor_payments')
-      .update({ status: 'POSTED', journal_entry_id: journalId, period_id: period.id, posted_by: auth.userId, posted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-      .eq('id', params.id).eq('organization_id', auth.orgId).eq('status', 'APPROVED')
-      .select().single();
-    if (error || !data) return NextResponse.json({ error: error?.message || 'Concurrent modification — refresh and try again' }, { status: error ? 500 : 409 });
+      .select('*')
+      .eq('id', params.id).eq('organization_id', auth.orgId)
+      .single();
+    if (error || !data) return NextResponse.json({ error: error?.message || 'Posted, but failed to fetch updated record' }, { status: 500 });
 
     try {
       await supabase.schema('audit').rpc('log_action', {

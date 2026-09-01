@@ -283,6 +283,11 @@ BEGIN
    WHERE organization_id=v_org AND (code='4910' OR name ILIKE '%discount%') AND is_active=true AND posting_allowed=true
    ORDER BY (code='4910') DESC LIMIT 1;
 
+  -- AP-01 FIX (applied retroactively for migration-history consistency;
+  -- the live-DB fix ships in supabase/migrations/P2/P2_017_ap01_vendor_payment_posting_fix.sql):
+  -- finance.vendor_payment_allocations has no organization_id column and
+  -- never did. Org membership of each allocation is established solely
+  -- via the JOIN to finance.vendor_bills.organization_id below.
   SELECT
     COALESCE(SUM(vpa.allocated_amount),0),
     COALESCE(SUM((SELECT COALESCE(SUM(COALESCE(bl.base_withholding_amount,bl.withholding_amount,0)),0)
@@ -291,9 +296,14 @@ BEGIN
   INTO v_total_allocated,v_total_withholding,v_total_discount
   FROM finance.vendor_payment_allocations vpa
   JOIN finance.vendor_bills vb ON vb.id=vpa.vendor_bill_id AND vb.organization_id=v_org
-  WHERE vpa.vendor_payment_id=p_payment_id AND vpa.organization_id=v_org;
+  WHERE vpa.vendor_payment_id=p_payment_id;
 
-  IF EXISTS (SELECT 1 FROM finance.vendor_payment_allocations vpa WHERE vpa.vendor_payment_id=p_payment_id AND vpa.organization_id IS DISTINCT FROM v_org) THEN
+  IF EXISTS (
+    SELECT 1 FROM finance.vendor_payment_allocations vpa
+    JOIN finance.vendor_bills vb ON vb.id = vpa.vendor_bill_id
+    WHERE vpa.vendor_payment_id = p_payment_id
+      AND vb.organization_id IS DISTINCT FROM v_org
+  ) THEN
     RAISE EXCEPTION 'Vendor payment allocation organization mismatch';
   END IF;
 
