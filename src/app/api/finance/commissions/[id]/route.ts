@@ -529,52 +529,26 @@ export async function PATCH(
       }
 
       const { data: journalId, error: postErr } = await supabase
-        .schema('finance').rpc('post_journal_entry', {
-          p_description: `Commission accrual: ${row.person_name} (${row.commission_type})`,
-          p_transaction_date: accrualDate,
+        .schema('finance').rpc('approve_commission_atomic', {
+          p_commission_id: row.id,
           p_period_id: period.id,
-          p_lines: lines,
+          p_transaction_date: accrualDate,
+          p_description: `Commission accrual: ${row.person_name} (${row.commission_type})`,
           p_currency: row.currency || 'PKR',
           p_exchange_rate: accrualExchangeRate,
-          p_source_type: 'COMMISSION_ACCRUAL',
-          p_source_id: row.id,
+          p_lines: lines,
         });
       if (postErr || !journalId) {
-        return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
+        return NextResponse.json({ error: 'Atomic commission approval failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
       }
 
-      const {
-        data,
-        error,
-      } = await supabase
-        .from("commissions")
-        .update({
-          status: "APPROVED",
-          approved_by: auth.userId,
-          approved_at:
-            new Date().toISOString(),
-          accrual_journal_id: journalId,
-        })
-        .eq(
-          "id",
-          idResult.data
-        )
-        .eq(
-          "organization_id",
-          organizationId
-        )
-        .select()
+      const { data, error } = await supabase
+        .from('commissions')
+        .select('*')
+        .eq('id', row.id)
+        .eq('organization_id', organizationId)
         .single();
-
-      if (error) {
-        // Journal is already posted at this point; surface that so it isn't
-        // silently lost — mirrors the capital-transactions "partial_success" pattern.
-        return NextResponse.json({
-          error: "Journal posted but commission status update failed: " + error.message,
-          journal_id: journalId,
-          partial_success: true,
-        }, { status: 500 });
-      }
+      if (error || !data) return NextResponse.json({ error: error?.message || 'Commission approval completed but result could not be read' }, { status: 500 });
 
       try {
         await supabase.schema('audit').rpc('log_action', {
@@ -703,53 +677,31 @@ export async function PATCH(
       }
 
       const { data: journalId, error: postErr } = await supabase
-        .schema('finance').rpc('post_journal_entry', {
-          p_description: `Commission payment: ${row.person_name}`,
-          p_transaction_date: input.payment_date ?? new Date().toISOString().slice(0, 10),
+        .schema('finance').rpc('pay_commission_atomic', {
+          p_commission_id: row.id,
           p_period_id: period.id,
+          p_transaction_date: paymentDate,
+          p_financial_account_id: input.financial_account_id,
+          p_payment_ref: input.payment_ref ?? null,
+          p_description: `Commission payment: ${row.person_name}`,
+          p_currency: row.currency || 'PKR',
+          p_exchange_rate: paymentExchangeRate,
           p_lines: [
             { account_id: payableAccount.id, debit_amount: netAmountToPay, credit_amount: 0, description: `Clear commission payable: ${row.person_name}` },
             { account_id: financialAccount.linked_ledger_account_id, debit_amount: 0, credit_amount: netAmountToPay, description: `Commission paid: ${row.person_name}` },
           ],
-          p_currency: row.currency || 'PKR',
-          p_exchange_rate: paymentExchangeRate,
-          p_source_type: 'COMMISSION_PAYMENT',
-          p_source_id: row.id,
         });
       if (postErr || !journalId) {
-        return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
+        return NextResponse.json({ error: 'Atomic commission payment failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
       }
 
-      const {
-        data,
-        error,
-      } = await supabase
-        .from("commissions")
-        .update({
-          status: "PAID",
-          payment_date: paymentDate,
-          payment_ref:
-            input.payment_ref ?? null,
-          payment_journal_id: journalId,
-        })
-        .eq(
-          "id",
-          idResult.data
-        )
-        .eq(
-          "organization_id",
-          organizationId
-        )
-        .select()
+      const { data, error } = await supabase
+        .from('commissions')
+        .select('*')
+        .eq('id', row.id)
+        .eq('organization_id', organizationId)
         .single();
-
-      if (error) {
-        return NextResponse.json({
-          error: "Journal posted but commission status update failed: " + error.message,
-          journal_id: journalId,
-          partial_success: true,
-        }, { status: 500 });
-      }
+      if (error || !data) return NextResponse.json({ error: error?.message || 'Commission payment completed but result could not be read' }, { status: 500 });
 
       try {
         await supabase.schema('audit').rpc('log_action', {

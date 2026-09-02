@@ -167,3 +167,22 @@ BEGIN
 END; $$;
 REVOKE ALL ON FUNCTION core.advance_approval_chain(text,uuid,uuid,text,uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION core.advance_approval_chain(text,uuid,uuid,text,uuid) TO authenticated;
+
+
+-- AUD-P2-011..022 remaining hardening. Additive only; preserves prior P2 fixes.
+
+-- P2-013: legacy financial_accounts must never expose another tenant.
+DROP POLICY IF EXISTS fa_pub_select_org_scoped ON legacy.financial_accounts;
+CREATE POLICY fa_pub_select_org_scoped ON legacy.financial_accounts FOR SELECT TO authenticated
+USING ((core.is_finance_head() OR core.has_role('ACCOUNTANT') OR core.has_role('VIEWER'))
+       AND EXISTS (SELECT 1 FROM public.profiles owner_profile
+                   WHERE owner_profile.user_id = legacy.financial_accounts.user_id
+                     AND core.same_org(owner_profile.organization_id)));
+
+-- P2-022: make the EMS logical employee identity race-safe.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_shared_people_org_external_reference
+  ON core.shared_people(organization_id, external_reference)
+  WHERE external_reference IS NOT NULL AND person_type='EMPLOYEE';
+
+-- P2-021 evidence is served from finance.opening_balance_imports through the API;
+-- no schema mutation is needed beyond the existing journal linkage columns.

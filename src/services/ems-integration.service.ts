@@ -27,8 +27,12 @@ export async function processEMSEvent(db:SupabaseClient,eventId:string){
    if(e) throw e;
  } else {
    const {data:person,error:e}=await db.schema('core').from('shared_people').insert({organization_id:event.organization_id,person_type:'EMPLOYEE',display_name:displayName,status,external_reference:externalId}).select('id').single();
-   if(e||!person) throw e||new Error('Unable to create shared employee');
-   personId=person.id;
+   if(person){ personId=person.id; }
+   else if(e?.code==='23505'){
+     const {data:raced,error:raceErr}=await db.schema('core').from('shared_people').select('id').eq('organization_id',event.organization_id).eq('external_reference',externalId).maybeSingle();
+     if(raceErr||!raced) throw raceErr||e||new Error('Unable to resolve concurrent EMS employee');
+     personId=raced.id;
+   } else throw e||new Error('Unable to create shared employee');
  }
  const {data:link,error:linkFindError}=await db.schema('core').from('employee_links').select('id').eq('shared_person_id',personId).eq('source_module','EMS').limit(1).maybeSingle();
  if(linkFindError) throw linkFindError;

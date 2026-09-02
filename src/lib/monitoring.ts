@@ -1,3 +1,4 @@
+import 'server-only';
 // AUD-P2-016: service-role monitoring is server-only.
 import 'server-only';
 
