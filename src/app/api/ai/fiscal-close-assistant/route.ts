@@ -74,16 +74,15 @@ export async function POST(req: Request) {
 
     // Check unreconciled accounts
     const reconQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
-        SELECT account_name, institution_name, reconciliation_status, last_reconciled_at
-        FROM reporting.reconciliation_summary
+        SELECT financial_account_name AS account_name, institution_name, amount, transaction_date
+        FROM reporting.unreconciled_lines
         WHERE organization_id = '${orgId}'
-        AND reconciliation_status != 'reconciled'
       ) t`;
     const reconSafety = await isSqlSafe(reconQuery);
     if (!reconSafety.safe) {
       return NextResponse.json({ error: 'Query safety check failed', reason: reconSafety.reason }, { status: 500 });
     }
-    const { data: reconStatus } = await supabase.rpc('execute_ai_readonly_query', { query_string: reconQuery, p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false });
+    const { data: reconStatus, error: reconError } = await supabase.rpc('execute_ai_readonly_query', { query_string: reconQuery, p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false });
 
     // Check open periods
     const periodsQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
@@ -98,7 +97,7 @@ export async function POST(req: Request) {
     if (!periodsSafety.safe) {
       return NextResponse.json({ error: 'Query safety check failed', reason: periodsSafety.reason }, { status: 500 });
     }
-    const { data: openPeriods } = await supabase.rpc('execute_ai_readonly_query', { query_string: periodsQuery, p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false });
+    const { data: openPeriods, error: periodsError } = await supabase.rpc('execute_ai_readonly_query', { query_string: periodsQuery, p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false });
 
     // Check pending journal entries
     const journalsQuery = `SELECT COALESCE(jsonb_agg(t), '[]'::jsonb) FROM (
@@ -113,7 +112,9 @@ export async function POST(req: Request) {
     if (!journalsSafety.safe) {
       return NextResponse.json({ error: 'Query safety check failed', reason: journalsSafety.reason }, { status: 500 });
     }
-    const { data: pendingJournals } = await supabase.rpc('execute_ai_readonly_query', { query_string: journalsQuery, p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false });
+    const { data: pendingJournals, error: journalsError } = await supabase.rpc('execute_ai_readonly_query', { query_string: journalsQuery, p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false });
+
+    if (reconError || periodsError || journalsError) { return NextResponse.json({ error: 'Fiscal close data source is unavailable.', details: [reconError?.message, periodsError?.message, journalsError?.message].filter(Boolean) }, { status: 500 }); }
 
     contextData = `
 FISCAL YEAR: ${fiscalYear.name} (${fiscalYear.start_date} to ${fiscalYear.end_date})
@@ -199,7 +200,7 @@ All amounts are in PKR. Be specific and actionable. Format responses with clear 
         ...(responsePayload.open_periods_count > 0 ? [`${responsePayload.open_periods_count} period(s) are not hard closed.`] : []),
         ...(responsePayload.pending_journals_count > 0 ? [`${responsePayload.pending_journals_count} draft journal(s) remain.`] : []),
       ],
-      source_rows_or_report: 'reporting.ai_fiscal_close_context',
+      source_rows_or_report: 'reporting.unreconciled_lines and reporting.ai_fiscal_close_context',
       suggested_safe_actions: ['Review blockers', 'Complete accountant close checklist manually'],
     }));
   } catch (error: any) {

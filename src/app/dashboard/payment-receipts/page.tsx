@@ -144,7 +144,10 @@ export default function PaymentReceiptsPage() {
       const response = await fetch('/api/finance/payment-receipts', {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': crypto.randomUUID(),
+        },
         body: JSON.stringify({
           client_id: form.client_id,
           amount: Number(form.amount),

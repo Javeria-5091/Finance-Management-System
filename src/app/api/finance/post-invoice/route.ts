@@ -15,7 +15,7 @@ function getData<T = any>(res: any): T | null {
 //           (invoices generate revenue, not expense, so budget BLOCK does not apply to revenue budgets
 //            but project budget tracking is still validated for context)
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('APPROVE_INVOICE');
+  const auth = await requirePermission('INVOICE_POST');
   if (auth instanceof NextResponse) return auth;
   // H3 FIX: Enforce MFA for financial posting
   const mfaCheck = await enforceMFA(auth);

@@ -40,6 +40,7 @@ export default function BudgetsPage() {
   const canUpdate = hasPermission("BUDGET_UPDATE");
   const canDelete = hasPermission("BUDGET_DELETE");
   const canModify = canCreate || canUpdate;
+  const canApprove = hasPermission("BUDGET_APPROVE");
 
   const fetchData = useCallback(async () => {
   if (!user) return;
@@ -162,6 +163,17 @@ export default function BudgetsPage() {
     }
   }
 
+
+  async function handleBudgetAction(id: string, action: 'submit' | 'approve' | 'reject') {
+    try {
+      const response = await fetch(`/api/finance/budgets/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+      const json = await response.json();
+      if (!response.ok) throw new Error(json.error || `Failed to ${action} budget`);
+      toast.success(json.budget?.status ? `Budget ${json.budget.status.toLowerCase()}` : `Budget ${action}ed`);
+      await fetchData();
+    } catch (err: any) { toast.error(err.message || `Failed to ${action} budget`); }
+  }
+
   async function handleDelete() {
     if (!deleteId) return;
     try {
@@ -269,6 +281,12 @@ export default function BudgetsPage() {
                       </div>
                     );
                   })()}
+
+                  <div className="flex items-center justify-end gap-2 mt-3 pt-3 border-t border-gray-100 dark:border-gray-700/50">
+                    {bud.status === 'DRAFT' && canUpdate && <button onClick={() => handleBudgetAction(bud.id, 'submit')} className="px-3 py-1.5 rounded-md bg-blue-50 text-blue-700 text-xs font-medium hover:bg-blue-100">Submit</button>}
+                    {bud.status === 'SUBMITTED' && canApprove && <button onClick={() => handleBudgetAction(bud.id, 'approve')} className="px-3 py-1.5 rounded-md bg-green-50 text-green-700 text-xs font-medium hover:bg-green-100">Approve</button>}
+                    {bud.status === 'SUBMITTED' && canUpdate && <button onClick={() => handleBudgetAction(bud.id, 'reject')} className="px-3 py-1.5 rounded-md bg-red-50 text-red-700 text-xs font-medium hover:bg-red-100">Reject</button>}
+                  </div>
 
                   <div className="flex justify-between items-center text-sm mt-3">
                     <span className={`${colors.text} font-medium flex items-center gap-1`}>

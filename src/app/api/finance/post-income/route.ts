@@ -11,7 +11,7 @@ function getData<T = any>(res: any): T | null {
 export async function POST(req: NextRequest) {
   // ─── AUTH CHECK ───
   // FIXED: Use APPROVE permission, not CREATE — posting to GL requires approval-level access
-  const auth = await requirePermission('APPROVE_INCOME');
+  const auth = await requirePermission('INCOME_APPROVE');
   if (auth instanceof NextResponse) return auth;
   // H3 FIX: Enforce MFA for financial posting
   const mfaCheck = await enforceMFA(auth);

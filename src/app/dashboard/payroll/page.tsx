@@ -13,7 +13,7 @@ import type { PayrollEmployee, PayrollRun, PayrollLine, PayrollAdvance, PayrollC
               CompensationFormData, } from "@/types/payroll.types";
 import { formatPKR, formatDate, formatPeriod, timeAgo, getEmploymentTypeBadge, getLastDayOfMonth, } from "@/lib/helpers";
 import { Plus, Search, Eye, Edit2, ChevronLeft, ChevronRight, Users, Calculator, Banknote, TrendingUp, FileText, X,
-         Check, AlertTriangle, Loader2, Receipt, } from "lucide-react";
+         Check, AlertTriangle, Loader2, Receipt,ArrowRight } from "lucide-react";
 import toast from "react-hot-toast";
 import { supabase } from "@/lib/supabase";
 
@@ -379,6 +379,17 @@ export default function PayrollPage() {
   async function handleRunAction(run: PayrollRun, action: string) {
     if (action === "view") {
       setSelectedRun(run);
+      return;
+    }
+
+    if (action === "calculate" || action === "submit" || action === "mark_paid") {
+      try {
+        const res = await fetch('/api/finance/payroll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, run_id: run.id }) });
+        const result = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(result.error || `${action} failed`);
+        toast.success(result.message || `Payroll ${action.replace('_',' ')} successful`);
+        refetchRuns();
+      } catch (err: any) { toast.error(err.message || `${action} failed`); }
       return;
     }
 
@@ -1067,15 +1078,17 @@ export default function PayrollPage() {
                             >
                               <Eye className="w-4 h-4" />
                             </button>
-                            {run.status === "CALCULATED" && canApprove && (
+                            {run.status === "DRAFT" && canUpdate && (
                               <button
-                                onClick={() => handleRunAction(run, "approve")}
+                                onClick={() => handleRunAction(run, "calculate")}
                                 className="p-1.5 text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg transition-colors"
                                 title="Approve"
                               >
                                 <Check className="w-4 h-4" />
                               </button>
                             )}
+                            {run.status === "CALCULATED" && canUpdate && <button onClick={() => handleRunAction(run, "submit")} className="p-1.5 text-indigo-600 hover:bg-indigo-50 rounded-lg" title="Submit for approval"><ArrowRight className="w-4 h-4" /></button>}
+                            {run.status === "UNDER_REVIEW" && canApprove && <button onClick={() => handleRunAction(run, "approve")} className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg" title="Approve"><Check className="w-4 h-4" /></button>}
                             {run.status === "APPROVED" && canPost && (
                               <button
                                 onClick={() => handleRunAction(run, "post")}
@@ -1085,6 +1098,7 @@ export default function PayrollPage() {
                                 <Calculator className="w-4 h-4" />
                               </button>
                             )}
+                            {run.status === "POSTED" && canUpdate && <button onClick={() => handleRunAction(run, "mark_paid")} className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg" title="Mark Paid"><Check className="w-4 h-4" /></button>}
                             {(run.status === "DRAFT" ||
                               run.status === "CALCULATED") && (
                               <button

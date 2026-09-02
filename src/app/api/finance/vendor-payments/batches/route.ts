@@ -2,52 +2,23 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthSupabase, requirePermission } from '@/lib/api-auth';
 import { z } from 'zod';
 
-// BUG-010 FIX: this route replaces the client-side, browser-direct writes
-// that used to live in src/app/dashboard/vendor-payments/page.tsx. All
-// vendor payment creation now goes through requirePermission() (server-side
-// RBAC), server-computed allocation limits (never trusts client-sent
-// "outstanding" figures), and org-scoped queries — the same pattern already
-// used by the vendor-payment BATCH routes in this codebase
-// (src/app/api/finance/vendor-payments/batches/route.ts).
+const allocationSchema = z.object({
+  vendor_bill_id: z.string().uuid(),
+  allocated_amount: z.number().positive(),
+}).strict();
 
-async function resolveApprovedLockedRate(
-  supabase: any,
-  organizationId: string,
-  fromCurrency: string,
-  rateDate: string,
-): Promise<{ rate: number; id: string; rate_date: string } | null> {
-  const currency = fromCurrency.toUpperCase();
-  if (currency === 'PKR') return { rate: 1, id: 'BASE-CURRENCY', rate_date: rateDate };
-
-  const { data, error } = await supabase
-    .schema('finance').from('exchange_rates')
-    .select('id, rate, rate_date')
-    .eq('organization_id', organizationId)
-    .eq('from_currency', currency)
-    .eq('to_currency', 'PKR')
-    .not('approved_by', 'is', null)
-    .eq('is_locked', true)
-    .lte('rate_date', rateDate)
-    .order('rate_date', { ascending: false })
-    .order('approved_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error || !data || Number(data.rate) <= 0) return null;
-  return { rate: Number(data.rate), id: data.id, rate_date: data.rate_date };
-}
+const paymentGroupSchema = z.object({
+  vendor_id: z.string().uuid(),
+  allocations: z.array(allocationSchema).min(1).max(100),
+}).strict();
 
 const createSchema = z.object({
-  vendor_id: z.string().uuid(),
   payment_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  payment_method: z.enum(['BANK_TRANSFER', 'CHEQUE', 'CASH', 'JAZZCASH', 'EASYPAISA', 'PLATFORM', 'OTHER']),
-  financial_account_id: z.string().uuid().optional(),
+  financial_account_id: z.string().uuid(),
+  payment_method: z.enum(['BANK_TRANSFER', 'CHEQUE', 'CASH', 'PLATFORM', 'OTHER']),
   reference: z.string().trim().max(100).optional(),
   description: z.string().trim().max(500).optional(),
-  allocations: z.array(z.object({
-    vendor_bill_id: z.string().uuid(),
-    allocated_amount: z.number().positive(),
-  })).min(1).max(100),
+  payments: z.array(paymentGroupSchema).min(1).max(100),
 }).strict();
 
 export async function GET(req: NextRequest) {
@@ -55,162 +26,52 @@ export async function GET(req: NextRequest) {
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
 
-  const { data, error } = await supabase
+  const { data: batches, error } = await supabase
     .schema('finance')
-    .from('vendor_payments')
-    .select('*, vendor_payment_allocations(id, vendor_bill_id, allocated_amount)')
+    .from('vendor_payment_batches')
+    .select('*')
     .eq('organization_id', auth.orgId)
-    .eq('is_batch', false)
-    .order('payment_date', { ascending: false });
+    .order('payment_date', { ascending: false })
+    .order('created_at', { ascending: false });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ data: data || [] });
+
+  // Keep the list response compatible with the existing page while deriving
+  // counts/totals from the authoritative batch header rather than columns on
+  // vendor_payments (which never had batch_number/payment_count/total_amount).
+  return NextResponse.json({ data: batches || [] });
 }
 
 export async function POST(req: NextRequest) {
   const auth = await requirePermission('VENDOR_PAYMENT_CREATE');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
-  const organizationId = auth.orgId;
-  if (!organizationId) {
-    return NextResponse.json({ error: 'Authenticated user is not associated with an organization' }, { status: 403 });
-  }
 
-  const parsed = createSchema.safeParse(await req.json());
+  const parsed = createSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.issues[0]?.message || 'Invalid request' }, { status: 400 });
-  }
-  const { vendor_id, payment_method, financial_account_id, reference, description, allocations } = parsed.data;
-  const payment_date = parsed.data.payment_date || new Date().toISOString().split('T')[0];
-
-  // 1. Vendor must exist and belong to this org.
-  const { data: vendor } = await supabase
-    .schema('finance').from('vendors')
-    .select('id').eq('id', vendor_id).eq('organization_id', auth.orgId).eq('is_active', true).maybeSingle();
-  if (!vendor) return NextResponse.json({ error: 'Vendor not found or inactive' }, { status: 404 });
-
-  // Optional financial account validation (mirrors batch route).
-  if (financial_account_id) {
-    const { data: account } = await supabase
-      .schema('finance').from('financial_accounts')
-      .select('id').eq('id', financial_account_id).eq('organization_id', auth.orgId).eq('is_active', true).maybeSingle();
-    if (!account) return NextResponse.json({ error: 'Financial account not found or inactive' }, { status: 404 });
+    return NextResponse.json(
+      { error: parsed.error.issues[0]?.message || 'Invalid request' },
+      { status: 400 }
+    );
   }
 
-  // 2. De-duplicate bill ids from the client and fetch them server-side —
-  // NEVER trust a client-sent "outstanding_amount". Only bills that are
-  // actually unpaid/partially paid for THIS vendor and THIS org are usable.
-  const billIds = [...new Set(allocations.map(a => a.vendor_bill_id))];
-  const { data: bills, error: billError } = await supabase
-    .schema('finance').from('vendor_bills')
-    .select('id, vendor_id, outstanding_amount, status, currency')
-    .eq('organization_id', auth.orgId)
-    .eq('vendor_id', vendor_id)
-    .in('id', billIds)
-    .in('status', ['POSTED', 'PARTIALLY_PAID'])
-    .gt('outstanding_amount', 0);
-
-  if (billError) return NextResponse.json({ error: billError.message }, { status: 500 });
-  if (!bills?.length || bills.length !== billIds.length) {
-    return NextResponse.json({
-      error: 'One or more selected bills are unavailable, already paid, belong to a different vendor, or outside your organization',
-    }, { status: 400 });
-  }
-
-  const currencies = new Set(bills.map((b: any) => b.currency || 'PKR'));
-  if (currencies.size !== 1) {
-    return NextResponse.json({ error: 'All allocated bills must share the same currency' }, { status: 400 });
-  }
-  const currency = [...currencies][0] as string;
-
-  // P2-002 FIX: vendor payments must use an approved and locked accounting
-  // rate for the payment currency. Never default a foreign-currency payment
-  // to 1 PKR per unit.
-  const fx = await resolveApprovedLockedRate(supabase, organizationId, currency, payment_date);
-  if (!fx) {
-    return NextResponse.json({
-      error: `No approved and locked exchange rate found for ${currency} -> PKR on or before ${payment_date}. Approve and lock a rate before recording this payment.`,
-    }, { status: 400 });
-  }
-
-
-  // 3. Validate each requested allocation against the SERVER's outstanding
-  // figure (not whatever the browser sent), and sum a server-computed total.
-  const billMap = new Map(bills.map((b: any) => [b.id, b]));
-  let total = 0;
-  for (const alloc of allocations) {
-    const bill = billMap.get(alloc.vendor_bill_id);
-    if (!bill) return NextResponse.json({ error: 'Invalid bill in allocation list' }, { status: 400 });
-    if (alloc.allocated_amount > Number(bill.outstanding_amount) + 0.01) {
-      return NextResponse.json({
-        error: `Allocation of ${alloc.allocated_amount} exceeds outstanding balance (${bill.outstanding_amount}) for bill ${bill.id}`,
-      }, { status: 400 });
+  const { data, error } = await supabase.schema('finance').rpc(
+    'create_vendor_payment_batch_atomic',
+    {
+      p_organization_id: auth.orgId,
+      p_user_id: auth.userId,
+      p_payment_date: parsed.data.payment_date || new Date().toISOString().split('T')[0],
+      p_financial_account_id: parsed.data.financial_account_id,
+      p_payment_method: parsed.data.payment_method,
+      p_reference: parsed.data.reference || null,
+      p_description: parsed.data.description || null,
+      p_payments: parsed.data.payments,
     }
-    total += alloc.allocated_amount;
-  }
-  total = Number(total.toFixed(2));
-  if (total <= 0) return NextResponse.json({ error: 'Payment amount must be greater than zero' }, { status: 400 });
+  );
 
-  // 4. Payment number + insert (DRAFT — nothing here posts to the GL).
-  const { data: numData } = await supabase.schema('finance').rpc('get_next_number', { p_type: 'VENDOR_PAYMENT' });
-  const paymentNumber = numData || `VP-${Date.now()}`;
-
-  const { data: payment, error: paymentError } = await supabase
-    .schema('finance').from('vendor_payments')
-    .insert({
-      payment_number: paymentNumber,
-      payment_date,
-      amount: total,
-      currency,
-      exchange_rate: fx.rate,
-      base_amount: Number((total * fx.rate).toFixed(2)),
-      vendor_id,
-      financial_account_id: financial_account_id || null,
-      payment_method,
-      reference: reference || null,
-      description: description || null,
-      status: 'DRAFT',
-      is_batch: false,
-      created_by: auth.userId,
-      organization_id: auth.orgId,
-    })
-    .select()
-    .single();
-
-  if (paymentError || !payment) {
-    return NextResponse.json({ error: paymentError?.message || 'Failed to create payment' }, { status: 500 });
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 400 });
   }
 
-  // 5. Allocations. The DB trigger finance.auto_update_bill_status() (on
-  // vendor_payment_allocations) recalculates the bill's outstanding_amount
-  // and status automatically — the app must NOT set bill status directly
-  // (that was the root cause of BUG-010's blanket "PAID" bug).
-  const allocRows = allocations.map(a => ({
-    vendor_payment_id: payment.id,
-    vendor_bill_id: a.vendor_bill_id,
-    allocated_amount: a.allocated_amount,
-    base_allocated_amount: Number((a.allocated_amount * fx.rate).toFixed(2)),
-    allocated_by: auth.userId,
-  }));
-  const { error: allocError } = await supabase.schema('finance').from('vendor_payment_allocations').insert(allocRows);
-  if (allocError) {
-    // Roll back the orphaned DRAFT payment.
-    await supabase.schema('finance').from('vendor_payments').delete().eq('id', payment.id).eq('organization_id', auth.orgId);
-    return NextResponse.json({ error: `Allocation failed: ${allocError.message}` }, { status: 500 });
-  }
-
-  try {
-    await supabase.schema('audit').rpc('log_action', {
-      p_user_id: auth.userId, p_action: 'VENDOR_PAYMENT_CREATED', p_entity_type: 'vendor_payment',
-      p_entity_id: payment.id,
-      p_description: `Created vendor payment ${paymentNumber} (${currency} ${total}) for vendor ${vendor_id}`,
-      p_previous_status: null, p_new_status: 'DRAFT', p_source_module: 'vendor_payment',
-      p_severity: 'medium',
-      p_new_values: { amount: total, currency, vendor_id, bill_count: bills.length },
-    });
-  } catch (auditErr: any) {
-    console.error('Audit log failed for vendor payment create:', auditErr);
-  }
-
-  return NextResponse.json({ success: true, payment }, { status: 201 });
+  return NextResponse.json({ success: true, batch: data }, { status: 201 });
 }

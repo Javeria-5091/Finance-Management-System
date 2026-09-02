@@ -91,7 +91,7 @@ export async function GET(req: NextRequest) {
 // BUG-001 FIX: Replaced manual header+lines insert + wrong RPC({ p_journal_id, p_posted_by })
 //   with single atomic RPC call using correct signature.
 export async function POST(req: NextRequest) {
-  const auth = await requirePermission('APPROVE_INVOICE');
+  const auth = await requirePermission('PAYMENT_RECEIPT_POST');
   if (auth instanceof NextResponse) return auth;
   // H3 FIX: Enforce MFA for financial posting
   const mfaCheck = await enforceMFA(auth);

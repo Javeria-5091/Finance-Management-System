@@ -31,8 +31,8 @@ const PL_SECTION_KEYS = ['revenue', 'cost_of_sales', 'operating_expenses', 'othe
 export const getProfitAndLoss = async (start?: string, end?: string) => {
   const organization_id = await getCurrentOrganizationId();
   const { data, error } = await reportingDb().rpc('get_profit_and_loss', {
-    p_start_date: start || null,
-    p_end_date: end || null,
+    p_start_date: start || '1900-01-01',
+    p_end_date: end || '2999-12-31',
     p_organization_id: organization_id,
   });
   if (error) throw new Error(error.message);
@@ -216,6 +216,9 @@ export const getProjectProfitability = async (start?: string, end?: string) => {
   });
   if (error) throw new Error(error.message);
   const rows = (data || []) as any[];
+  const { data: costStructure, error: costError } = await reportingDb().rpc('get_project_profitability_cost_structure', { p_start_date: start || '1900-01-01', p_end_date: end || '2999-12-31' });
+  if (costError) throw new Error(costError.message);
+  const costByProject = new Map<string, any>((costStructure || []).map((r: any) => [r.project_id, r]));
 
   const projectIds = [...new Set(rows.map((r) => r.project_id).filter(Boolean))];
   const clientByProject = new Map<string, { client_name: string; status: string }>();
@@ -241,8 +244,8 @@ export const getProjectProfitability = async (start?: string, end?: string) => {
       status: meta.status,
       revenue: Number(r.total_revenue ?? 0),
       direct_costs: totalCosts,
-      platform_fees: 0,
-      allocated_overhead: 0,
+      platform_fees: Number(costByProject.get(r.project_id)?.platform_fees ?? 0),
+      allocated_overhead: Number(costByProject.get(r.project_id)?.allocated_overhead ?? 0),
       total_costs: totalCosts,
       gross_profit: grossProfit,
       net_profit: grossProfit,
@@ -536,67 +539,37 @@ export const getBudgetVariance = async (fiscalYearId?: string, organization_id?:
   const budgetIds = (budgets || []).map((b: any) => b.id);
   if (!budgetIds.length) return [] as BudgetVarianceRow[];
 
-  const { data: lines } = await financeDb()
-    .from('budget_lines')
-    .select('id, budget_id, account_id, budgeted_amount, committed_amount')
-    .in('budget_id', budgetIds);
+  const { data: lines, error: linesError } = await financeDb()
+    .from('budget_lines').select('id, budget_id, account_id, budgeted_amount, committed_amount').in('budget_id', budgetIds);
+  if (linesError) throw new Error(linesError.message);
 
-  const { data: revisions } = await financeDb()
-    .from('budget_revisions')
-    .select('budget_id, revised_amount, status, created_at')
-    .in('budget_id', budgetIds)
-    .eq('status', 'APPROVED')
-    .order('created_at', { ascending: false });
+  const { data: revisions, error: revisionError } = await financeDb()
+    .from('budget_revisions').select('budget_id, revised_amount, status, created_at').in('budget_id', budgetIds).eq('status', 'APPROVED').order('created_at', { ascending: false });
+  if (revisionError) throw new Error(revisionError.message);
   const latestRevisionByBudget = new Map<string, number>();
-  for (const r of revisions || []) {
-    if (!latestRevisionByBudget.has(r.budget_id)) latestRevisionByBudget.set(r.budget_id, Number(r.revised_amount));
-  }
+  for (const r of revisions || []) if (!latestRevisionByBudget.has(r.budget_id)) latestRevisionByBudget.set(r.budget_id, Number(r.revised_amount));
 
-  const accountIds = [...new Set((lines || []).map((l: any) => l.account_id).filter(Boolean))];
-  const actualsMap = new Map<string, number>();
-  if (accountIds.length) {
-    const { data: actualLines } = await financeDb()
-      .from('journal_lines')
-      .select('account_id, base_debit, base_credit, journal_entry_id')
-      .in('account_id', accountIds);
-    const entryIds = [...new Set((actualLines || []).map((l: any) => l.journal_entry_id).filter(Boolean))];
-    let postedSet = new Set<string>();
-    if (entryIds.length) {
-      const { data: posted } = await financeDb().from('journal_entries').select('id').in('id', entryIds).eq('status', 'POSTED');
-      postedSet = new Set((posted || []).map((e: any) => e.id));
-    }
-    for (const l of actualLines || []) {
-      if (l.journal_entry_id && !postedSet.has(l.journal_entry_id)) continue;
-      actualsMap.set(l.account_id, (actualsMap.get(l.account_id) || 0) + Number(l.base_debit ?? 0) - Number(l.base_credit ?? 0));
-    }
-  }
+  // Use the authoritative date-scoped budget GL view. This prevents actuals
+  // from crossing years/budgets that share the same account_id and preserves
+  // the sign of reversals instead of abs()-clamping them.
+  const { data: actualRows, error: actualError } = await reportingDb()
+    .from('budget_gl_actual').select('budget_id, actual_spent').in('budget_id', budgetIds);
+  if (actualError) throw new Error(actualError.message);
+  const actualByBudget = new Map<string, number>();
+  for (const r of actualRows || []) actualByBudget.set(r.budget_id, (actualByBudget.get(r.budget_id) || 0) + Number(r.actual_spent || 0));
 
   const linesByBudget = new Map<string, any[]>();
-  for (const l of lines || []) {
-    const arr = linesByBudget.get(l.budget_id) || [];
-    arr.push(l);
-    linesByBudget.set(l.budget_id, arr);
-  }
+  for (const l of lines || []) { const arr = linesByBudget.get(l.budget_id) || []; arr.push(l); linesByBudget.set(l.budget_id, arr); }
 
   return (budgets || []).map((budget: any) => {
     const budgetLines = linesByBudget.get(budget.id) || [];
     const committed = budgetLines.reduce((s, l) => s + Number(l.committed_amount ?? 0), 0);
-    const actual = budgetLines.reduce((s, l) => s + Math.abs(actualsMap.get(l.account_id) || 0), 0);
+    const actual = actualByBudget.get(budget.id) || 0;
     const originalBudget = Number(budget.total_amount ?? 0);
     const revisedBudget = latestRevisionByBudget.get(budget.id) ?? originalBudget;
     const forecast = actual + committed;
-    const variance = actual - revisedBudget;
-    return {
-      category_id: budget.id,
-      category_name: budget.category || budget.name,
-      original_budget: originalBudget,
-      revised_budget: revisedBudget,
-      committed,
-      actual,
-      forecast,
-      variance,
-      variance_pct: revisedBudget !== 0 ? (variance / revisedBudget) * 100 : 0,
-    };
+    const variance = revisedBudget - actual;
+    return { category_id: budget.id, category_name: budget.category || budget.name, original_budget: originalBudget, revised_budget: revisedBudget, committed, actual, forecast, variance, variance_pct: revisedBudget !== 0 ? (variance / revisedBudget) * 100 : 0 };
   }) as BudgetVarianceRow[];
 };
 

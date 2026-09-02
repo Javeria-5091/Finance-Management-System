@@ -164,9 +164,13 @@ export default function ProfitDistributionPage() {
   const handleSaveLines = () => {
     if (!detail?.id) return;
     const payload = lines.map((l) => ({
-      ...l,
+      id: l.id,
+      profit_distribution_id: l.profit_distribution_id,
+      owner_id: l.owner_id,
+      ownership_percentage: l.ownership_percentage,
+      calculated_amount: l.calculated_amount,
       overridden_amount: l.tempOverride ? parseFloat(l.tempOverride) : null,
-      final_amount: l.final_amount,
+      final_amount: l.tempOverride ? parseFloat(l.tempOverride) : l.final_amount,
     }));
     saveLines.mutate(payload, { onSuccess: () => refetch() });
   };

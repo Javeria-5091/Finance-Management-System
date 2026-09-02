@@ -89,6 +89,8 @@ export async function POST(req: Request) {
       p_org_id: orgId, p_user_id: user.id, p_enforce_user_scope: false,
     });
 
+    if (journalError) { console.error('General ledger fetch error:', journalError.message); return NextResponse.json({ error: 'Failed to fetch ledger lines for reconciliation suggestions.' }, { status: 500 }); }
+
     // 5. Deterministic matching algorithm (Spec 9.4: "Suggest matches — user confirms")
     const suggestions: any[] = [];
     const lines = unreconciledLines || [];

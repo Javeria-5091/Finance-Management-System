@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getTrialBalance } from '@/services/report.service';
+import { getFiscalYears } from '@/services/fiscal-year.service';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend } from 'recharts';
 import ReportHeader from '@/components/reports/ReportHeader';
 import ReportFilterBar from '@/components/reports/ReportFilterBar';
@@ -15,8 +16,9 @@ import type { TBEntry, ReportFilters } from '@/types/reports.types';
 const f = (n: number) => new Intl.NumberFormat('en-PK', { style: 'currency', currency: 'PKR', minimumFractionDigits: 0 }).format(n || 0);
 
 export default function TrialBalancePage() {
-  const [filters, setFilters] = useState<ReportFilters>({ includePrior: 'true' });
+  const [filters, setFilters] = useState<ReportFilters>({});
   const [dataAsOf] = useState(new Date().toISOString());
+  const { data: fiscalYears = [] } = useQuery({ queryKey: ['report-fiscal-years'], queryFn: getFiscalYears });
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['tb', filters],
@@ -24,9 +26,11 @@ export default function TrialBalancePage() {
       fiscalYearId: filters.fiscalYear,
       periodStart: filters.startDate,
       periodEnd: filters.endDate,
-      includePrior: filters.comparison === 'prior_period' || filters.comparison === 'prior_year',
+      includePrior: false,
     }),
   });
+
+  useEffect(() => { if (!filters.fiscalYear && fiscalYears[0]?.id) setFilters(f => ({ ...f, fiscalYear: fiscalYears.find((fy: any) => fy.status === 'OPEN')?.id || fiscalYears[0].id })); }, [fiscalYears, filters.fiscalYear]);
 
   const entries = (data || []) as TBEntry[];
   const totalDebit = entries.reduce((s, e) => s + e.debit, 0);
@@ -63,7 +67,6 @@ export default function TrialBalancePage() {
         dataAsOf={dataAsOf}
         filters={[
           ...(filters.fiscalYear ? [{ label: 'Fiscal Year', value: filters.fiscalYear }] : []),
-          ...(filters.comparison ? [{ label: 'Compare', value: filters.comparison }] : []),
         ]}
         reconciled={true}
         actions={<ExportManager reportId="trial-balance" reportName="Trial_Balance" getCsvData={getCsv} activeFilters={filters as Record<string, string>} />}
@@ -72,7 +75,7 @@ export default function TrialBalancePage() {
       <ReportFilterBar
         showDateRange
         showFiscalYear
-        showComparison
+        fiscalYearOptions={fiscalYears.map((fy: any) => ({ value: fy.id, label: fy.name }))}
         onApply={(f) => { setFilters(f); refetch(); }}
         isLoading={isLoading}
       />

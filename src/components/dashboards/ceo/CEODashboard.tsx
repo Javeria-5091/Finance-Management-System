@@ -338,11 +338,11 @@ export function CEODashboard() {
 
   const assetBarData = {
     label: 'Assets',
-    values: (catData?.assets || []).map(a => ({ label: a.category, value: Math.abs(a.total) }))
+    values: (catData?.assets || []).map((a:any) => ({ label: a.category, value: Math.abs(a.total) }))
   };
   const liabilityBarData = {
     label: 'Liabilities',
-    values: (catData?.liabilities || []).map(l => ({ label: l.category, value: Math.abs(l.total) }))
+    values: (catData?.liabilities || []).map((l:any) => ({ label: l.category, value: Math.abs(l.total) }))
   };
   const barColors = ['#6366f1', '#f97316', '#22c55e', '#06b6d4', '#f43f5e', '#8b5cf6'];
 
@@ -429,7 +429,7 @@ export function CEODashboard() {
             </div>
           </div>
           <div className="space-y-2 max-h-48 overflow-y-auto">
-            {(showAllApprovals ? approvals.data || [] : (approvals.data || []).slice(0, 5)).map(item => (
+            {(showAllApprovals ? approvals.data || [] : (approvals.data || []).slice(0, 5)).map((item:any) => (
               <div key={item.id} className="flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-700/30 rounded-lg">
                 <div className="flex items-center gap-2 flex-1 min-w-0">
                   <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${
@@ -470,7 +470,7 @@ export function CEODashboard() {
                 </tr>
               </thead>
               <tbody>
-                {(projects.data || []).map(p => {
+                {(projects.data || []).map((p:any) => {
                   const margin = p.revenue > 0 ? (p.gross_profit / p.revenue * 100) : 0;
                   return (
                     <tr key={p.id} className="border-t border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/30">
@@ -551,7 +551,7 @@ export function CEODashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <SectionCard title="Cash by Account" className="lg:col-span-2">
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-            {(cash.data || []).slice(0, 6).map(acc => (
+            {(cash.data || []).slice(0, 6).map((acc:any) => (
               <div key={acc.id} className="p-3 bg-gray-50 dark:bg-gray-900/30 rounded-lg border border-gray-200 dark:border-gray-700">
                 <div className="flex items-center gap-2 mb-2">
                   {instIcon(acc.institution_type)}
@@ -599,19 +599,19 @@ export function CEODashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <SectionCard title="Budget vs Actual (MTD)">
           <StackedBar
-            data={(budget.data || []).map(b => ({
+            data={(budget.data || []).map((b:any) => ({
               label: b.category,
               values: [
                 { label: 'Budget', value: b.budget },
                 { label: 'Actual', value: b.actual },
               ],
             }))}
-            maxVal={Math.max(...(budget.data || []).map(b => Math.max(b.budget, b.actual)), 1)}
+            maxVal={Math.max(...(budget.data || []).map((b:any) => Math.max(b.budget, b.actual)), 1)}
             colors={['#6366f1', '#3b82f6']}
           />
           <div className="flex gap-4 mt-3">
-            {budget.data?.some(b => b.variance < 0) && <span className="text-xs text-green-600">● Under budget</span>}
-            {budget.data?.some(b => b.variance > 0) && <span className="text-xs text-red-600">● Over budget</span>}
+            {budget.data?.some((b:any) => b.variance < 0) && <span className="text-xs text-green-600">● Under budget</span>}
+            {budget.data?.some((b:any) => b.variance > 0) && <span className="text-xs text-red-600">● Over budget</span>}
             {(!budget.data?.length) && <span className="text-xs text-gray-400">No budget data</span>}
           </div>
         </SectionCard>
@@ -647,7 +647,7 @@ export function CEODashboard() {
                 </tr>
               </thead>
               <tbody>
-                {(showAllAudit ? audit.data || [] : (audit.data || []).slice(0, 8)).map(a => (
+                {(showAllAudit ? audit.data || [] : (audit.data || []).slice(0, 8)).map((a:any) => (
                   <tr key={a.id} className="border-t border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/30">
                     <td className="px-3 py-2 text-gray-500 whitespace-nowrap">
                       {new Date(a.created_at).toLocaleDateString('en-PK', { day: '2-digit', month: 'short', year: 'numeric' })}
@@ -679,7 +679,7 @@ export function CEODashboard() {
 
         <SectionCard title="Multi-Currency Summary">
           <div className="space-y-3">
-            {(cash.data || []).filter(a => a.currency !== 'PKR').slice(0, 4).map(acc => (
+            {(cash.data || []).filter((a:any) => a.currency !== 'PKR').slice(0, 4).map((acc:any) => (
               <div key={acc.id} className="p-3 bg-gray-50 dark:bg-gray-900/30 rounded-lg border border-gray-200 dark:border-gray-700">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -691,7 +691,7 @@ export function CEODashboard() {
                 <p className="text-[10px] text-gray-500 mt-1">{acc.currency} → PKR (consolidated on statements)</p>
               </div>
             ))}
-            {!(cash.data || []).some(a => a.currency !== 'PKR') && (
+            {!(cash.data || []).some((a:any) => a.currency !== 'PKR') && (
               <p className="text-xs text-gray-400 text-center py-6">No foreign currency accounts</p>
             )}
           </div>

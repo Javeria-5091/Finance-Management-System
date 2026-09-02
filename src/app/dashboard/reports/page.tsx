@@ -306,7 +306,7 @@ export default function ReportsLandingPage() {
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white tracking-tight">Reports</h2>
         </div>
         <p className="text-sm text-gray-500 dark:text-gray-400 ml-10">
-          Formal financial statements, operational reports, and management analysis - CEO Spec v1.3 Section 13
+          Formal financial statements, operational reports, and management analysis - CEO 
         </p>
       </div>
  

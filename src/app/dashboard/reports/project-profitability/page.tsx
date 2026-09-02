@@ -106,7 +106,7 @@ export default function ProjectProfitabilityPage() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
             {/* Cost Structure */}
             <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
-              <h4 className="text-xs font-bold uppercase text-gray-500 mb-4">Cost Structure (Spec 6.3)</h4>
+              <h4 className="text-xs font-bold uppercase text-gray-500 mb-4">Cost Structure </h4>
               <ResponsiveContainer width="100%" height={220}>
                 <BarChart data={costStructureData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
@@ -168,7 +168,7 @@ export default function ProjectProfitabilityPage() {
           {/* Main Table */}
           <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
             <div className="flex items-center justify-between px-5 py-3 bg-gray-50 dark:bg-gray-900/40">
-              <h4 className="text-xs font-bold uppercase text-gray-500">All Projects — Spec 6.3: Direct costs and allocated overhead labeled separately</h4>
+              <h4 className="text-xs font-bold uppercase text-gray-500">All Projects — : Direct costs and allocated overhead labeled separately</h4>
               <div className="flex gap-1">
                 {(['profit', 'revenue', 'margin'] as const).map(s => (
                   <button key={s} onClick={() => setSortBy(s)}

@@ -367,7 +367,7 @@ export const getOwnershipHistory = async (orgId: string) => {
 };
 
 export const addOwnershipEntry = async (orgId: string, payload: any) => {
-  const { data, error } = await db.from('ownership_history').insert({ ...payload, organization_id: orgId }).select().single();
+  const { data, error } = await db.rpc('add_ownership_history_atomic', { p_owner_id: payload.owner_id, p_percentage: payload.ownership_percentage, p_effective_from: payload.effective_from, p_change_reason: payload.change_reason, p_changed_by: payload.changed_by });
   return { data, error };
 };
 

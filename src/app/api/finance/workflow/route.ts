@@ -14,8 +14,8 @@ const MODULES: Record<string, {
     periodIdField: 'period_id', periodDateField: 'expense_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'EXPENSE_UPDATE' },
-      verify:  { from: ['SUBMITTED'], perm: 'APPROVE_EXPENSE' },
-      approve: { from: ['SUBMITTED', 'VERIFIED'], perm: 'APPROVE_EXPENSE' },
+      verify:  { from: ['SUBMITTED'], perm: 'EXPENSE_APPROVE' },
+      approve: { from: ['SUBMITTED', 'VERIFIED'], perm: 'EXPENSE_APPROVE' },
       reject:  { from: ['SUBMITTED', 'VERIFIED'], perm: 'EXPENSE_UPDATE' },
       reverse: { from: ['POSTED'], perm: 'EXPENSE_UPDATE' },
       reopen:  { from: ['REJECTED'], perm: 'EXPENSE_UPDATE' },
@@ -26,8 +26,8 @@ const MODULES: Record<string, {
     periodIdField: 'period_id', periodDateField: 'income_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'INCOME_UPDATE' },
-      verify:  { from: ['SUBMITTED'], perm: 'APPROVE_INCOME' },
-      approve: { from: ['SUBMITTED', 'VERIFIED'], perm: 'APPROVE_INCOME' },
+      verify:  { from: ['SUBMITTED'], perm: 'INCOME_APPROVE' },
+      approve: { from: ['SUBMITTED', 'VERIFIED'], perm: 'INCOME_APPROVE' },
       reject:  { from: ['SUBMITTED', 'VERIFIED'], perm: 'INCOME_UPDATE' },
       reverse: { from: ['POSTED'], perm: 'INCOME_UPDATE' },
       reopen:  { from: ['REJECTED'], perm: 'INCOME_UPDATE' },
@@ -38,7 +38,7 @@ const MODULES: Record<string, {
     periodIdField: 'period_id', periodDateField: 'issue_date',
     transitions: {
       submit:  { from: ['DRAFT'], perm: 'INVOICE_UPDATE' },
-      approve: { from: ['SUBMITTED'], perm: 'APPROVE_INVOICE' },
+      approve: { from: ['SUBMITTED'], perm: 'INVOICE_APPROVE' },
       issue:   { from: ['APPROVED'], perm: 'INVOICE_UPDATE' },
       reject:  { from: ['SUBMITTED'], perm: 'INVOICE_UPDATE' },
       reopen:  { from: ['REJECTED'], perm: 'INVOICE_UPDATE' },
@@ -48,7 +48,7 @@ const MODULES: Record<string, {
       // maker-checker, no audit log). Routing VOID through this table gives
       // it the same permission check, org scoping, TOCTOU-safe conditional
       // update, and audit.log_action() entry as every other transition.
-      void:    { from: ['DRAFT', 'SUBMITTED', 'APPROVED', 'ISSUED'], perm: 'INVOICE_UPDATE' },
+      void:    { from: ['DRAFT', 'SUBMITTED', 'APPROVED'], perm: 'INVOICE_UPDATE' },
     },
   },
   vendor_bill: {
@@ -188,6 +188,30 @@ export async function POST(req: NextRequest) {
  
     const config = MODULES[module];
     if (!config) return NextResponse.json({ error: `Unknown module: ${module}` }, { status: 400 });
+
+    // Vendor-bill posting is a GL operation, not a status-only transition.
+    // Keep the generic workflow for submit/verify/approve, but route Post to
+    // the hardened posting endpoint so WHT, budget checks and atomic GL
+    // posting are actually executed from the UI.
+    if (module === 'vendor_bill' && action === 'post') {
+      if (auth.role !== 'CEO') {
+        const { data: perms } = await supabase.rpc('get_my_permissions');
+        const hasPerm = Array.isArray(perms)
+          ? perms.some((p: any) => (p.permission_code || p.code) === 'VENDOR_BILL_POST' || (p.permission_code || p.code) === 'POST_VENDOR_BILLS')
+          : !!(perms && typeof perms === 'object' && (perms.VENDOR_BILL_POST || perms.POST_VENDOR_BILLS));
+        if (!hasPerm) return NextResponse.json({ error: 'Permission denied: VENDOR_BILL_POST required' }, { status: 403 });
+      }
+      const { data: bill } = await supabase.schema('finance').from('vendor_bills').select('id,status').eq('id', recordId).eq('organization_id', auth.orgId).maybeSingle();
+      if (!bill) return NextResponse.json({ error: 'Vendor bill not found' }, { status: 404 });
+      if (bill.status !== 'APPROVED') return NextResponse.json({ error: 'Only APPROVED vendor bills can be posted' }, { status: 409 });
+      const res = await fetch(new URL('/api/finance/post-vendor-bill', req.url), {
+        method: 'POST', headers: { 'Content-Type': 'application/json', cookie: req.headers.get('cookie') || '' },
+        body: JSON.stringify({ vendorBillId: recordId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      return NextResponse.json(data, { status: res.status });
+    }
+
     const transition = config.transitions[action];
     if (!transition) return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
  

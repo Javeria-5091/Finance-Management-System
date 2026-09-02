@@ -127,6 +127,13 @@ const navGroups: NavGroup[] = [
     ],
   },
   {
+  id: "platform",
+  label: "Platform",
+  items: [
+    { id: "platform-settlements", label: "Platform Settlements", icon: "CreditCard", path: "/dashboard/platform-settlements", perm: "REPORT_READ" },
+  ],
+},
+  {
     id: "banking",
     label: "Banking & Cash",
     items: [
@@ -225,6 +232,8 @@ const navGroups: NavGroup[] = [
       { id: "exchange-rates", label: "Exchange Rates", icon: "Scale", path: "/dashboard/settings/exchange-rates", perm: "SETTINGS_READ" },
       { id: "platform-fees", label: "Platform Fees", icon: "ReceiptPercent", path: "/dashboard/settings/platform-fees", perm: "SETTINGS_READ" },
       { id: "notifications", label: "Notifications", icon: "Bell", path: "/dashboard/settings/notifications", perm: "SETTINGS_READ" },
+      { id: "mfa", label: "MFA", icon: "ShieldCheck", path: "/dashboard/settings/mfa", perm: "SETTINGS_READ" },
+      { id: "ownership-reserves", label: "Ownership & Reserves", icon: "PiggyBank", path: "/dashboard/settings/ownership-reserves", perm: "SETTINGS_READ" },
       { id: "approval-limits", label: "Approval Limits", icon: "ShieldAlert", path: "/dashboard/settings/approval-limits", perm: "ADMIN_USERS" },
       { id: "permission-overrides", label: "Permission Overrides", icon: "KeyRound", path: "/dashboard/settings/permission-overrides", perm: "ADMIN_USERS" },
       { id: "delegations", label: "Delegations", icon: "UserCog", path: "/dashboard/settings/delegations", perm: "ADMIN_USERS" },

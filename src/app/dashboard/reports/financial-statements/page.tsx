@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -14,6 +14,7 @@ import KPICard from '@/components/reports/KPICard';
 import EmptyReportState from '@/components/reports/EmptyReportState';
 import { FileText, RefreshCw, TrendingUp, TrendingDown, BarChart3, DollarSign, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 import type { PLData, BSData, CFData, SOCEData, ReportFilters } from '@/types/reports.types';
+import { getFiscalYears } from '@/services/fiscal-year.service';
 
 const f = (n: number) => new Intl.NumberFormat('en-PK', { style: 'currency', currency: 'PKR', minimumFractionDigits: 0 }).format(n || 0);
 const sumArr = (arr?: { total?: number }[]) => (Array.isArray(arr) ? arr : []).reduce((s, a) => s + (Number(a?.total) || 0), 0);
@@ -25,12 +26,17 @@ type TabId = 'pl' | 'bs' | 'cf' | 'soce';
 export default function FinancialStatementsPage() {
   const [tab, setTab] = useState<TabId>('pl');
   const [filters, setFilters] = useState<ReportFilters>({});
+  const { data: fiscalYears = [] } = useQuery({ queryKey: ['statement-fiscal-years'], queryFn: getFiscalYears });
+  const activeFy = fiscalYears.find((fy: any) => fy.status === 'OPEN') || fiscalYears[0];
+  const effectiveStart = filters.startDate || activeFy?.start_date;
+  const effectiveEnd = filters.endDate || activeFy?.end_date;
   const [dataAsOf] = useState(new Date().toISOString());
+  useEffect(() => { if (!filters.startDate && !filters.endDate && activeFy) setFilters({ startDate: activeFy.start_date, endDate: activeFy.end_date }); }, [activeFy, filters.startDate, filters.endDate]);
 
-  const pl = useQuery<PLData, Error>({ queryKey: ['pl', filters.startDate, filters.endDate], queryFn: () => getProfitAndLoss(filters.startDate, filters.endDate), enabled: tab === 'pl' });
-  const bs = useQuery<BSData, Error>({ queryKey: ['bs', filters.endDate], queryFn: () => getBalanceSheet(filters.endDate), enabled: tab === 'bs' });
-  const cf = useQuery<CFData, Error>({ queryKey: ['cf', filters.startDate, filters.endDate], queryFn: () => getCashFlow(filters.startDate, filters.endDate), enabled: tab === 'cf' });
-  const soce = useQuery<SOCEData, Error>({ queryKey: ['soce', filters.startDate, filters.endDate], queryFn: () => getStatementOfChangesInEquity(filters.startDate, filters.endDate), enabled: tab === 'soce' });
+  const pl = useQuery<PLData, Error>({ queryKey: ['pl', filters.startDate, filters.endDate], queryFn: () => getProfitAndLoss(effectiveStart, effectiveEnd), enabled: tab === 'pl' && !!effectiveStart && !!effectiveEnd });
+  const bs = useQuery<BSData, Error>({ queryKey: ['bs', filters.endDate], queryFn: () => getBalanceSheet(effectiveEnd), enabled: tab === 'bs' && !!effectiveEnd });
+  const cf = useQuery<CFData, Error>({ queryKey: ['cf', filters.startDate, filters.endDate], queryFn: () => getCashFlow(effectiveStart, effectiveEnd), enabled: tab === 'cf' && !!effectiveStart && !!effectiveEnd });
+  const soce = useQuery<SOCEData, Error>({ queryKey: ['soce', filters.startDate, filters.endDate], queryFn: () => getStatementOfChangesInEquity(effectiveStart, effectiveEnd), enabled: tab === 'soce' && !!effectiveStart && !!effectiveEnd });
 
   const isLoading = tab === 'pl' ? pl.isLoading : tab === 'bs' ? bs.isLoading : tab === 'cf' ? cf.isLoading : soce.isLoading;
 
@@ -79,7 +85,7 @@ export default function FinancialStatementsPage() {
         period={periodLabel}
         currency={filters.currency || 'PKR'}
         dataAsOf={dataAsOf}
-        filters={activeFilters}
+        filters={activeFilters.length ? activeFilters : (activeFy ? [{ label: 'Fiscal Year', value: activeFy.name }] : [])}
         reconciled={true}
         basis="Accrual Basis"
         actions={

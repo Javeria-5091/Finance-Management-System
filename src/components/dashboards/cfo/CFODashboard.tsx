@@ -245,7 +245,7 @@ export function CFODashboard() {
     reconLookup.set(r.account_id, r.unreconciled_count === 0 ? 100 : 0);
   });
   (reconSummary || []).forEach((r: any) => {
-    reconLookup.set(r.financial_account_id, Math.round(r.reconciliation_pct || 0));
+    reconLookup.set(r.financial_account_id, Math.round(Number(r.reconciliation_pct ?? 0)));
   });
 
   return (
@@ -316,13 +316,13 @@ export function CFODashboard() {
                 <p className="text-sm text-gray-400 text-center py-8">No financial accounts configured</p>
               ) : (financialAccounts || []).map((acc: any) => {
                 // ✅ FIXED: Uses real reconciliation % from RPC, NOT Math.random()
-                const matchedPct = reconLookup.get(acc.id) ?? 0;
-                const totalLines = (reconSummary || []).find((r: any) => r.financial_account_id === acc.id)?.total_lines || 0;
+                const matchedPct = reconLookup.get(acc.account_id) ?? 0;
+                const totalLines = Number((reconSummary || []).find((r: any) => r.financial_account_id === acc.account_id)?.total_lines || 0);
                 return (
                   <ReconciliationBar
                     matched={matchedPct}
                     total={totalLines || acc.opening_balance || 1}
-                    name={`${acc.account_name} (${acc.institution_type})`}
+                    name={`${acc.account_name} (${acc.institution_name})`}
                   />
                 );
               })}

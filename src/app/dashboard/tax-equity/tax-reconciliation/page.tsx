@@ -467,7 +467,7 @@ export default function TaxReconciliationPage() {
               <select value={createForm.fiscal_year_id} onChange={e => setCreateForm(p => ({ ...p, fiscal_year_id: e.target.value }))} className={inputCls}>
                 <option value="">Select...</option>
                 {fiscalYears?.map((fy: any) => (
-                  <option key={fy.name} value={fy.name}>{fy.year_label || fy.name}</option>
+                  <option key={fy.id} value={fy.id}>{fy.year_label || fy.name}</option>
                 ))}
               </select>
             </div>

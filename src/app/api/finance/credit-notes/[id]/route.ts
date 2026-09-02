@@ -122,7 +122,7 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const auth = await requirePermission('APPROVE_INVOICE');
+  const auth = await requirePermission('CREDIT_NOTE_POST');
   if (auth instanceof NextResponse) return auth;
   // H3 FIX: Enforce MFA for financial posting
   const mfaCheck = await enforceMFA(auth);

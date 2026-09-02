@@ -12,7 +12,7 @@ function getData<T = any>(res: any): T | null {
 export async function POST(req: NextRequest) {
   // ─── AUTH CHECK ───
   // FIXED: Use APPROVE permission, not CREATE — posting to GL requires approval-level access
-  const auth = await requirePermission('APPROVE_EXPENSE');
+  const auth = await requirePermission('EXPENSE_APPROVE');
   if (auth instanceof NextResponse) return auth;
   // H3 FIX: Enforce MFA for financial posting
   const mfaCheck = await enforceMFA(auth);
@@ -193,7 +193,11 @@ export async function POST(req: NextRequest) {
     // guessing.
     let expenseAccountId: string | null = null;
     let accountResolutionWarning: string | null = null;
-    if (expense.category) {
+    if (expense.account_id) {
+      const selected = getData(await supabase.schema('finance').from('chart_of_accounts').select('id,code,name').eq('id', expense.account_id).eq('organization_id', orgId).eq('is_active', true).maybeSingle());
+      if (selected) expenseAccountId = selected.id;
+    }
+    if (!expenseAccountId && expense.category) {
       const escapedCategory = expense.category.replace(/[%_]/g, '\\$&');
 
       const exactMatches = (await supabase
@@ -279,23 +283,38 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
  
+    // F-P1-15: if approved split coding exists, post each approved allocation
+    // to its selected account/project/cost center instead of guessing from the
+    // free-text category. A split must reconcile exactly to the expense total.
+    const { data: allocations, error: allocErr } = await supabase.schema('finance').from('expense_allocations')
+      .select('account_id,project_id,department_id,cost_center_id,amount,base_amount,description,line_number')
+      .eq('expense_id', expenseId).eq('organization_id', orgId).order('line_number');
+    if (allocErr) return NextResponse.json({ error: 'Failed to load expense split coding: ' + allocErr.message }, { status: 500 });
+    const splitTotal = (allocations || []).reduce((n: number, a: any) => n + Number(a.amount || 0), 0);
+    const hasValidSplit = (allocations || []).length > 0 && Math.abs(splitTotal - Number(expense.amount || 0)) < 0.01;
+    if ((allocations || []).length > 0 && !hasValidSplit) {
+      return NextResponse.json({ error: `Expense split coding total (${splitTotal.toFixed(2)}) must equal expense amount (${Number(expense.amount || 0).toFixed(2)}).` }, { status: 409 });
+    }
+
     // 6-9. Post via GL engine (BUG-001 FIX: use RPC with CORRECT signature)
     // The RPC creates header + lines + sets POSTED status atomically.
     // Previous code manually inserted header+lines then called RPC with wrong params.
-    const journalLines = [
-      {
-        account_id: expenseAccountId,
-        debit_amount: expense.amount,
-        credit_amount: 0,
-        description: `Expense: ${expense.title}`,
-      },
-      {
-        account_id: creditAccountId,
-        debit_amount: 0,
-        credit_amount: expense.amount,
-        description: `Payable for: ${expense.title}`,
-      },
-    ];
+    const journalLines = hasValidSplit
+      ? [
+          ...(allocations || []).map((a: any) => ({
+            account_id: a.account_id,
+            debit_amount: Number(a.amount || 0),
+            credit_amount: 0,
+            description: a.description || `Expense: ${expense.title} — split ${a.line_number}`,
+            project_id: a.project_id || null,
+            department_id: a.department_id || null,
+          })),
+          { account_id: creditAccountId, debit_amount: 0, credit_amount: Number(expense.amount), description: `Payable for: ${expense.title}` },
+        ]
+      : [
+          { account_id: expenseAccountId, debit_amount: expense.amount, credit_amount: 0, description: `Expense: ${expense.title}` },
+          { account_id: creditAccountId, debit_amount: 0, credit_amount: expense.amount, description: `Payable for: ${expense.title}` },
+        ];
  
     // BUG-002 FIX (Critical): use .schema('finance').rpc('post_journal_entry', ...)
     // — passing 'finance.post_journal_entry' as the rpc() name string is NOT

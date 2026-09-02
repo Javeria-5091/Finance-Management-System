@@ -131,7 +131,7 @@ export default function ApprovalLimitsPage() {
             <ShieldAlert size={22} className="text-amber-500" /> Approval Limits
           </h2>
           <p className="text-gray-500 text-sm">
-            Configurable monetary approval ceilings by role or individual user (spec 7.3). These are the
+            Configurable monetary approval ceilings by role or individual user. These are the
             values the system checks before falling back to a built-in default.
           </p>
         </div>

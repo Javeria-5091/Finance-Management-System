@@ -46,7 +46,7 @@ CREATE VIEW reporting.general_ledger AS
     account_code, account_name, account_type, normal_balance,
     line_description, debit_amount, credit_amount,
     base_debit, base_credit, currency, exchange_rate,
-    running_balance
+    running_balance, organization_id
   FROM reporting.general_ledger;
 
 -- Budget vs actual spending

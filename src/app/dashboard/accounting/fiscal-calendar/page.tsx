@@ -214,8 +214,8 @@ export default function FiscalCalendarPage() {
       if (d <= s) e.end_date = 'End date must be after start date.';
       else {
         const m = (d.getFullYear() - s.getFullYear()) * 12 + d.getMonth() - s.getMonth();
-        if (m < 1) e.end_date = 'Must be at least 1 month.';
-        if (m > 24) e.end_date = 'Cannot exceed 24 months.';
+        if (m !== 12 || s.getMonth() !== 6 || s.getDate() !== 1 || d.getMonth() !== 5 || d.getDate() !== 30)
+          e.end_date = 'Regular fiscal years must run from 1 July through 30 June (12 months).';
         if (m >= 1 && m <= 24 && fys.some(fy => s < new Date(fy.end_date) && d > new Date(fy.start_date)))
           e.end_date = 'Overlaps with an existing fiscal year.';
       }

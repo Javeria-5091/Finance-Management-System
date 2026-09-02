@@ -1786,6 +1786,15 @@ COMMENT ON FUNCTION "core"."transfer_ceo_role"("p_new_ceo_user_id" "uuid", "p_ou
 
 
 
+CREATE OR REPLACE FUNCTION "finance"."add_ownership_history_atomic"("p_owner_id" "uuid", "p_percentage" numeric, "p_effective_from" "date", "p_change_reason" "text", "p_changed_by" "uuid") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$ DECLARE v_org uuid:=core.current_user_org_id(); v_id uuid; BEGIN IF p_changed_by IS DISTINCT FROM auth.uid() OR NOT core.has_permission(auth.uid(),'SETTINGS_MANAGE') THEN RAISE EXCEPTION 'Access denied'; END IF; IF p_percentage<0 OR p_percentage>100 OR NULLIF(btrim(p_change_reason),'') IS NULL THEN RAISE EXCEPTION 'Invalid ownership change'; END IF; UPDATE finance.ownership_history SET effective_to=p_effective_from-1 WHERE owner_id=p_owner_id AND organization_id=v_org AND effective_from<p_effective_from AND effective_to IS NULL; INSERT INTO finance.ownership_history(owner_id,organization_id,ownership_percentage,effective_from,change_reason,changed_by) VALUES(p_owner_id,v_org,p_percentage,p_effective_from,p_change_reason,p_changed_by) RETURNING id INTO v_id; RETURN v_id; END; $$;
+
+
+ALTER FUNCTION "finance"."add_ownership_history_atomic"("p_owner_id" "uuid", "p_percentage" numeric, "p_effective_from" "date", "p_change_reason" "text", "p_changed_by" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
@@ -1829,7 +1838,7 @@ BEGIN
   SELECT COALESCE(SUM(pa.allocated_amount),0)
     INTO v_total_existing
   FROM finance.payment_allocations pa
-  WHERE pa.payment_receipt_id = p_payment_receipt_id;
+  WHERE pa.payment_receipt_id = p_payment_receipt_id AND pa.status = 'ACTIVE';
 
   v_total_new := 0;
 
@@ -1884,7 +1893,7 @@ BEGIN
     END IF;
 
     IF (v_alloc->>'amount')::numeric >
-       (COALESCE(v_invoice.total_amount,0) - COALESCE(v_invoice.amount_paid,0)) THEN
+       COALESCE(v_invoice.outstanding_amount,0) THEN
       RAISE EXCEPTION 'Allocation exceeds outstanding amount for invoice %', v_invoice.invoice_number;
     END IF;
 
@@ -1915,15 +1924,8 @@ BEGIN
       'amount', (v_alloc->>'amount')::numeric
     ));
 
-    UPDATE public.invoices
-    SET amount_paid = COALESCE(amount_paid,0) + (v_alloc->>'amount')::numeric,
-        status = CASE
-          WHEN COALESCE(amount_paid,0) + (v_alloc->>'amount')::numeric >= total_amount
-            THEN 'PAID'
-          ELSE 'PARTIALLY_PAID'
-        END
-    WHERE id = (v_alloc->>'invoice_id')::uuid
-      AND organization_id = p_organization_id;
+    -- Invoice amount/status are maintained exclusively by the allocation trigger,
+    -- which recomputes from ACTIVE allocations plus POSTED credit notes.
   END LOOP;
 
   v_new_paid := v_total_existing + v_total_new;
@@ -2330,55 +2332,13 @@ ALTER FUNCTION "finance"."auto_update_bill_status"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "finance"."auto_update_invoice_status"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
-DECLARE
-  v_outstanding      NUMERIC(18,2);
-  v_base_outstanding NUMERIC(18,2);
-  v_total            NUMERIC(18,2);
-  v_base_total       NUMERIC(18,2);
-  v_current_status   TEXT;
 BEGIN
-  -- Calculate outstanding (original currency and base/PKR currency)
-  -- AR-04 FIX: joined ONLY on ACTIVE allocations -- a REVERSED
-  -- allocation's allocated_amount is intentionally kept as an audit
-  -- trail, so without this filter a reversed row was still being summed
-  -- into "money paid", leaving outstanding_amount permanently stale
-  -- after any reversal.
-  SELECT
-    i.total_amount - COALESCE(SUM(pa.allocated_amount), 0),
-    i.base_total_amount - COALESCE(SUM(pa.base_allocated_amount), 0),
-    i.total_amount,
-    i.base_total_amount,
-    i.status
-  INTO v_outstanding, v_base_outstanding, v_total, v_base_total, v_current_status
-  FROM public.invoices i
-  LEFT JOIN finance.payment_allocations pa
-    ON pa.invoice_id = i.id AND pa.status = 'ACTIVE'
-  WHERE i.id = NEW.invoice_id
-  GROUP BY i.total_amount, i.base_total_amount, i.status;
-
-  -- AR-03 backstop guard (unchanged): only a payable invoice may have its
-  -- balance moved by an allocation insert/update.
-  IF TG_OP IN ('INSERT', 'UPDATE') AND v_current_status NOT IN ('ISSUED', 'PARTIALLY_PAID', 'OVERDUE') THEN
-    RAISE EXCEPTION 'Cannot allocate payment to invoice % -- it is % status. Only ISSUED, PARTIALLY_PAID, or OVERDUE invoices can receive payments.', NEW.invoice_id, v_current_status;
-  END IF;
-
-  UPDATE public.invoices SET
-    amount_paid              = v_total - v_outstanding,
-    base_amount_paid         = v_base_total - v_base_outstanding,   -- FIXED (was always 0)
-    outstanding_amount       = v_outstanding,
-    base_outstanding_amount  = v_base_outstanding,
-    status = CASE
-      WHEN v_outstanding <= 0 THEN 'PAID'
-      WHEN v_outstanding < v_total THEN 'PARTIALLY_PAID'
-      ELSE status
-    END
-  WHERE id = NEW.invoice_id;
-
-  RETURN NEW;
-END;
-$$;
+ IF TG_OP='UPDATE' AND OLD.status IS NOT DISTINCT FROM NEW.status AND OLD.allocated_amount IS NOT DISTINCT FROM NEW.allocated_amount THEN RETURN NEW; END IF;
+ PERFORM finance.recompute_invoice_ar_balance(NEW.invoice_id);
+ RETURN NEW;
+END; $$;
 
 
 ALTER FUNCTION "finance"."auto_update_invoice_status"() OWNER TO "postgres";
@@ -2657,96 +2617,17 @@ CREATE OR REPLACE FUNCTION "finance"."compute_tax_liability"("p_tax_recon_id" "u
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
-DECLARE
-    v_recon RECORD;
-    v_pbt NUMERIC(18,2) := 0;
-    v_total_adj NUMERIC(18,2) := 0;
-    v_taxable_income NUMERIC(18,2);
-    v_gross_tax NUMERIC(18,2) := 0;
-    v_remaining_income NUMERIC(18,2);
-    v_slab_income NUMERIC(18,2);
-    v_slab RECORD;
-    v_rule_status TEXT;
+DECLARE v_recon record; v_pbt numeric:=0; v_adj numeric:=0; v_taxable numeric:=0; v_tax numeric:=0; v_rem numeric:=0; v_slab record; v_income numeric;
 BEGIN
-    -- BUG-014 defense-in-depth: scope to the caller's organization at the database
-    -- level too, not only in the API route, matching the pattern used elsewhere
-    -- (e.g. finance.reverse_journal_entry) for server-side-enforced controls.
-    SELECT * INTO v_recon FROM finance.tax_reconciliations
-    WHERE id = p_tax_recon_id AND organization_id = core.current_user_org_id();
-    IF NOT FOUND THEN RAISE EXCEPTION 'Tax reconciliation not found or access denied'; END IF;
-
-    SELECT status INTO v_rule_status FROM finance.tax_rule_sets WHERE id = v_recon.tax_rule_set_id;
-    IF v_rule_status IS NULL THEN RAISE EXCEPTION 'Tax rule set not found'; END IF;
-    IF v_rule_status NOT IN ('APPROVED', 'LOCKED') THEN
-        RAISE EXCEPTION 'Tax rule set must be APPROVED or LOCKED, current: %', v_rule_status;
-    END IF;
-
-    -- BUG-015 FIX: PBT must be consolidated PKR (spec 5.12: PKR is the ledger and
-    -- fiscal-statement currency), so this uses base_credit/base_debit (the PKR-converted
-    -- amounts stored on every posted line) instead of credit_amount/debit_amount (the
-    -- original transaction-currency amounts). Mixing transaction-currency numerals
-    -- directly into PBT corrupted every downstream figure for any non-PKR activity.
-    -- PBT = Revenue Net - Expense Net (in base currency)
-    -- Revenue Net = credit - debit (revenue increases on credit side)
-    -- Expense Net = debit - credit (expenses increase on debit side)
-    SELECT
-        COALESCE(SUM(CASE WHEN coa.account_type IN ('REVENUE','OTHER_INCOME')
-                          THEN jl.base_credit - jl.base_debit ELSE 0 END), 0)
-        -
-        COALESCE(SUM(CASE WHEN coa.account_type IN ('OTHER_EXPENSE','OPERATING_EXPENSE','COST_OF_SALES')
-                          THEN jl.base_debit - jl.base_credit ELSE 0 END), 0)
-    INTO v_pbt
-    FROM finance.journal_lines jl
-    JOIN finance.journal_entries je ON je.id = jl.journal_entry_id
-    JOIN finance.chart_of_accounts coa ON coa.id = jl.account_id
-    JOIN finance.accounting_periods ap ON ap.id = je.period_id
-    WHERE ap.fiscal_year_id = v_recon.fiscal_year_id
-      AND je.status = 'POSTED'
-      AND coa.account_type IN ('REVENUE','COST_OF_SALES','OPERATING_EXPENSE','OTHER_INCOME','OTHER_EXPENSE');
-
-    -- Sum adjustments
-    SELECT COALESCE(SUM(amount), 0) INTO v_total_adj
-    FROM finance.tax_adjustments
-    WHERE tax_reconciliation_id = p_tax_recon_id;
-
-    v_taxable_income := v_pbt + v_total_adj;
-
-    -- Apply Tax Slabs progressively
-    v_remaining_income := v_taxable_income;
-
-    FOR v_slab IN
-        SELECT * FROM finance.tax_slabs
-        WHERE tax_rule_set_id = v_recon.tax_rule_set_id
-        ORDER BY sort_order ASC, income_from ASC
-    LOOP
-        IF v_remaining_income <= 0 THEN EXIT; END IF;
-
-        v_slab_income := LEAST(
-            v_remaining_income,
-            COALESCE(v_slab.income_to, 999999999999) - v_slab.income_from + 1
-        );
-        v_slab_income := GREATEST(v_slab_income, 0);
-
-        v_gross_tax := v_gross_tax + (v_slab_income * v_slab.tax_rate / 100.0) + v_slab.fixed_amount;
-        v_remaining_income := v_remaining_income - v_slab_income;
-    END LOOP;
-
-    UPDATE finance.tax_reconciliations SET
-         accounting_profit_before_tax = v_pbt,
-        taxable_income = v_taxable_income,
-        gross_tax_liability = v_gross_tax,
-        net_tax_payable = GREATEST(v_gross_tax - v_recon.withholding_credits - v_recon.advance_tax_credits - v_recon.other_tax_credits, 0),
-        profit_after_tax = v_pbt - GREATEST(v_gross_tax - v_recon.withholding_credits - v_recon.advance_tax_credits - v_recon.other_tax_credits, 0),
-        effective_tax_rate = CASE 
-            WHEN v_pbt > 0 
-            THEN ROUND(GREATEST(v_gross_tax - v_recon.withholding_credits - v_recon.advance_tax_credits - v_recon.other_tax_credits, 0) / v_pbt * 100, 2) 
-            ELSE 0 
-        END,
-        status = 'CALCULATED',
-        updated_at = NOW()
-    WHERE id = p_tax_recon_id;
-END;
- $$;
+ IF NOT core.has_permission(auth.uid(),'TAX_MANAGE') THEN RAISE EXCEPTION 'TAX_MANAGE permission required'; END IF;
+ SELECT * INTO v_recon FROM finance.tax_reconciliations WHERE id=p_tax_recon_id AND organization_id=core.current_user_org_id() FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Tax reconciliation not found or access denied'; END IF;
+ IF v_recon.status NOT IN ('DRAFT','CALCULATED') THEN RAISE EXCEPTION 'Tax reconciliation status % cannot be recomputed',v_recon.status; END IF;
+ SELECT COALESCE(SUM(CASE WHEN coa.account_type IN ('REVENUE','OTHER_INCOME') THEN jl.base_credit-jl.base_debit ELSE 0 END),0)-COALESCE(SUM(CASE WHEN coa.account_type IN ('OTHER_EXPENSE','OPERATING_EXPENSE','COST_OF_SALES') THEN jl.base_debit-jl.base_credit ELSE 0 END),0) INTO v_pbt FROM finance.journal_lines jl JOIN finance.journal_entries je ON je.id=jl.journal_entry_id JOIN finance.chart_of_accounts coa ON coa.id=jl.account_id JOIN finance.accounting_periods ap ON ap.id=je.period_id WHERE ap.fiscal_year_id=v_recon.fiscal_year_id AND je.organization_id=v_recon.organization_id AND je.status IN ('POSTED','REVERSED');
+ SELECT COALESCE(SUM(amount),0) INTO v_adj FROM finance.tax_adjustments WHERE tax_reconciliation_id=p_tax_recon_id; v_taxable:=v_pbt+v_adj; v_rem:=v_taxable;
+ FOR v_slab IN SELECT * FROM finance.tax_slabs WHERE tax_rule_set_id=v_recon.tax_rule_set_id ORDER BY sort_order,income_from LOOP EXIT WHEN v_rem<=0; v_income:=LEAST(v_rem,COALESCE(v_slab.income_to,999999999999)-v_slab.income_from+1); v_tax:=v_tax+GREATEST(v_income,0)*v_slab.tax_rate/100.0+v_slab.fixed_amount; v_rem:=v_rem-v_income; END LOOP;
+ UPDATE finance.tax_reconciliations SET accounting_profit_before_tax=v_pbt,taxable_income=v_taxable,gross_tax_liability=v_tax,net_tax_payable=GREATEST(v_tax-COALESCE(v_recon.withholding_credits,0)-COALESCE(v_recon.advance_tax_credits,0)-COALESCE(v_recon.other_tax_credits,0),0),profit_after_tax=v_pbt-GREATEST(v_tax-COALESCE(v_recon.withholding_credits,0)-COALESCE(v_recon.advance_tax_credits,0)-COALESCE(v_recon.other_tax_credits,0),0),effective_tax_rate=CASE WHEN v_pbt>0 THEN ROUND(GREATEST(v_tax-COALESCE(v_recon.withholding_credits,0)-COALESCE(v_recon.advance_tax_credits,0)-COALESCE(v_recon.other_tax_credits,0),0)/v_pbt*100,2) ELSE 0 END,status='CALCULATED',updated_at=now() WHERE id=p_tax_recon_id;
+END; $$;
 
 
 ALTER FUNCTION "finance"."compute_tax_liability"("p_tax_recon_id" "uuid") OWNER TO "postgres";
@@ -2809,75 +2690,7 @@ COMMENT ON FUNCTION "finance"."create_budget_commitment"("p_budget_id" "uuid", "
 CREATE OR REPLACE FUNCTION "finance"."create_fiscal_year_with_periods"("p_name" "text", "p_start_date" "date", "p_end_date" "date", "p_description" "text" DEFAULT NULL::"text", "p_created_by" "uuid" DEFAULT NULL::"uuid") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
-    AS $$
-DECLARE
-  v_fy_id uuid;
-  v_month_count integer;
-  v_user_id uuid := COALESCE(p_created_by, auth.uid());
-  v_org_id uuid := core.current_user_org_id();
-BEGIN
-  IF v_org_id IS NULL THEN
-    RAISE EXCEPTION 'Organization context is required';
-  END IF;
-
-  IF v_user_id IS NULL THEN
-    RAISE EXCEPTION 'Authenticated user is required';
-  END IF;
-
-  IF p_end_date <= p_start_date THEN
-    RAISE EXCEPTION 'End date must be after start date';
-  END IF;
-
-  v_month_count :=
-    (EXTRACT(YEAR FROM p_end_date) - EXTRACT(YEAR FROM p_start_date)) * 12
-    + EXTRACT(MONTH FROM p_end_date) - EXTRACT(MONTH FROM p_start_date) + 1;
-
-  IF v_month_count < 1 OR v_month_count > 24 THEN
-    RAISE EXCEPTION 'Fiscal year must be between 1 and 24 months';
-  END IF;
-
-  IF EXISTS (
-    SELECT 1
-    FROM finance.fiscal_years fy
-    WHERE fy.organization_id = v_org_id
-      AND p_start_date < fy.end_date
-      AND p_end_date > fy.start_date
-  ) THEN
-    RAISE EXCEPTION 'Overlaps with an existing fiscal year in this organization';
-  END IF;
-
-  PERFORM set_config('app.current_user_id', v_user_id::text, true);
-
-  INSERT INTO finance.fiscal_years
-    (name, start_date, end_date, description, created_by, organization_id)
-  VALUES
-    (p_name, p_start_date, p_end_date, p_description, v_user_id, v_org_id)
-  RETURNING id INTO v_fy_id;
-
-  INSERT INTO finance.accounting_periods
-    (fiscal_year_id, period_number, name, start_date, end_date,
-     status, created_by, organization_id)
-  SELECT
-    v_fy_id,
-    gs.period_num,
-    TO_CHAR(gs.month_start, 'Month YYYY'),
-    gs.month_start,
-    LEAST(
-      (gs.month_start + INTERVAL '1 month' - INTERVAL '1 day')::date,
-      p_end_date
-    ),
-    'PENDING',
-    v_user_id,
-    v_org_id
-  FROM (
-    SELECT
-      generate_series(1, v_month_count) AS period_num,
-      (p_start_date + (generate_series(1, v_month_count) - 1) * INTERVAL '1 month')::date AS month_start
-  ) gs;
-
-  RETURN v_fy_id;
-END;
-$$;
+    AS $$ DECLARE v_id uuid; v_user uuid:=COALESCE(p_created_by,auth.uid()); v_org uuid:=core.current_user_org_id(); v_months int; BEGIN IF v_org IS NULL OR v_user IS NULL THEN RAISE EXCEPTION 'Organization and user context required'; END IF; IF p_end_date<=p_start_date THEN RAISE EXCEPTION 'End date must be after start date'; END IF; IF EXTRACT(MONTH FROM p_start_date)<>7 OR EXTRACT(DAY FROM p_start_date)<>1 OR EXTRACT(MONTH FROM p_end_date)<>6 OR EXTRACT(DAY FROM p_end_date)<>30 THEN RAISE EXCEPTION 'Regular fiscal years must run from 1 July through 30 June'; END IF; v_months:=(EXTRACT(YEAR FROM p_end_date)-EXTRACT(YEAR FROM p_start_date))*12+EXTRACT(MONTH FROM p_end_date)-EXTRACT(MONTH FROM p_start_date)+1; IF v_months<>12 THEN RAISE EXCEPTION 'Regular fiscal year must contain exactly 12 months'; END IF; IF EXISTS(SELECT 1 FROM finance.fiscal_years fy WHERE fy.organization_id=v_org AND p_start_date<fy.end_date AND p_end_date>fy.start_date) THEN RAISE EXCEPTION 'Overlaps with an existing fiscal year in this organization'; END IF; INSERT INTO finance.fiscal_years(name,start_date,end_date,description,created_by,organization_id) VALUES(p_name,p_start_date,p_end_date,p_description,v_user,v_org) RETURNING id INTO v_id; INSERT INTO finance.accounting_periods(fiscal_year_id,period_number,name,start_date,end_date,status,created_by,organization_id) SELECT v_id,g,TO_CHAR(ms,'Month YYYY'),ms,LEAST((ms+INTERVAL '1 month'-INTERVAL '1 day')::date,p_end_date),'PENDING',v_user,v_org FROM (SELECT generate_series(1,12) g,(p_start_date+(generate_series(1,12)-1)*INTERVAL '1 month')::date ms) x; RETURN v_id; END; $$;
 
 
 ALTER FUNCTION "finance"."create_fiscal_year_with_periods"("p_name" "text", "p_start_date" "date", "p_end_date" "date", "p_description" "text", "p_created_by" "uuid") OWNER TO "postgres";
@@ -3395,6 +3208,15 @@ ALTER FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id
 
 COMMENT ON FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") IS 'AP-05 fix: creates a finance.vendor_payment_batches row plus one finance.vendor_payments row per vendor (is_batch=true, batch_id set) and one finance.vendor_payment_batch_lines row per vendor, all in a single transaction, with basic risk_flags populated. Replaces the previous batches/route.ts, which never touched any of these tables and instead hardcoded is_batch:false onto a single-vendor payment.';
 
+
+
+CREATE OR REPLACE FUNCTION "finance"."credit_note_ar_balance_trigger"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$ BEGIN IF NEW.invoice_id IS NOT NULL THEN PERFORM finance.recompute_invoice_ar_balance(NEW.invoice_id); END IF; RETURN NEW; END; $$;
+
+
+ALTER FUNCTION "finance"."credit_note_ar_balance_trigger"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."derive_credit_note_base_amount"() RETURNS "trigger"
@@ -5688,87 +5510,26 @@ CREATE OR REPLACE FUNCTION "finance"."post_credit_note_atomic"("p_cn_id" "uuid",
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
-DECLARE
-  v_org uuid := core.current_user_org_id();
-  v_cn record;
-  v_invoice record;
-  v_ar uuid;
-  v_revenue uuid;
-  v_journal_id uuid;
-  v_reference text;
-  v_new_outstanding numeric(18,2);
-  v_new_base_outstanding numeric(18,2);
-  v_new_status text;
-  v_lines jsonb;
+DECLARE v_org uuid:=core.current_user_org_id(); v_cn record; v_invoice record; v_ar uuid; v_revenue uuid; v_journal_id uuid; v_lines jsonb;
 BEGIN
-  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
-    RAISE EXCEPTION 'Access denied';
-  END IF;
-
-  SELECT * INTO v_cn
-  FROM finance.credit_notes
-  WHERE id = p_cn_id AND organization_id = v_org
-  FOR UPDATE;
-  IF NOT FOUND THEN RAISE EXCEPTION 'Credit note not found or access denied'; END IF;
-  IF v_cn.status <> 'APPROVED' THEN RAISE EXCEPTION 'Only APPROVED credit notes can be posted'; END IF;
-  IF v_cn.invoice_id IS NULL THEN RAISE EXCEPTION 'Only invoice credit notes are supported by this AR posting flow'; END IF;
-
-  SELECT id, total_amount, outstanding_amount, base_outstanding_amount, currency, exchange_rate, organization_id, status
-    INTO v_invoice
-  FROM public.invoices
-  WHERE id = v_cn.invoice_id AND organization_id = v_org
-  FOR UPDATE;
-  IF NOT FOUND THEN RAISE EXCEPTION 'Linked invoice not found or access denied'; END IF;
-  IF v_cn.amount > COALESCE(v_invoice.outstanding_amount, 0) + 0.01 THEN
-    RAISE EXCEPTION 'Credit note amount % exceeds invoice outstanding amount %', v_cn.amount, v_invoice.outstanding_amount;
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM finance.accounting_periods WHERE id=p_period_id AND organization_id=v_org AND status='OPEN') THEN
-    RAISE EXCEPTION 'Posting period is not OPEN';
-  END IF;
-
-  SELECT id INTO v_ar FROM finance.chart_of_accounts
-  WHERE code='1210' AND account_type='ASSET' AND is_active=true AND organization_id=v_org
-  LIMIT 1;
-  SELECT id INTO v_revenue FROM finance.chart_of_accounts
-  WHERE code='4110' AND account_type='REVENUE' AND is_active=true AND organization_id=v_org
-  LIMIT 1;
-  IF v_ar IS NULL OR v_revenue IS NULL THEN RAISE EXCEPTION 'Required AR/Revenue control accounts are not configured for this organization'; END IF;
-
-  IF EXISTS (SELECT 1 FROM finance.journal_entries WHERE source_type='CREDIT_NOTE' AND source_id=p_cn_id AND organization_id=v_org) THEN
-    RAISE EXCEPTION 'Credit note is already posted';
-  END IF;
-
-  v_lines := jsonb_build_array(
-    jsonb_build_object('account_id',v_revenue,'debit_amount',v_cn.amount,'credit_amount',0,'description','Revenue reversal: Credit Note '||coalesce(v_cn.credit_note_number,p_cn_id::text)),
-    jsonb_build_object('account_id',v_ar,'debit_amount',0,'credit_amount',v_cn.amount,'description','Receivable reduction: Credit Note '||coalesce(v_cn.credit_note_number,p_cn_id::text))
-  );
-
-  v_journal_id := finance.post_journal_entry(
-    'Credit Note: '||coalesce(v_cn.credit_note_number,p_cn_id::text),
-    p_transaction_date,p_period_id,v_lines,v_cn.currency,coalesce(v_cn.exchange_rate,1),'CREDIT_NOTE',p_cn_id,NULL,NULL
-  );
-
-  v_new_outstanding := greatest(0, coalesce(v_invoice.outstanding_amount,0) - v_cn.amount);
-  v_new_base_outstanding := greatest(0, coalesce(v_invoice.base_outstanding_amount,0) - (v_cn.amount * coalesce(v_invoice.exchange_rate,1)));
-  v_new_status := CASE WHEN v_new_outstanding <= 0.01 THEN 'CREDITED' ELSE v_invoice.status END;
-
-  UPDATE public.invoices
-  SET outstanding_amount=v_new_outstanding,
-      base_outstanding_amount=v_new_base_outstanding,
-      status=v_new_status
-  WHERE id=v_invoice.id AND organization_id=v_org;
-
-  UPDATE finance.credit_notes
-  SET status='POSTED', journal_entry_id=v_journal_id, posted_by=auth.uid(), posted_at=now(), updated_at=now()
-  WHERE id=p_cn_id AND organization_id=v_org AND status='APPROVED';
-
-  IF NOT FOUND THEN RAISE EXCEPTION 'Credit note status update failed'; END IF;
-
-  SELECT reference INTO v_reference FROM finance.journal_entries WHERE id=v_journal_id;
-  RETURN jsonb_build_object('journal_id',v_journal_id,'reference',v_reference,'outstanding_amount',v_new_outstanding);
-END;
-$$;
+ IF v_org IS NULL OR NOT(core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Access denied'; END IF;
+ SELECT * INTO v_cn FROM finance.credit_notes WHERE id=p_cn_id AND organization_id=v_org FOR UPDATE;
+ IF NOT FOUND OR v_cn.status<>'APPROVED' THEN RAISE EXCEPTION 'Only APPROVED credit notes can be posted'; END IF;
+ SELECT * INTO v_invoice FROM public.invoices WHERE id=v_cn.invoice_id AND organization_id=v_org FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Linked invoice not found'; END IF;
+ IF v_cn.amount>COALESCE(v_invoice.outstanding_amount,0)+0.01 THEN RAISE EXCEPTION 'Credit note amount exceeds invoice outstanding amount'; END IF;
+ IF NOT EXISTS(SELECT 1 FROM finance.accounting_periods WHERE id=p_period_id AND organization_id=v_org AND status='OPEN') THEN RAISE EXCEPTION 'Posting period is not OPEN'; END IF;
+ SELECT id INTO v_ar FROM finance.chart_of_accounts WHERE code='1210' AND account_type='ASSET' AND is_active AND organization_id=v_org LIMIT 1;
+ SELECT id INTO v_revenue FROM finance.chart_of_accounts WHERE code='4110' AND account_type='REVENUE' AND is_active AND organization_id=v_org LIMIT 1;
+ IF v_ar IS NULL OR v_revenue IS NULL THEN RAISE EXCEPTION 'Required AR/Revenue accounts are not configured'; END IF;
+ IF EXISTS(SELECT 1 FROM finance.journal_entries WHERE source_type='CREDIT_NOTE' AND source_id=p_cn_id AND organization_id=v_org) THEN RAISE EXCEPTION 'Credit note is already posted'; END IF;
+ v_lines:=jsonb_build_array(jsonb_build_object('account_id',v_revenue,'debit_amount',v_cn.amount,'credit_amount',0,'description','Revenue reversal: Credit Note '||COALESCE(v_cn.credit_note_number,p_cn_id::text)),jsonb_build_object('account_id',v_ar,'debit_amount',0,'credit_amount',v_cn.amount,'description','Receivable reduction: Credit Note '||COALESCE(v_cn.credit_note_number,p_cn_id::text)));
+ v_journal_id:=finance.post_journal_entry('Credit Note: '||COALESCE(v_cn.credit_note_number,p_cn_id::text),p_transaction_date,p_period_id,v_lines,v_cn.currency,COALESCE(v_cn.exchange_rate,1),'CREDIT_NOTE',p_cn_id,NULL,NULL);
+ UPDATE finance.credit_notes SET status='POSTED',journal_entry_id=v_journal_id,posted_by=auth.uid(),posted_at=now(),updated_at=now() WHERE id=p_cn_id AND organization_id=v_org AND status='APPROVED';
+ IF NOT FOUND THEN RAISE EXCEPTION 'Credit note status update failed'; END IF;
+ PERFORM finance.recompute_invoice_ar_balance(v_invoice.id);
+ RETURN jsonb_build_object('journal_id',v_journal_id,'invoice_id',v_invoice.id,'outstanding_amount',(SELECT outstanding_amount FROM public.invoices WHERE id=v_invoice.id));
+END; $$;
 
 
 ALTER FUNCTION "finance"."post_credit_note_atomic"("p_cn_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
@@ -7953,6 +7714,27 @@ $$;
 ALTER FUNCTION "finance"."prevent_used_fiscal_year_deletion"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "finance"."recompute_invoice_ar_balance"("p_invoice_id" "uuid") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE v_invoice public.invoices%ROWTYPE; v_paid numeric(18,2); v_base_paid numeric(18,2); v_credits numeric(18,2); v_base_credits numeric(18,2); v_out numeric(18,2); v_base_out numeric(18,2); v_status text;
+BEGIN
+ SELECT * INTO v_invoice FROM public.invoices WHERE id=p_invoice_id FOR UPDATE;
+ IF NOT FOUND THEN RETURN; END IF;
+ SELECT COALESCE(SUM(allocated_amount),0),COALESCE(SUM(base_allocated_amount),0) INTO v_paid,v_base_paid FROM finance.payment_allocations WHERE invoice_id=p_invoice_id AND status='ACTIVE';
+ SELECT COALESCE(SUM(cn.amount),0),COALESCE(SUM(cn.amount*COALESCE(v_invoice.exchange_rate,1)),0) INTO v_credits,v_base_credits FROM finance.credit_notes cn WHERE cn.invoice_id=p_invoice_id AND cn.status='POSTED';
+ v_out:=GREATEST(COALESCE(v_invoice.total_amount,0)-v_paid-v_credits,0);
+ v_base_out:=GREATEST(COALESCE(v_invoice.base_total_amount,COALESCE(v_invoice.total_amount,0)*COALESCE(v_invoice.exchange_rate,1))-v_base_paid-v_base_credits,0);
+ v_status:=CASE WHEN v_out<=0.01 AND v_credits>0 THEN 'CREDITED' WHEN v_out<=0.01 THEN 'PAID' WHEN v_paid>0 OR v_credits>0 THEN CASE WHEN v_invoice.due_date IS NOT NULL AND v_invoice.due_date<CURRENT_DATE THEN 'OVERDUE' ELSE 'PARTIALLY_PAID' END ELSE CASE WHEN v_invoice.due_date IS NOT NULL AND v_invoice.due_date<CURRENT_DATE THEN 'OVERDUE' ELSE 'ISSUED' END END;
+ IF v_invoice.status IN ('DRAFT','VOID','CANCELLED') THEN v_status:=v_invoice.status; END IF;
+ UPDATE public.invoices SET amount_paid=v_paid,base_amount_paid=v_base_paid,outstanding_amount=v_out,base_outstanding_amount=v_base_out,status=v_status,updated_at=now() WHERE id=p_invoice_id;
+END; $$;
+
+
+ALTER FUNCTION "finance"."recompute_invoice_ar_balance"("p_invoice_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."release_budget_commitments_by_source"("p_source_type" "text", "p_source_reference" "text", "p_release_reason" "text") RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
@@ -8075,57 +7857,19 @@ CREATE OR REPLACE FUNCTION "finance"."reverse_credit_note_atomic"("p_credit_note
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
-DECLARE
-  v_org uuid := core.current_user_org_id();
-  v_cn record;
-  v_journal_id uuid;
-  v_reversal_id uuid;
+DECLARE v_org uuid:=core.current_user_org_id(); v_cn record; v_journal_id uuid; v_reversal_id uuid;
 BEGIN
-  IF v_org IS NULL OR NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
-    RAISE EXCEPTION 'Access denied';
-  END IF;
-  IF p_reason IS NULL OR btrim(p_reason) = '' THEN
-    RAISE EXCEPTION 'Reversal reason is mandatory';
-  END IF;
-
-  SELECT id, status, organization_id, invoice_id, amount
-    INTO v_cn
-  FROM finance.credit_notes
-  WHERE id = p_credit_note_id AND organization_id = v_org
-  FOR UPDATE;
-
-  IF NOT FOUND OR v_cn.status <> 'POSTED' THEN
-    RAISE EXCEPTION 'Posted credit note not found or access denied';
-  END IF;
-
-  SELECT id INTO v_journal_id
-  FROM finance.journal_entries
-  WHERE source_type = 'CREDIT_NOTE'
-    AND source_id = p_credit_note_id
-    AND organization_id = v_org
-    AND status = 'POSTED'
-    AND reversal_of_id IS NULL
-  ORDER BY posted_at DESC NULLS LAST, created_at DESC
-  LIMIT 1
-  FOR UPDATE;
-
-  IF v_journal_id IS NULL THEN
-    RAISE EXCEPTION 'Posted credit note has no original journal entry';
-  END IF;
-
-  v_reversal_id := finance.reverse_journal_entry(v_journal_id, p_reversal_date, p_reason);
-
-  UPDATE finance.credit_notes
-  SET status = 'REVERSED', updated_at = now()
-  WHERE id = p_credit_note_id AND organization_id = v_org AND status = 'POSTED';
-
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'Credit note status update failed';
-  END IF;
-
-  RETURN v_reversal_id;
-END;
-$$;
+ IF v_org IS NULL OR NOT(core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Access denied'; END IF;
+ IF NULLIF(btrim(p_reason),'') IS NULL THEN RAISE EXCEPTION 'Reversal reason is mandatory'; END IF;
+ SELECT * INTO v_cn FROM finance.credit_notes WHERE id=p_credit_note_id AND organization_id=v_org FOR UPDATE;
+ IF NOT FOUND OR v_cn.status<>'POSTED' THEN RAISE EXCEPTION 'Posted credit note not found or access denied'; END IF;
+ SELECT id INTO v_journal_id FROM finance.journal_entries WHERE source_type='CREDIT_NOTE' AND source_id=p_credit_note_id AND organization_id=v_org AND status='POSTED' AND reversal_of_id IS NULL ORDER BY posted_at DESC NULLS LAST,created_at DESC LIMIT 1 FOR UPDATE;
+ IF v_journal_id IS NULL THEN RAISE EXCEPTION 'Posted credit note has no original journal entry'; END IF;
+ v_reversal_id:=finance.reverse_journal_entry(v_journal_id,p_reversal_date,p_reason);
+ UPDATE finance.credit_notes SET status='REVERSED',updated_at=now() WHERE id=p_credit_note_id AND organization_id=v_org AND status='POSTED';
+ PERFORM finance.recompute_invoice_ar_balance(v_cn.invoice_id);
+ RETURN v_reversal_id;
+END; $$;
 
 
 ALTER FUNCTION "finance"."reverse_credit_note_atomic"("p_credit_note_id" "uuid", "p_reversal_date" "date", "p_reason" "text") OWNER TO "postgres";
@@ -8801,6 +8545,137 @@ COMMENT ON FUNCTION "finance"."transition_profit_distribution"("p_distribution_i
 
 
 
+CREATE OR REPLACE FUNCTION "finance"."transition_vendor_payment_batch_atomic"("p_batch_id" "uuid", "p_action" "text", "p_user_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_batch finance.vendor_payment_batches%ROWTYPE;
+  v_child_count integer;
+  v_expected_count integer;
+BEGIN
+  IF auth.uid() IS NULL OR p_user_id IS DISTINCT FROM auth.uid() OR v_org IS NULL THEN
+    RAISE EXCEPTION 'Authentication and organization context are required';
+  END IF;
+
+  IF p_action NOT IN ('submit', 'approve') THEN
+    RAISE EXCEPTION 'Unsupported batch transition: %', p_action;
+  END IF;
+
+  IF p_action = 'submit' AND NOT core.has_permission(auth.uid(), 'VENDOR_PAYMENT_UPDATE') THEN
+    RAISE EXCEPTION 'VENDOR_PAYMENT_UPDATE permission required';
+  END IF;
+
+  IF p_action = 'approve' AND NOT core.has_permission(auth.uid(), 'VENDOR_PAYMENT_APPROVE') THEN
+    RAISE EXCEPTION 'VENDOR_PAYMENT_APPROVE permission required';
+  END IF;
+
+  SELECT *
+    INTO v_batch
+    FROM finance.vendor_payment_batches
+   WHERE id = p_batch_id
+     AND organization_id = v_org
+   FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Batch not found in your organization';
+  END IF;
+
+  SELECT COUNT(*), COALESCE(MAX(v_batch.payment_count), 0)
+    INTO v_child_count, v_expected_count
+    FROM finance.vendor_payments
+   WHERE batch_id = p_batch_id
+     AND organization_id = v_org
+     AND is_batch = true;
+
+  IF v_child_count <> v_expected_count OR v_child_count = 0 THEN
+    RAISE EXCEPTION 'Batch child-payment count is inconsistent with the batch header';
+  END IF;
+
+  IF p_action = 'submit' THEN
+    IF v_batch.status <> 'DRAFT' THEN
+      RAISE EXCEPTION 'Only DRAFT batches can be submitted. Current: %', v_batch.status;
+    END IF;
+
+    UPDATE finance.vendor_payment_batches
+       SET status = 'SUBMITTED',
+           submitted_by = p_user_id,
+           submitted_at = now(),
+           updated_at = now()
+     WHERE id = p_batch_id
+       AND organization_id = v_org
+       AND status = 'DRAFT';
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Batch submission failed due to a concurrent change';
+    END IF;
+  ELSE
+    IF v_batch.status <> 'SUBMITTED' THEN
+      RAISE EXCEPTION 'Only SUBMITTED batches can be approved. Current: %', v_batch.status;
+    END IF;
+
+    IF v_batch.created_by IS NOT NULL AND v_batch.created_by = p_user_id THEN
+      RAISE EXCEPTION 'Maker-checker violation: the batch creator cannot approve their own batch';
+    END IF;
+
+    -- Lock and validate every child before changing any status. Because this
+    -- function runs in one transaction, a failure rolls back both the child
+    -- approvals and the batch header update.
+    PERFORM 1
+      FROM finance.vendor_payments
+     WHERE batch_id = p_batch_id
+       AND organization_id = v_org
+       AND is_batch = true
+       AND status <> 'DRAFT'
+     FOR UPDATE;
+
+    IF FOUND THEN
+      RAISE EXCEPTION 'Every child payment must be DRAFT before batch approval';
+    END IF;
+
+    UPDATE finance.vendor_payments
+       SET status = 'APPROVED',
+           approved_by = p_user_id,
+           approved_at = now(),
+           updated_at = now()
+     WHERE batch_id = p_batch_id
+       AND organization_id = v_org
+       AND is_batch = true
+       AND status = 'DRAFT';
+
+    GET DIAGNOSTICS v_child_count = ROW_COUNT;
+    IF v_child_count <> v_batch.payment_count THEN
+      RAISE EXCEPTION 'Expected to approve % child payments but approved %',
+        v_batch.payment_count, v_child_count;
+    END IF;
+
+    UPDATE finance.vendor_payment_batches
+       SET status = 'APPROVED',
+           approved_by = p_user_id,
+           approved_at = now(),
+           updated_at = now()
+     WHERE id = p_batch_id
+       AND organization_id = v_org
+       AND status = 'SUBMITTED';
+
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Batch approval failed due to a concurrent change';
+    END IF;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'batch_id', p_batch_id,
+    'status', CASE WHEN p_action = 'submit' THEN 'SUBMITTED' ELSE 'APPROVED' END,
+    'payment_count', v_batch.payment_count
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."transition_vendor_payment_batch_atomic"("p_batch_id" "uuid", "p_action" "text", "p_user_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."unmatch_statement_line"("p_line_id" "uuid", "p_reason" "text" DEFAULT NULL::"text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
@@ -9045,53 +8920,22 @@ ALTER FUNCTION "finance"."validate_ownership_percentage_total"() OWNER TO "postg
 
 CREATE OR REPLACE FUNCTION "finance"."validate_payment_allocation"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'finance', 'public'
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
-DECLARE
-  v_invoice_total       NUMERIC(18,2);
-  v_invoice_allocated   NUMERIC(18,2);
-  v_receipt_total       NUMERIC(18,2);
-  v_receipt_allocated   NUMERIC(18,2);
+DECLARE v_total numeric(18,2); v_alloc numeric(18,2); v_receipt numeric(18,2); v_receipt_alloc numeric(18,2); v_invoice_status text;
 BEGIN
-  SELECT total_amount INTO v_invoice_total
-  FROM public.invoices WHERE id = NEW.invoice_id FOR UPDATE;
-
-  IF v_invoice_total IS NULL THEN
-    RAISE EXCEPTION 'Cannot allocate payment: invoice % does not exist', NEW.invoice_id;
-  END IF;
-
-  SELECT COALESCE(SUM(allocated_amount), 0) INTO v_invoice_allocated
-  FROM finance.payment_allocations
-  WHERE invoice_id = NEW.invoice_id AND id IS DISTINCT FROM NEW.id;
-
-  IF (v_invoice_allocated + NEW.allocated_amount) > v_invoice_total THEN
-    RAISE EXCEPTION
-      'Payment allocation of % exceeds invoice outstanding balance (already allocated %, invoice total %)',
-      NEW.allocated_amount, v_invoice_allocated, v_invoice_total;
-  END IF;
-
-  -- NEW CHECK: don't let the sum of allocations against one payment
-  -- receipt exceed what that receipt actually received.
-  SELECT amount INTO v_receipt_total
-  FROM finance.payment_receipts WHERE id = NEW.payment_receipt_id FOR UPDATE;
-
-  IF v_receipt_total IS NULL THEN
-    RAISE EXCEPTION 'Cannot allocate payment: payment receipt % does not exist', NEW.payment_receipt_id;
-  END IF;
-
-  SELECT COALESCE(SUM(allocated_amount), 0) INTO v_receipt_allocated
-  FROM finance.payment_allocations
-  WHERE payment_receipt_id = NEW.payment_receipt_id AND id IS DISTINCT FROM NEW.id;
-
-  IF (v_receipt_allocated + NEW.allocated_amount) > v_receipt_total THEN
-    RAISE EXCEPTION
-      'Payment allocation of % exceeds the payment receipt''s own total (already allocated %, receipt total %)',
-      NEW.allocated_amount, v_receipt_allocated, v_receipt_total;
-  END IF;
-
-  RETURN NEW;
-END;
-$$;
+ IF TG_OP='UPDATE' AND NEW.status IS DISTINCT FROM 'ACTIVE' THEN RETURN NEW; END IF;
+ SELECT outstanding_amount,status INTO v_total,v_invoice_status FROM public.invoices WHERE id=NEW.invoice_id FOR UPDATE;
+ IF v_total IS NULL THEN RAISE EXCEPTION 'Cannot allocate payment: invoice % does not exist',NEW.invoice_id; END IF;
+ IF v_invoice_status NOT IN ('ISSUED','PARTIALLY_PAID','OVERDUE') THEN RAISE EXCEPTION 'Cannot allocate payment to invoice % in status %',NEW.invoice_id,v_invoice_status; END IF;
+ SELECT COALESCE(SUM(allocated_amount),0) INTO v_alloc FROM finance.payment_allocations WHERE invoice_id=NEW.invoice_id AND status='ACTIVE' AND id IS DISTINCT FROM NEW.id;
+ IF v_alloc+NEW.allocated_amount>v_total+0.01 THEN RAISE EXCEPTION 'Payment allocation exceeds invoice outstanding balance'; END IF;
+ SELECT amount INTO v_receipt FROM finance.payment_receipts WHERE id=NEW.payment_receipt_id FOR UPDATE;
+ IF v_receipt IS NULL THEN RAISE EXCEPTION 'Payment receipt % does not exist',NEW.payment_receipt_id; END IF;
+ SELECT COALESCE(SUM(allocated_amount),0) INTO v_receipt_alloc FROM finance.payment_allocations WHERE payment_receipt_id=NEW.payment_receipt_id AND status='ACTIVE' AND id IS DISTINCT FROM NEW.id;
+ IF v_receipt_alloc+NEW.allocated_amount>v_receipt+0.01 THEN RAISE EXCEPTION 'Payment allocation exceeds payment receipt total'; END IF;
+ RETURN NEW;
+END; $$;
 
 
 ALTER FUNCTION "finance"."validate_payment_allocation"() OWNER TO "postgres";
@@ -10523,6 +10367,15 @@ BEGIN
     RAISE EXCEPTION 'Not authorized to set compensation for this employee';
   END IF;
 
+  -- F-P0-2 fix: role check. This function is SECURITY DEFINER, so it
+  -- bypasses the payroll_compensation RLS insert/update policies -- the
+  -- org check above is NOT a substitute for a permission check. Only
+  -- CEO/FINANCE_HEAD/ACCOUNTANT may write compensation; every other role
+  -- (EMPLOYEE, VIEWER, TECH_ADMIN, HOD, PM, etc.) must be rejected here.
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Only CEO, Finance Head, or Accountant may set employee compensation';
+  END IF;
+
   v_effective_from := COALESCE((p_compensation->>'effective_from')::DATE, CURRENT_DATE);
 
   IF COALESCE((p_compensation->>'amount')::NUMERIC, -1) < 0 THEN
@@ -10716,23 +10569,7 @@ ALTER FUNCTION "reporting"."ceo_chart_budget"("p_organization_id" "uuid") OWNER 
 CREATE OR REPLACE FUNCTION "reporting"."ceo_chart_cash"("p_organization_id" "uuid" DEFAULT NULL::"uuid") RETURNS json
     LANGUAGE "plpgsql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
-    AS $$ DECLARE
-  v_org_id UUID;
-BEGIN
-  IF NOT core.is_finance_head() THEN
-    RAISE EXCEPTION 'Access denied: CEO dashboard is restricted to CEO/Finance Head roles';
-  END IF;
-  v_org_id := COALESCE(p_organization_id, core.current_user_org_id());
-  IF v_org_id IS NULL OR NOT core.same_org(v_org_id) THEN
-    RAISE EXCEPTION 'Access denied: organization scope mismatch';
-  END IF;
-
-  RETURN COALESCE(json_agg(row_to_json(t) ORDER BY balance DESC), '[]'::JSON) FROM (
-    SELECT id, account_name, institution_type, currency, masked_identifier, opening_balance as balance
-    FROM finance.financial_accounts WHERE is_active = true AND organization_id = v_org_id
-  ) t;
-END;
- $$;
+    AS $$ DECLARE v_org uuid:=COALESCE(p_organization_id,core.current_user_org_id()); BEGIN IF NOT core.is_finance_head() OR v_org IS NULL OR NOT core.same_org(v_org) THEN RAISE EXCEPTION 'Access denied'; END IF; RETURN COALESCE((SELECT json_agg(row_to_json(t) ORDER BY t.balance_base DESC) FROM (SELECT account_id AS id,account_name,institution_name AS institution_type,currency,opening_balance,current_balance_base AS balance,masked_identifier FROM reporting.v_cash_position WHERE organization_id=v_org AND is_active) t),'[]'::json); END; $$;
 
 
 ALTER FUNCTION "reporting"."ceo_chart_cash"("p_organization_id" "uuid") OWNER TO "postgres";
@@ -10888,7 +10725,7 @@ BEGIN
   SELECT id INTO v_period_id FROM finance.accounting_periods WHERE status = 'OPEN' AND organization_id = v_org_id ORDER BY start_date DESC LIMIT 1;
   SELECT id INTO v_prev_period_id FROM finance.accounting_periods WHERE status IN ('OPEN','SOFT_CLOSED','HARD_CLOSED') AND organization_id = v_org_id AND id != v_period_id ORDER BY start_date DESC LIMIT 1;
 
-  SELECT COALESCE(SUM(opening_balance), 0) INTO v_total_cash FROM finance.financial_accounts WHERE is_active = true AND organization_id = v_org_id;
+  SELECT COALESCE(SUM(current_balance_base), 0) INTO v_total_cash FROM reporting.v_cash_position WHERE is_active = true AND organization_id = v_org_id;
 
   SELECT COALESCE(SUM(jl.debit_amount - jl.credit_amount) / NULLIF(COUNT(DISTINCT je.period_id), 1), 0) INTO v_monthly_expense
   FROM finance.journal_lines jl
@@ -11100,40 +10937,107 @@ CREATE OR REPLACE FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date"
     LANGUAGE "sql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
     AS $$
-SELECT
+  -- Balance-sheet accounts.
+  SELECT
     CASE coa.account_type
-        WHEN 'ASSET' THEN 1
-        WHEN 'LIABILITY' THEN 2
-        WHEN 'EQUITY' THEN 3
+      WHEN 'ASSET' THEN 1
+      WHEN 'LIABILITY' THEN 2
+      WHEN 'EQUITY' THEN 3
     END AS section_order,
     COALESCE(coa.report_mapping, coa.account_type) AS section,
     coa.code,
     coa.name AS account_name,
     CASE
-        WHEN coa.normal_balance = 'DEBIT' THEN COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)
-        ELSE COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)
+      WHEN coa.normal_balance = 'DEBIT'
+        THEN COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)
+      ELSE COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)
     END AS net_amount
-FROM finance.chart_of_accounts coa
-LEFT JOIN finance.journal_lines jl ON jl.account_id = coa.id
-INNER JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status IN ('POSTED', 'REVERSED')
-INNER JOIN finance.accounting_periods ap ON ap.id = je.period_id AND ap.end_date <= p_as_of_date
-WHERE coa.is_active = true
-  AND coa.organization_id = p_organization_id
-  AND p_organization_id = core.current_user_org_id()
-  AND coa.account_type IN ('ASSET', 'LIABILITY', 'EQUITY')
-GROUP BY coa.id, coa.report_mapping, coa.account_type, coa.code, coa.name, coa.normal_balance
-HAVING CASE
-    WHEN coa.normal_balance = 'DEBIT' THEN COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)
+  FROM finance.chart_of_accounts coa
+  JOIN finance.journal_lines jl ON jl.account_id = coa.id
+  JOIN finance.journal_entries je
+    ON je.id = jl.journal_entry_id
+   AND je.organization_id = p_organization_id
+   AND je.status IN ('POSTED', 'REVERSED')
+  JOIN finance.accounting_periods ap
+    ON ap.id = je.period_id
+   AND ap.organization_id = p_organization_id
+   AND ap.end_date <= p_as_of_date
+  WHERE coa.is_active = true
+    AND coa.organization_id = p_organization_id
+    AND p_organization_id = core.current_user_org_id()
+    AND coa.account_type IN ('ASSET', 'LIABILITY', 'EQUITY')
+  GROUP BY coa.id, coa.report_mapping, coa.account_type, coa.code, coa.name, coa.normal_balance
+  HAVING CASE
+    WHEN coa.normal_balance = 'DEBIT'
+      THEN COALESCE(SUM(jl.base_debit), 0) - COALESCE(SUM(jl.base_credit), 0)
     ELSE COALESCE(SUM(jl.base_credit), 0) - COALESCE(SUM(jl.base_debit), 0)
-END != 0
-ORDER BY section_order, coa.code;
+  END != 0
+
+  UNION ALL
+
+  -- Current-year earnings are the signed YTD P&L balance. They are presented
+  -- as a single equity row so the Balance Sheet remains balanced before a
+  -- year-end close transfers P&L into retained earnings. Once P&L has been
+  -- closed, its posted balance is zero and this row naturally contributes
+  -- zero, preventing double-counting.
+  SELECT
+    3 AS section_order,
+    'EQUITY'::text AS section,
+    'CURRENT-YEAR-EARNINGS'::text AS code,
+    'Current Year Earnings'::text AS account_name,
+    ROUND(
+      COALESCE(SUM(
+        CASE
+          WHEN coa.account_type IN ('REVENUE', 'OTHER_INCOME')
+            THEN COALESCE(jl.base_credit, 0) - COALESCE(jl.base_debit, 0)
+          ELSE COALESCE(jl.base_debit, 0) - COALESCE(jl.base_credit, 0)
+        END
+      ), 0),
+      2
+    ) AS net_amount
+  FROM finance.chart_of_accounts coa
+  JOIN finance.journal_lines jl ON jl.account_id = coa.id
+  JOIN finance.journal_entries je
+    ON je.id = jl.journal_entry_id
+   AND je.organization_id = p_organization_id
+   AND je.status IN ('POSTED', 'REVERSED')
+  JOIN finance.accounting_periods ap
+    ON ap.id = je.period_id
+   AND ap.organization_id = p_organization_id
+   AND ap.end_date <= p_as_of_date
+  JOIN finance.fiscal_years fy
+    ON fy.id = ap.fiscal_year_id
+   AND fy.organization_id = p_organization_id
+   AND p_as_of_date BETWEEN fy.start_date AND fy.end_date
+  WHERE coa.is_active = true
+    AND coa.organization_id = p_organization_id
+    AND p_organization_id = core.current_user_org_id()
+    AND coa.account_type IN (
+      'REVENUE',
+      'COST_OF_SALES',
+      'OPERATING_EXPENSE',
+      'OTHER_INCOME',
+      'OTHER_EXPENSE'
+    )
+  HAVING ROUND(
+    COALESCE(SUM(
+      CASE
+        WHEN coa.account_type IN ('REVENUE', 'OTHER_INCOME')
+          THEN COALESCE(jl.base_credit, 0) - COALESCE(jl.base_debit, 0)
+        ELSE COALESCE(jl.base_debit, 0) - COALESCE(jl.base_credit, 0)
+      END
+    ), 0),
+    2
+  ) != 0
+
+  ORDER BY section_order, code;
 $$;
 
 
 ALTER FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date", "p_organization_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date", "p_organization_id" "uuid") IS 'AC-03 FIX (P1): journal_entries and accounting_periods changed from LEFT JOIN to INNER JOIN. Previously "ap.end_date <= p_as_of_date" sat on a LEFT JOIN''s ON clause, so a non-matching period only nulled out ap.* while jl.base_debit/base_credit — already fixed by the prior LEFT JOINs — stayed in the SUM() regardless; the as-of date parameter had no effect and every call returned today''s balance sheet. Same defect class as the FND-GL-01 fix on reporting.get_trial_balance. Also widened je.status from POSTED-only to POSTED-or-REVERSED (AC-02-class fix) so a reversed journal nets to zero against its offsetting reversal entry here too.';
+COMMENT ON FUNCTION "reporting"."get_balance_sheet"("p_as_of_date" "date", "p_organization_id" "uuid") IS 'AC-04 fix: includes signed current-year P&L as Current Year Earnings under Equity so Assets = Liabilities + Equity before year-end close. The row naturally becomes zero after P&L is closed into retained earnings, avoiding double-counting.';
 
 
 
@@ -11329,40 +11233,24 @@ COMMENT ON FUNCTION "reporting"."get_profit_and_loss"("p_start_date" "date", "p_
 
 CREATE OR REPLACE FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p_end_date" "date") RETURNS TABLE("project_id" "uuid", "project_name" "text", "total_revenue" numeric, "total_costs" numeric, "gross_profit" numeric, "margin_pct" numeric)
     LANGUAGE "sql" STABLE
-    SET "search_path" TO 'pg_catalog', 'reporting', 'public'
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
     AS $$
-SELECT
-    je.project_id,
-    COALESCE(p.name, 'Unassigned') AS project_name,
-    COALESCE(SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END), 0) AS total_revenue,
-    COALESCE(SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES', 'OPERATING_EXPENSE') THEN jl.base_debit ELSE 0 END), 0) AS total_costs,
-    COALESCE(SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END), 0)
-      - COALESCE(SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES', 'OPERATING_EXPENSE') THEN jl.base_debit ELSE 0 END), 0) AS gross_profit,
-    CASE
-        WHEN SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END) = 0 THEN 0
-        ELSE ROUND(
-            ((SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END)
-              - SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES', 'OPERATING_EXPENSE') THEN jl.base_debit ELSE 0 END))
-             / NULLIF(SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END), 0)) * 100,
-            2
-        )
-    END AS margin_pct
-FROM finance.journal_lines jl
-JOIN finance.journal_entries je
-  ON je.id = jl.journal_entry_id
- AND je.status IN ('POSTED', 'REVERSED')
-JOIN finance.accounting_periods ap ON ap.id = je.period_id
-JOIN finance.chart_of_accounts coa ON coa.id = jl.account_id
-LEFT JOIN public.projects p ON p.id = je.project_id
-WHERE ap.start_date >= p_start_date
-  AND ap.end_date <= p_end_date
-  AND coa.account_type IN ('REVENUE', 'COST_OF_SALES', 'OPERATING_EXPENSE')
-GROUP BY je.project_id, p.name
-ORDER BY gross_profit DESC;
+SELECT je.project_id,COALESCE(p.name,'Unassigned'),COALESCE(SUM(CASE WHEN coa.account_type IN ('REVENUE','OTHER_INCOME') THEN jl.base_credit-jl.base_debit ELSE 0 END),0),COALESCE(SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE') THEN jl.base_debit-jl.base_credit ELSE 0 END),0),COALESCE(SUM(CASE WHEN coa.account_type IN ('REVENUE','OTHER_INCOME') THEN jl.base_credit-jl.base_debit ELSE 0 END),0)-COALESCE(SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE') THEN jl.base_debit-jl.base_credit ELSE 0 END),0),CASE WHEN COALESCE(SUM(CASE WHEN coa.account_type IN ('REVENUE','OTHER_INCOME') THEN jl.base_credit-jl.base_debit ELSE 0 END),0)=0 THEN 0 ELSE ROUND(( (SUM(CASE WHEN coa.account_type IN ('REVENUE','OTHER_INCOME') THEN jl.base_credit-jl.base_debit ELSE 0 END)-SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE','OTHER_EXPENSE') THEN jl.base_debit-jl.base_credit ELSE 0 END))/NULLIF(SUM(CASE WHEN coa.account_type IN ('REVENUE','OTHER_INCOME') THEN jl.base_credit-jl.base_debit ELSE 0 END),0))*100,2) END FROM finance.journal_entries je JOIN finance.journal_lines jl ON jl.journal_entry_id=je.id JOIN finance.chart_of_accounts coa ON coa.id=jl.account_id LEFT JOIN public.projects p ON p.id=je.project_id WHERE je.organization_id=core.current_user_org_id() AND je.status IN ('POSTED','REVERSED') AND je.transaction_date BETWEEN p_start_date AND p_end_date GROUP BY je.project_id,p.name;
 $$;
 
 
 ALTER FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p_end_date" "date") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "reporting"."get_project_profitability_cost_structure"("p_start_date" "date", "p_end_date" "date") RETURNS TABLE("project_id" "uuid", "platform_fees" numeric, "allocated_overhead" numeric)
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO 'pg_catalog', 'reporting', 'finance', 'public', 'core'
+    AS $$
+SELECT je.project_id,COALESCE(SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE') AND (lower(COALESCE(coa.name,'')) LIKE '%platform fee%' OR lower(COALESCE(coa.report_mapping,'')) LIKE '%platform%fee%') THEN jl.base_debit-jl.base_credit ELSE 0 END),0),COALESCE(SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES','OPERATING_EXPENSE') AND (lower(COALESCE(coa.name,'')) LIKE '%overhead%' OR lower(COALESCE(coa.report_mapping,'')) LIKE '%overhead%') THEN jl.base_debit-jl.base_credit ELSE 0 END),0) FROM finance.journal_entries je JOIN finance.journal_lines jl ON jl.journal_entry_id=je.id JOIN finance.chart_of_accounts coa ON coa.id=jl.account_id WHERE je.organization_id=core.current_user_org_id() AND je.status IN ('POSTED','REVERSED') AND je.transaction_date BETWEEN p_start_date AND p_end_date GROUP BY je.project_id;
+$$;
+
+
+ALTER FUNCTION "reporting"."get_project_profitability_cost_structure"("p_start_date" "date", "p_end_date" "date") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "reporting"."get_statement_of_changes_in_equity"("p_period_start" "date", "p_period_end" "date", "p_organization_id" "uuid") RETURNS TABLE("account_id" "uuid", "code" "text", "account_name" "text", "opening_balance" numeric, "period_movement" numeric, "closing_balance" numeric)
@@ -14901,7 +14789,7 @@ COMMENT ON COLUMN "public"."expenses"."receipt_hash" IS 'SHA-256 hash of the upl
 
 
 
-CREATE OR REPLACE VIEW "reporting"."general_ledger" WITH ("security_invoker"='true') AS
+CREATE OR REPLACE VIEW "reporting"."general_ledger" AS
  SELECT "je"."id" AS "journal_entry_id",
     "je"."reference" AS "journal_reference",
     "je"."description" AS "journal_description",
@@ -14930,7 +14818,8 @@ CREATE OR REPLACE VIEW "reporting"."general_ledger" WITH ("security_invoker"='tr
         CASE
             WHEN ("coa"."normal_balance" = 'DEBIT'::"text") THEN (COALESCE("jl"."base_debit", "jl"."debit_amount") - COALESCE("jl"."base_credit", "jl"."credit_amount"))
             ELSE (COALESCE("jl"."base_credit", "jl"."credit_amount") - COALESCE("jl"."base_debit", "jl"."debit_amount"))
-        END) OVER (PARTITION BY "jl"."account_id" ORDER BY "je"."transaction_date", "je"."reference", "jl"."line_number" ROWS UNBOUNDED PRECEDING) AS "running_balance"
+        END) OVER (PARTITION BY "jl"."account_id" ORDER BY "je"."transaction_date", "je"."reference", "jl"."line_number" ROWS UNBOUNDED PRECEDING) AS "running_balance",
+    "je"."organization_id"
    FROM (("finance"."journal_lines" "jl"
      JOIN "finance"."journal_entries" "je" ON (("je"."id" = "jl"."journal_entry_id")))
      JOIN "finance"."chart_of_accounts" "coa" ON (("coa"."id" = "jl"."account_id")))
@@ -16238,6 +16127,46 @@ CREATE OR REPLACE VIEW "public"."v_user_roles" WITH ("security_invoker"='true') 
 ALTER VIEW "public"."v_user_roles" OWNER TO "postgres";
 
 
+CREATE OR REPLACE VIEW "reporting"."ai_fiscal_close_context" WITH ("security_invoker"='true') AS
+ SELECT "ap"."id" AS "period_id",
+    "ap"."period_number",
+    "ap"."name" AS "period_name",
+    "ap"."start_date",
+    "ap"."end_date",
+    "ap"."status" AS "period_status",
+    "fy"."id" AS "fiscal_year_id",
+    "fy"."organization_id",
+    NULL::"uuid" AS "journal_entry_id",
+    NULL::"text" AS "reference",
+    NULL::"text" AS "journal_description",
+    NULL::"date" AS "transaction_date",
+    NULL::"text" AS "journal_status",
+    NULL::"text" AS "source_type"
+   FROM ("finance"."accounting_periods" "ap"
+     JOIN "finance"."fiscal_years" "fy" ON (("fy"."id" = "ap"."fiscal_year_id")))
+UNION ALL
+ SELECT "ap"."id" AS "period_id",
+    "ap"."period_number",
+    "ap"."name" AS "period_name",
+    "ap"."start_date",
+    "ap"."end_date",
+    "ap"."status" AS "period_status",
+    "fy"."id" AS "fiscal_year_id",
+    "fy"."organization_id",
+    "je"."id" AS "journal_entry_id",
+    "je"."reference",
+    "je"."description" AS "journal_description",
+    "je"."transaction_date",
+    "je"."status" AS "journal_status",
+    "je"."source_type"
+   FROM (("finance"."journal_entries" "je"
+     JOIN "finance"."accounting_periods" "ap" ON (("ap"."id" = "je"."period_id")))
+     JOIN "finance"."fiscal_years" "fy" ON (("fy"."id" = "ap"."fiscal_year_id")));
+
+
+ALTER VIEW "reporting"."ai_fiscal_close_context" OWNER TO "postgres";
+
+
 CREATE OR REPLACE VIEW "reporting"."trial_balance" WITH ("security_invoker"='true') AS
  SELECT "je"."organization_id",
     "je"."fiscal_year_id",
@@ -16825,26 +16754,22 @@ CREATE OR REPLACE VIEW "reporting"."v_asset_register" WITH ("security_invoker"='
 ALTER VIEW "reporting"."v_asset_register" OWNER TO "postgres";
 
 
-CREATE OR REPLACE VIEW "reporting"."v_cash_position" WITH ("security_invoker"='true') AS
- SELECT "fa"."id" AS "account_id",
-    "fa"."account_name",
-    "fa"."institution_name",
-    "fa"."account_type",
-    "fa"."currency",
-    "fa"."opening_balance",
-    (("fa"."opening_balance" + COALESCE("sum"("jl"."debit_amount") FILTER (WHERE ("je"."status" = 'POSTED'::"text")), (0)::numeric)) - COALESCE("sum"("jl"."credit_amount") FILTER (WHERE ("je"."status" = 'POSTED'::"text")), (0)::numeric)) AS "current_balance",
-    (("fa"."opening_balance" + COALESCE("sum"("jl"."base_debit") FILTER (WHERE ("je"."status" = 'POSTED'::"text")), (0)::numeric)) - COALESCE("sum"("jl"."base_credit") FILTER (WHERE ("je"."status" = 'POSTED'::"text")), (0)::numeric)) AS "current_balance_base",
-    "org"."base_currency",
-    "fa"."is_active",
-    "fa"."is_default",
-    "org"."id" AS "organization_id",
-    "now"() AS "data_as_of"
-   FROM ((("finance"."financial_accounts" "fa"
-     LEFT JOIN "finance"."journal_lines" "jl" ON (("jl"."account_id" = "fa"."linked_ledger_account_id")))
-     LEFT JOIN "finance"."journal_entries" "je" ON (("je"."id" = "jl"."journal_entry_id")))
-     CROSS JOIN "core"."organizations" "org")
-  WHERE ("fa"."is_active" = true)
-  GROUP BY "fa"."id", "fa"."account_name", "fa"."institution_name", "fa"."account_type", "fa"."currency", "fa"."opening_balance", "fa"."is_active", "fa"."is_default", "org"."id", "org"."base_currency";
+CREATE OR REPLACE VIEW "reporting"."v_cash_position" AS
+SELECT
+    NULL::"uuid" AS "account_id",
+    NULL::"text" AS "account_name",
+    NULL::"text" AS "institution_name",
+    NULL::"text" AS "account_type",
+    NULL::"text" AS "currency",
+    NULL::numeric(18,2) AS "opening_balance",
+    NULL::numeric AS "current_balance",
+    NULL::numeric AS "current_balance_base",
+    NULL::"text" AS "base_currency",
+    NULL::boolean AS "is_active",
+    NULL::boolean AS "is_default",
+    NULL::"uuid" AS "organization_id",
+    NULL::timestamp with time zone AS "data_as_of",
+    NULL::"text" AS "masked_identifier";
 
 
 ALTER VIEW "reporting"."v_cash_position" OWNER TO "postgres";
@@ -19207,6 +19132,37 @@ CREATE OR REPLACE VIEW "public"."v_payroll_summary" WITH ("security_invoker"='tr
 
 
 
+CREATE OR REPLACE VIEW "reporting"."v_cash_position" WITH ("security_invoker"='true') AS
+ SELECT "fa"."id" AS "account_id",
+    "fa"."account_name",
+    "fa"."institution_name",
+    "fa"."account_type",
+    "fa"."currency",
+    "fa"."opening_balance",
+    ("fa"."opening_balance" + COALESCE("sum"(
+        CASE
+            WHEN ("je"."status" = 'POSTED'::"text") THEN ("jl"."debit_amount" - "jl"."credit_amount")
+            ELSE (0)::numeric
+        END), (0)::numeric)) AS "current_balance",
+    ("fa"."opening_balance" + COALESCE("sum"(
+        CASE
+            WHEN ("je"."status" = 'POSTED'::"text") THEN (COALESCE("jl"."base_debit", "jl"."debit_amount") - COALESCE("jl"."base_credit", "jl"."credit_amount"))
+            ELSE (0)::numeric
+        END), (0)::numeric)) AS "current_balance_base",
+    "org"."base_currency",
+    "fa"."is_active",
+    "fa"."is_default",
+    "fa"."organization_id",
+    "now"() AS "data_as_of",
+    "fa"."masked_identifier"
+   FROM ((("finance"."financial_accounts" "fa"
+     JOIN "core"."organizations" "org" ON (("org"."id" = "fa"."organization_id")))
+     LEFT JOIN "finance"."journal_lines" "jl" ON (("jl"."account_id" = "fa"."linked_ledger_account_id")))
+     LEFT JOIN "finance"."journal_entries" "je" ON ((("je"."id" = "jl"."journal_entry_id") AND ("je"."organization_id" = "fa"."organization_id"))))
+  GROUP BY "fa"."id", "fa"."account_name", "fa"."institution_name", "fa"."account_type", "fa"."currency", "fa"."opening_balance", "org"."base_currency", "fa"."is_active", "fa"."is_default", "fa"."organization_id";
+
+
+
 CREATE OR REPLACE TRIGGER "ai_conversations_audit" AFTER INSERT OR DELETE OR UPDATE ON "ai"."ai_conversations" FOR EACH ROW EXECUTE FUNCTION "audit"."trigger_audit_log"();
 
 
@@ -19604,6 +19560,10 @@ CREATE OR REPLACE TRIGGER "trg_bt_updated_at" BEFORE UPDATE ON "finance"."bank_t
 
 
 CREATE CONSTRAINT TRIGGER "trg_check_journal_balance" AFTER INSERT OR DELETE OR UPDATE ON "finance"."journal_lines" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION "finance"."check_journal_balance"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_credit_note_ar_balance" AFTER INSERT OR UPDATE OF "status" ON "finance"."credit_notes" FOR EACH ROW EXECUTE FUNCTION "finance"."credit_note_ar_balance_trigger"();
 
 
 
@@ -24425,6 +24385,10 @@ GRANT ALL ON FUNCTION "core"."transfer_ceo_role"("p_new_ceo_user_id" "uuid", "p_
 
 
 
+REVOKE ALL ON FUNCTION "finance"."add_ownership_history_atomic"("p_owner_id" "uuid", "p_percentage" numeric, "p_effective_from" "date", "p_change_reason" "text", "p_changed_by" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."add_ownership_history_atomic"("p_owner_id" "uuid", "p_percentage" numeric, "p_effective_from" "date", "p_change_reason" "text", "p_changed_by" "uuid") TO "authenticated";
+
+
 
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
@@ -24529,6 +24493,10 @@ GRANT ALL ON FUNCTION "finance"."create_vendor_payment_atomic"("p_vendor_id" "uu
 
 REVOKE ALL ON FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."credit_note_ar_balance_trigger"() FROM PUBLIC;
 
 
 
@@ -24729,6 +24697,10 @@ REVOKE ALL ON FUNCTION "finance"."prevent_posted_capital_transaction_edit"() FRO
 
 
 
+REVOKE ALL ON FUNCTION "finance"."recompute_invoice_ar_balance"("p_invoice_id" "uuid") FROM PUBLIC;
+
+
+
 REVOKE ALL ON FUNCTION "finance"."release_budget_commitments_by_source"("p_source_type" "text", "p_source_reference" "text", "p_release_reason" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."release_budget_commitments_by_source"("p_source_type" "text", "p_source_reference" "text", "p_release_reason" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "finance"."release_budget_commitments_by_source"("p_source_type" "text", "p_source_reference" "text", "p_release_reason" "text") TO "service_role";
@@ -24787,6 +24759,11 @@ GRANT ALL ON FUNCTION "finance"."suggest_bank_statement_matches"("p_statement_id
 
 
 GRANT ALL ON FUNCTION "finance"."transition_profit_distribution"("p_distribution_id" "uuid", "p_status" "text", "p_reason" "text") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."transition_vendor_payment_batch_atomic"("p_batch_id" "uuid", "p_action" "text", "p_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."transition_vendor_payment_batch_atomic"("p_batch_id" "uuid", "p_action" "text", "p_user_id" "uuid") TO "authenticated";
 
 
 
@@ -24939,7 +24916,6 @@ GRANT ALL ON TABLE "public"."payroll_compensation" TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") TO "anon";
 GRANT ALL ON FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") TO "service_role";
 
@@ -25017,6 +24993,12 @@ GRANT ALL ON FUNCTION "reporting"."get_ceo_metrics"() TO "authenticated";
 
 REVOKE ALL ON FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p_end_date" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p_end_date" "date") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."get_project_profitability_cost_structure"("p_start_date" "date", "p_end_date" "date") FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."get_project_profitability_cost_structure"("p_start_date" "date", "p_end_date" "date") TO "authenticated";
+GRANT ALL ON FUNCTION "reporting"."get_project_profitability_cost_structure"("p_start_date" "date", "p_end_date" "date") TO "ai_readonly_role";
 
 
 
@@ -25809,6 +25791,12 @@ GRANT ALL ON TABLE "public"."v_user_roles" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "reporting"."ai_fiscal_close_context" TO "authenticated";
+GRANT ALL ON TABLE "reporting"."ai_fiscal_close_context" TO "service_role";
+GRANT SELECT ON TABLE "reporting"."ai_fiscal_close_context" TO "ai_readonly_role";
+
+
+
 GRANT ALL ON TABLE "reporting"."trial_balance" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."trial_balance" TO "service_role";
 
@@ -25972,3 +25960,4 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
+
