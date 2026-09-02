@@ -252,37 +252,36 @@ export async function POST(req: NextRequest) {
  
     // ─── Action: Assign/Update Role ───
     if (action === 'assign_role') {
+      // AUD-P1-005 FIX: `userId` is the target user's auth.users id (what
+      // every caller of this action actually has on hand — see
+      // src/app/dashboard/admin/users-roles/page.tsx, which only ever
+      // knows users via core.user_roles.user_id / auth.users.id, never
+      // public.profiles.id). Do NOT reinterpret this as profiles.id.
       const { userId, role, effectiveFrom, effectiveTo } = parsed.data;
       if (!userId || !role) {
         return NextResponse.json({ error: 'userId and role are required' }, { status: 400 });
       }
 
-      // SECURITY FIX: verify the target user belongs to the admin's own
-      // organization before modifying their role. Without this check an
-      // admin from Organization A could assign roles to a user in
-      // Organization B by guessing/enumerating a userId.
-      // AUTH-01 FIX: also select user_id — `userId` here is profiles.id
-      // (this endpoint's own convention), but core.user_roles.user_id
-      // must be the real auth.users id (profiles.user_id), not
-      // profiles.id itself.
-      const targetProfile = getData(await supabase
-        .from('profiles')
-        .select('id, user_id, email, organization_id')
-        .eq('id', userId)
-        .maybeSingle());
-      if (!targetProfile || targetProfile.organization_id !== organizationId) {
-        return NextResponse.json({ error: 'User not found in your organization' }, { status: 404 });
-      }
- 
-      // AUTH-01 FIX (bug #3, same as invite): replaced the raw
-      // deactivate-then-insert against core.user_roles (nonexistent
-      // role/assigned_by/organization_id columns, wrong user_id) with
-      // the SECURITY DEFINER RPC, which also updates public.profiles.role
-      // for us under the existing guard-bypass mechanism.
+      // AUD-P1-005 FIX: previously this pre-checked the target via a
+      // `.from('profiles')...eq('id', userId)` read on the RLS-bound,
+      // request-scoped client. Two problems with that: (1) `userId` was
+      // being compared against profiles.id even though every caller only
+      // has the auth user id, so the lookup could never match; (2) even
+      // with the right column, profiles_select_org_scoped only lets
+      // public.is_admin() (CEO/FINANCE_HEAD) or the row's own owner read
+      // a profile — an admin holding ADMIN_USERS via the 'Admin' role
+      // (see migration P1_069) would always get 404'd here. Removed in
+      // favor of what core.admin_assign_user_role() already does itself,
+      // as a SECURITY DEFINER function: it re-checks ADMIN_USERS, re-checks
+      // same-org, and confirms the target user exists in that org before
+      // writing anything — so no permission is lost by dropping this
+      // redundant, buggy pre-check. This mirrors /api/admin/user-profile's
+      // PATCH, which passes user_id straight to
+      // core.admin_update_user_profile() with no separate pre-check either.
       const { data: newRole, error: roleErr } = await supabase
         .schema('core')
         .rpc('admin_assign_user_role', {
-          p_user_id: targetProfile.user_id,
+          p_user_id: userId,
           p_organization_id: organizationId,
           p_role_name: role,
           p_effective_from: effectiveFrom || new Date().toISOString().split('T')[0],
@@ -291,7 +290,11 @@ export async function POST(req: NextRequest) {
         .single();
  
       if (roleErr) {
-        return NextResponse.json({ error: roleErr.message }, { status: 500 });
+        // core.admin_assign_user_role() raises 'Target user not found in
+        // your organization' / 'Cannot assign roles outside your
+        // organization' / 'Insufficient privileges to assign roles' as
+        // appropriate — surface its message rather than a generic one.
+        return NextResponse.json({ error: roleErr.message }, { status: 400 });
       }
  
       try {

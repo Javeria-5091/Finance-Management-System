@@ -1307,11 +1307,28 @@ CREATE OR REPLACE FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permis
           AND (upo.effective_to IS NULL OR upo.effective_to >= CURRENT_DATE)
           AND pr.organization_id = core.current_user_org_id()
       )
+      -- AUD-P1-008: an active, in-window delegation grants the same as a
+      -- per-user ALLOW override would.
+      OR EXISTS (
+        SELECT 1
+        FROM core.delegations d
+        JOIN core.permissions p ON p.id = ANY(d.permission_ids)
+        WHERE d.to_user_id = p_user_id
+          AND p.code = p_permission_code
+          AND d.status = 'ACTIVE'
+          AND CURRENT_DATE >= d.effective_from
+          AND CURRENT_DATE <= d.effective_to
+          AND d.organization_id = core.current_user_org_id()
+      )
     );
 $$;
 
 
 ALTER FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permission_code" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permission_code" "text") IS 'AUD-P1-008 fix: now also grants when an ACTIVE, in-window, same-org core.delegations row hands p_permission_code to p_user_id, in addition to role assignments and per-user ALLOW overrides. A per-user DENY override still wins over all three.';
+
 
 
 CREATE OR REPLACE FUNCTION "core"."has_permission_with_limit"("p_user_id" "uuid", "p_permission_code" "text", "p_amount" numeric) RETURNS boolean
@@ -1448,6 +1465,26 @@ END;
 ALTER FUNCTION "core"."set_updated_at"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "core"."shared_person_same_org"("p_shared_person_id" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
+    AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM core.shared_people sp
+    WHERE sp.id = p_shared_person_id
+      AND core.same_org(sp.organization_id)
+  );
+$$;
+
+
+ALTER FUNCTION "core"."shared_person_same_org"("p_shared_person_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "core"."shared_person_same_org"("p_shared_person_id" "uuid") IS 'AUD-P1-004 fix: true only when p_shared_person_id resolves to a core.shared_people row in the caller''s own organization (via core.same_org(), which itself fails closed on NULL). SECURITY DEFINER so this evaluates safely inside RLS policies on other tables (e.g. finance.attendance_period_snapshots) without those policies also being subject to core.shared_people''s own, more restrictive SELECT policy (ADMIN_USERS permission or self-match) -- a plain EXISTS subquery against shared_people from a non-admin caller''s policy would otherwise silently return no rows and incorrectly deny same-organization access to roles like FINANCE_HEAD/ACCOUNTANT that do not hold ADMIN_USERS.';
+
+
+
 CREATE OR REPLACE FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'public'
@@ -1494,6 +1531,185 @@ $_$;
 
 
 ALTER FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "core"."transfer_ceo_role"("p_new_ceo_user_id" "uuid", "p_outgoing_role_id" "uuid", "p_reason" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public', 'audit'
+    AS $$
+DECLARE
+  v_caller_id uuid := auth.uid();
+  v_org uuid;
+  v_ceo_role_id uuid;
+  v_old_ceo_user_role_id uuid;
+  v_outgoing_role_name text;
+  v_outgoing_role_org uuid;
+  v_new_ceo_org uuid;
+  v_result jsonb;
+BEGIN
+  IF v_caller_id IS NULL THEN
+    RAISE EXCEPTION 'transfer_ceo_role: authentication required';
+  END IF;
+
+  IF p_new_ceo_user_id IS NULL THEN
+    RAISE EXCEPTION 'transfer_ceo_role: p_new_ceo_user_id is required';
+  END IF;
+
+  IF p_outgoing_role_id IS NULL THEN
+    RAISE EXCEPTION 'transfer_ceo_role: p_outgoing_role_id is required';
+  END IF;
+
+  IF p_new_ceo_user_id = v_caller_id THEN
+    RAISE EXCEPTION 'transfer_ceo_role: cannot transfer the CEO role to yourself';
+  END IF;
+
+  v_org := core.current_user_org_id();
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'transfer_ceo_role: caller has no organization';
+  END IF;
+
+  -- Resolve the org's CEO role. Prefer an org-specific core.roles row, fall
+  -- back to the global/system-seeded 'CEO' role -- same resolution order as
+  -- core.admin_assign_user_role.
+  SELECT id INTO v_ceo_role_id
+  FROM core.roles
+  WHERE name = 'CEO'
+    AND (organization_id = v_org OR organization_id IS NULL)
+  ORDER BY (organization_id = v_org) DESC
+  LIMIT 1;
+
+  IF v_ceo_role_id IS NULL THEN
+    RAISE EXCEPTION 'transfer_ceo_role: CEO role is not configured for this organization';
+  END IF;
+
+  -- The caller must hold an active, in-effect CEO grant in core.user_roles.
+  -- Deliberately does NOT fall back to public.profiles.role (same reasoning
+  -- as core.admin_set_user_role) -- this is re-checked server-side and never
+  -- trusts the client's own isCurrentUserCEO() logic. Locked FOR UPDATE so a
+  -- concurrent transfer or role edit can't race this one.
+  SELECT ur.id INTO v_old_ceo_user_role_id
+  FROM core.user_roles ur
+  WHERE ur.user_id = v_caller_id
+    AND ur.role_id = v_ceo_role_id
+    AND ur.is_active = true
+    AND CURRENT_DATE >= ur.effective_from
+    AND (ur.effective_to IS NULL OR ur.effective_to >= CURRENT_DATE)
+  FOR UPDATE;
+
+  IF v_old_ceo_user_role_id IS NULL THEN
+    RAISE EXCEPTION 'transfer_ceo_role: only the current CEO may transfer the CEO role'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- Target must be a real user in the caller's own organization.
+  SELECT organization_id INTO v_new_ceo_org
+  FROM public.profiles
+  WHERE user_id = p_new_ceo_user_id;
+
+  IF v_new_ceo_org IS NULL OR v_new_ceo_org <> v_org THEN
+    RAISE EXCEPTION 'transfer_ceo_role: target user is not in your organization';
+  END IF;
+
+  -- Outgoing role must be a real, non-CEO role visible to this org.
+  SELECT r.name, r.organization_id INTO v_outgoing_role_name, v_outgoing_role_org
+  FROM core.roles r
+  WHERE r.id = p_outgoing_role_id;
+
+  IF v_outgoing_role_name IS NULL THEN
+    RAISE EXCEPTION 'transfer_ceo_role: outgoing role not found';
+  END IF;
+
+  IF p_outgoing_role_id = v_ceo_role_id THEN
+    RAISE EXCEPTION 'transfer_ceo_role: outgoing role cannot be CEO';
+  END IF;
+
+  IF v_outgoing_role_org IS NOT NULL AND v_outgoing_role_org <> v_org THEN
+    RAISE EXCEPTION 'transfer_ceo_role: outgoing role is not available in your organization';
+  END IF;
+
+  -- Also lock whatever active role row(s) the incoming CEO currently holds,
+  -- so the full transfer is serialized against concurrent role changes for
+  -- both users involved.
+  PERFORM 1
+  FROM core.user_roles ur
+  WHERE ur.user_id = p_new_ceo_user_id AND ur.is_active = true
+  FOR UPDATE;
+
+  -- 1. Retire the outgoing CEO's CEO grant.
+  UPDATE core.user_roles
+  SET is_active = false,
+      effective_to = CURRENT_DATE
+  WHERE id = v_old_ceo_user_role_id;
+
+  -- 2. Give the outgoing CEO their new role.
+  INSERT INTO core.user_roles (user_id, role_id, effective_from, is_active, created_by)
+  VALUES (v_caller_id, p_outgoing_role_id, CURRENT_DATE, true, v_caller_id);
+
+  -- 3. Deactivate whatever active role(s) the incoming CEO currently holds --
+  -- one active role at a time, matching core.admin_assign_user_role.
+  UPDATE core.user_roles
+  SET is_active = false,
+      effective_to = CURRENT_DATE
+  WHERE user_id = p_new_ceo_user_id AND is_active = true;
+
+  -- 4. Grant the incoming CEO the CEO role.
+  INSERT INTO core.user_roles (user_id, role_id, effective_from, is_active, created_by)
+  VALUES (p_new_ceo_user_id, v_ceo_role_id, CURRENT_DATE, true, v_caller_id);
+
+  -- 5. Best-effort sync of the legacy public.profiles.role text column, same
+  -- mechanism as core.admin_assign_user_role / core.admin_set_user_role. Only
+  -- written when the value is one profiles_role_check actually allows, so an
+  -- org-specific role name never trips that constraint.
+  PERFORM set_config('core.profiles_guard_bypass', 'on', true);
+
+  UPDATE public.profiles SET role = 'CEO'
+  WHERE user_id = p_new_ceo_user_id AND organization_id = v_org;
+
+  IF v_outgoing_role_name = ANY (ARRAY['CEO','FINANCE_HEAD','ACCOUNTANT','PROJECT_MANAGER','EMPLOYEE','VIEWER','Admin','AUDITOR','HOD','TECHNICAL_ADMIN']) THEN
+    UPDATE public.profiles SET role = v_outgoing_role_name
+    WHERE user_id = v_caller_id AND organization_id = v_org;
+  END IF;
+
+  PERFORM set_config('core.profiles_guard_bypass', 'off', true);
+
+  -- 6. Single audit trail entry covering both sides of the transfer.
+  PERFORM audit.log_action(
+    p_user_id := v_caller_id,
+    p_action := 'CEO_ROLE_TRANSFERRED',
+    p_entity_type := 'core.user_roles',
+    p_entity_id := p_new_ceo_user_id,
+    p_description := 'CEO role transferred',
+    p_old_values := jsonb_build_object('ceo_user_id', v_caller_id),
+    p_new_values := jsonb_build_object(
+      'ceo_user_id', p_new_ceo_user_id,
+      'outgoing_user_id', v_caller_id,
+      'outgoing_role_id', p_outgoing_role_id,
+      'outgoing_role_name', v_outgoing_role_name
+    ),
+    p_reason := p_reason,
+    p_source_module := 'admin.users_roles',
+    p_status := 'success',
+    p_severity := 'warning'
+  );
+
+  v_result := jsonb_build_object(
+    'old_ceo_user_id', v_caller_id,
+    'new_ceo_user_id', p_new_ceo_user_id,
+    'outgoing_role_id', p_outgoing_role_id,
+    'outgoing_role_name', v_outgoing_role_name,
+    'transferred_at', now()
+  );
+
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "core"."transfer_ceo_role"("p_new_ceo_user_id" "uuid", "p_outgoing_role_id" "uuid", "p_reason" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "core"."transfer_ceo_role"("p_new_ceo_user_id" "uuid", "p_outgoing_role_id" "uuid", "p_reason" "text") IS 'AUD-P1-001 fix: previously did not exist, so the CEO-transfer UI at src/app/dashboard/admin/users-roles/page.tsx:553 always failed with PGRST202 (function not found) and CEO succession could not be performed from the product at all. Runs the entire transfer -- retire outgoing CEO grant, assign outgoing CEO their new role, grant incoming CEO the CEO role, sync legacy public.profiles.role, write one audit.log_action entry -- as a single SECURITY DEFINER transaction; any failure inside rolls back the whole operation, so the organization can never end up with zero or two active CEOs. Independently re-verifies the caller holds an active core.user_roles CEO grant, never trusting the client.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "jsonb"
@@ -2712,6 +2928,176 @@ $$;
 
 
 ALTER FUNCTION "finance"."create_platform_settlement_atomic"("p_platform_id" "uuid", "p_financial_account_id" "uuid", "p_settlement_reference" "text", "p_settlement_date" "date", "p_currency" "text", "p_gross_amount" numeric, "p_expected_fee_amount" numeric, "p_actual_fee_amount" numeric, "p_withholding_amount" numeric, "p_withdrawal_fee_amount" numeric, "p_exchange_rate" numeric, "p_notes" "text", "p_fee_variance" numeric, "p_fee_override_reason" "text", "p_fee_override_evidence_reference" "text", "p_lines" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_batch_id uuid := gen_random_uuid();
+  v_batch_number text;
+  v_group jsonb;
+  v_alloc jsonb;
+  v_vendor_id uuid;
+  v_bill RECORD;
+  v_payment_id uuid;
+  v_payment_number text;
+  v_group_total numeric(18,2);
+  v_batch_total numeric(18,2) := 0;
+  v_payment_count int := 0;
+  v_currency text;
+  v_risk_flags jsonb := '[]'::jsonb;
+  v_vendor_totals jsonb := '{}'::jsonb;
+  v_max_vendor_total numeric(18,2) := 0;
+BEGIN
+  IF p_user_id IS NULL OR p_user_id <> auth.uid() OR NOT core.same_org(p_organization_id) THEN
+    RAISE EXCEPTION 'Invalid authenticated organization context';
+  END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to create vendor payment batches';
+  END IF;
+  IF p_payments IS NULL OR jsonb_typeof(p_payments) <> 'array' OR jsonb_array_length(p_payments) = 0 THEN
+    RAISE EXCEPTION 'A batch requires at least one vendor payment';
+  END IF;
+
+  PERFORM 1 FROM finance.financial_accounts
+   WHERE id = p_financial_account_id AND organization_id = p_organization_id AND is_active = true;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Financial account not found or inactive';
+  END IF;
+
+  FOR v_group IN SELECT * FROM jsonb_array_elements(p_payments)
+  LOOP
+    v_vendor_id := (v_group->>'vendor_id')::uuid;
+    IF v_vendor_id IS NULL THEN
+      RAISE EXCEPTION 'Each payment in the batch requires a vendor_id';
+    END IF;
+
+    PERFORM 1 FROM finance.vendors
+     WHERE id = v_vendor_id AND organization_id = p_organization_id AND is_active = true;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Vendor % not found or inactive in your organization', v_vendor_id;
+    END IF;
+
+    IF jsonb_typeof(v_group->'allocations') <> 'array' OR jsonb_array_length(v_group->'allocations') = 0 THEN
+      RAISE EXCEPTION 'Vendor % has no bill allocations', v_vendor_id;
+    END IF;
+
+    v_group_total := 0;
+    v_currency := NULL;
+
+    FOR v_alloc IN SELECT * FROM jsonb_array_elements(v_group->'allocations')
+    LOOP
+      SELECT id, outstanding_amount, currency INTO v_bill
+      FROM finance.vendor_bills
+      WHERE id = (v_alloc->>'vendor_bill_id')::uuid
+        AND organization_id = p_organization_id
+        AND vendor_id = v_vendor_id
+        AND status IN ('POSTED', 'PARTIALLY_PAID')
+        AND outstanding_amount > 0
+      FOR UPDATE;
+
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'Bill % is unavailable, already paid, belongs to a different vendor, or outside your organization', (v_alloc->>'vendor_bill_id');
+      END IF;
+
+      IF v_currency IS NULL THEN
+        v_currency := COALESCE(v_bill.currency, 'PKR');
+      ELSIF v_currency <> COALESCE(v_bill.currency, 'PKR') THEN
+        RAISE EXCEPTION 'All bills allocated to vendor % must share the same currency', v_vendor_id;
+      END IF;
+
+      IF (v_alloc->>'allocated_amount')::numeric > v_bill.outstanding_amount + 0.01 THEN
+        RAISE EXCEPTION 'Allocation of % exceeds outstanding balance (%) for bill %',
+          (v_alloc->>'allocated_amount'), v_bill.outstanding_amount, v_bill.id;
+      END IF;
+
+      v_group_total := v_group_total + (v_alloc->>'allocated_amount')::numeric;
+    END LOOP;
+
+    v_group_total := ROUND(v_group_total, 2);
+    IF v_group_total <= 0 THEN
+      RAISE EXCEPTION 'Payment amount for vendor % must be greater than zero', v_vendor_id;
+    END IF;
+
+    v_payment_number := finance.get_next_number('VENDOR_PAYMENT', p_organization_id);
+
+    INSERT INTO finance.vendor_payments (
+      payment_number, payment_date, amount, currency, exchange_rate, base_amount,
+      vendor_id, financial_account_id, payment_method, reference, description,
+      status, is_batch, batch_id, created_by, organization_id
+    ) VALUES (
+      v_payment_number, p_payment_date, v_group_total, v_currency, 1, v_group_total,
+      v_vendor_id, p_financial_account_id, p_payment_method, p_reference, p_description,
+      'DRAFT', true, v_batch_id, p_user_id, p_organization_id
+    ) RETURNING id INTO v_payment_id;
+
+    INSERT INTO finance.vendor_payment_allocations
+      (vendor_payment_id, vendor_bill_id, allocated_amount, base_allocated_amount, allocated_by)
+    SELECT v_payment_id, (a->>'vendor_bill_id')::uuid, (a->>'allocated_amount')::numeric,
+           (a->>'allocated_amount')::numeric, p_user_id
+    FROM jsonb_array_elements(v_group->'allocations') a;
+
+    INSERT INTO finance.vendor_payment_batch_lines (batch_id, vendor_payment_id, organization_id, amount)
+    VALUES (v_batch_id, v_payment_id, p_organization_id, v_group_total);
+
+    v_batch_total := v_batch_total + v_group_total;
+    v_payment_count := v_payment_count + 1;
+    v_vendor_totals := jsonb_set(
+      v_vendor_totals, ARRAY[v_vendor_id::text],
+      to_jsonb(COALESCE((v_vendor_totals->>v_vendor_id::text)::numeric, 0) + v_group_total)
+    );
+  END LOOP;
+
+  v_batch_total := ROUND(v_batch_total, 2);
+
+  SELECT MAX((kv.value)::numeric) INTO v_max_vendor_total FROM jsonb_each(v_vendor_totals) kv;
+
+  IF v_batch_total > 1000000 THEN
+    v_risk_flags := v_risk_flags || jsonb_build_object(
+      'type', 'HIGH_VALUE_BATCH', 'message', 'Batch total exceeds PKR 1,000,000'
+    );
+  END IF;
+  IF v_payment_count > 20 THEN
+    v_risk_flags := v_risk_flags || jsonb_build_object(
+      'type', 'LARGE_BATCH', 'message', format('Batch contains %s payments', v_payment_count)
+    );
+  END IF;
+  IF v_payment_count > 1 AND v_max_vendor_total > (v_batch_total * 0.7) THEN
+    v_risk_flags := v_risk_flags || jsonb_build_object(
+      'type', 'VENDOR_CONCENTRATION', 'message', 'A single vendor accounts for over 70% of this batch''s value'
+    );
+  END IF;
+
+  BEGIN
+    v_batch_number := finance.get_next_number('VENDOR_PAYMENT_BATCH', p_organization_id);
+  EXCEPTION WHEN OTHERS THEN
+    v_batch_number := 'BATCH-' || to_char(now(), 'YYYYMMDDHH24MISS');
+  END;
+
+  INSERT INTO finance.vendor_payment_batches (
+    id, organization_id, batch_number, payment_date, financial_account_id,
+    status, total_amount, payment_count, risk_flags, created_by
+  ) VALUES (
+    v_batch_id, p_organization_id, v_batch_number, p_payment_date, p_financial_account_id,
+    'DRAFT', v_batch_total, v_payment_count, v_risk_flags, p_user_id
+  );
+
+  RETURN jsonb_build_object(
+    'batch_id', v_batch_id, 'batch_number', v_batch_number,
+    'total_amount', v_batch_total, 'payment_count', v_payment_count,
+    'risk_flags', v_risk_flags
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") IS 'AP-05 fix: creates a finance.vendor_payment_batches row plus one finance.vendor_payments row per vendor (is_batch=true, batch_id set) and one finance.vendor_payment_batch_lines row per vendor, all in a single transaction, with basic risk_flags populated. Replaces the previous batches/route.ts, which never touched any of these tables and instead hardcoded is_batch:false onto a single-vendor payment.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."derive_credit_note_base_amount"() RETURNS "trigger"
@@ -6814,6 +7200,87 @@ COMMENT ON FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid"
 
 
 
+CREATE OR REPLACE FUNCTION "finance"."post_vendor_payment_batch_atomic"("p_batch_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_batch RECORD;
+  v_payment RECORD;
+  v_period_id uuid;
+  v_result jsonb;
+  v_journal_ids jsonb := '[]'::jsonb;
+  v_posted_count int := 0;
+BEGIN
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Access denied: no organization context for caller';
+  END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to post vendor payment batches';
+  END IF;
+
+  SELECT * INTO v_batch
+  FROM finance.vendor_payment_batches
+  WHERE id = p_batch_id AND organization_id = v_org
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Batch not found in your organization';
+  END IF;
+  IF v_batch.status <> 'APPROVED' THEN
+    RAISE EXCEPTION 'Only APPROVED batches can be posted. Current: %', v_batch.status;
+  END IF;
+
+  FOR v_payment IN
+    SELECT * FROM finance.vendor_payments
+    WHERE batch_id = p_batch_id AND organization_id = v_org AND status = 'APPROVED'
+    ORDER BY created_at
+  LOOP
+    SELECT id INTO v_period_id
+    FROM finance.accounting_periods
+    WHERE status = 'OPEN' AND organization_id = v_org
+      AND start_date <= v_payment.payment_date AND end_date >= v_payment.payment_date
+    LIMIT 1;
+
+    IF v_period_id IS NULL THEN
+      RAISE EXCEPTION 'No OPEN accounting period found for payment % (date %) — the whole batch has been rolled back',
+        v_payment.payment_number, v_payment.payment_date;
+    END IF;
+
+    v_result := finance.post_vendor_payment_atomic(v_payment.id, v_period_id, v_payment.payment_date);
+    v_journal_ids := v_journal_ids || jsonb_build_object('payment_id', v_payment.id, 'journal_id', v_result->>'journal_id');
+    v_posted_count := v_posted_count + 1;
+  END LOOP;
+
+  IF v_posted_count = 0 THEN
+    RAISE EXCEPTION 'Batch has no APPROVED payments left to post';
+  END IF;
+  IF v_posted_count <> v_batch.payment_count THEN
+    RAISE EXCEPTION 'Expected to post % payments but found % — the whole batch has been rolled back',
+      v_batch.payment_count, v_posted_count;
+  END IF;
+
+  UPDATE finance.vendor_payment_batches
+  SET status = 'POSTED', posted_by = auth.uid(), posted_at = now(), updated_at = now()
+  WHERE id = p_batch_id AND organization_id = v_org AND status = 'APPROVED';
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Batch status update failed while posting to GL';
+  END IF;
+
+  RETURN jsonb_build_object('batch_id', p_batch_id, 'posted_count', v_posted_count, 'journals', v_journal_ids);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_vendor_payment_batch_atomic"("p_batch_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."post_vendor_payment_batch_atomic"("p_batch_id" "uuid") IS 'AP-05 fix: posts every APPROVED child finance.vendor_payments row in a batch to the GL (via the existing finance.post_vendor_payment_atomic) and only then flips finance.vendor_payment_batches to POSTED, all inside one DB transaction. If any child payment cannot be posted (e.g. missing OPEN accounting period), the whole batch rolls back together instead of leaving some vendors paid and others not.';
+
+
+
 CREATE OR REPLACE FUNCTION "finance"."prevent_closed_period_posting"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$ DECLARE
@@ -9167,6 +9634,24 @@ CREATE OR REPLACE FUNCTION "public"."get_my_permissions"() RETURNS TABLE("permis
       AND CURRENT_DATE >= rp.effective_from
       AND (rp.effective_to IS NULL OR rp.effective_to >= CURRENT_DATE)
   ),
+  -- AUD-P1-008: permissions handed to auth.uid() via an ACTIVE, in-window,
+  -- same-org delegation. data_scope is not stored on core.delegations (it
+  -- delegates specific permission_ids, not a role_permissions row), so we
+  -- inherit the delegator's own current effective scope for that permission,
+  -- falling back to the most conservative scope ('OWN') if the delegator no
+  -- longer holds it directly.
+  delegated_grants AS (
+    SELECT p.code, p.name, p.module,
+           COALESCE(NULLIF(core.get_data_scope(d.from_user_id, p.code), 'NONE'), 'OWN') AS data_scope,
+           15 AS priority, d.effective_from
+    FROM core.delegations d
+    JOIN core.permissions p ON p.id = ANY(d.permission_ids)
+    WHERE d.to_user_id = auth.uid()
+      AND d.status = 'ACTIVE'
+      AND CURRENT_DATE >= d.effective_from
+      AND CURRENT_DATE <= d.effective_to
+      AND d.organization_id = core.current_user_org_id()
+  ),
   allow_overrides AS (
     SELECT p.code, p.name, p.module, upo.data_scope,
            20 AS priority, upo.effective_from
@@ -9184,6 +9669,8 @@ CREATE OR REPLACE FUNCTION "public"."get_my_permissions"() RETURNS TABLE("permis
       code, name, module, data_scope
     FROM (
       SELECT * FROM role_grants
+      UNION ALL
+      SELECT * FROM delegated_grants
       UNION ALL
       SELECT * FROM allow_overrides
     ) grants
@@ -9206,6 +9693,10 @@ $$;
 
 
 ALTER FUNCTION "public"."get_my_permissions"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."get_my_permissions"() IS 'AUD-P1-008 fix: now also returns permissions granted via an ACTIVE, in-window, same-org core.delegations row (delegated_grants CTE), subject to the same per-user DENY override as role grants and ALLOW overrides. This is the RPC src/lib/api-auth.ts requirePermission() and src/context/PermissionContext.tsx both call, so this closes the gap end-to-end for both API routes and the UI.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."get_my_user_roles"() RETURNS TABLE("role_id" "uuid", "role" "text", "display_name" "text", "is_active" boolean, "effective_from" "date", "effective_to" "date", "level" integer)
@@ -21415,7 +21906,7 @@ CREATE POLICY "employee_links_update_org_scoped" ON "core"."employee_links" FOR 
 ALTER TABLE "core"."idempotency_keys" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "idempotency_keys_read_finance" ON "core"."idempotency_keys" FOR SELECT TO "authenticated" USING ("core"."is_finance_head"());
+CREATE POLICY "idempotency_keys_read_finance" ON "core"."idempotency_keys" FOR SELECT TO "authenticated" USING (("core"."is_finance_head"() AND "core"."same_org"("organization_id")));
 
 
 
@@ -21688,11 +22179,11 @@ ALTER TABLE "finance"."attachments" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."attendance_period_snapshots" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "attendance_period_snapshots_insert" ON "finance"."attendance_period_snapshots" FOR INSERT WITH CHECK (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()));
+CREATE POLICY "attendance_period_snapshots_insert" ON "finance"."attendance_period_snapshots" FOR INSERT WITH CHECK ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"()) AND "core"."shared_person_same_org"("shared_person_id")));
 
 
 
-CREATE POLICY "attendance_period_snapshots_select" ON "finance"."attendance_period_snapshots" FOR SELECT USING (("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")));
+CREATE POLICY "attendance_period_snapshots_select" ON "finance"."attendance_period_snapshots" FOR SELECT USING ((("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."shared_person_same_org"("shared_person_id")));
 
 
 
@@ -22447,15 +22938,15 @@ CREATE POLICY "tax_codes_update_org" ON "finance"."tax_codes" FOR UPDATE TO "aut
 
 
 
-CREATE POLICY "tax_comp_delete" ON "finance"."tax_computations" FOR DELETE TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
+CREATE POLICY "tax_comp_delete" ON "finance"."tax_computations" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"())));
 
 
 
-CREATE POLICY "tax_comp_insert" ON "finance"."tax_computations" FOR INSERT TO "authenticated" WITH CHECK ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "tax_comp_insert" ON "finance"."tax_computations" FOR INSERT TO "authenticated" WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
-CREATE POLICY "tax_comp_select" ON "finance"."tax_computations" FOR SELECT TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('AUDITOR'::"text"))));
+CREATE POLICY "tax_comp_select" ON "finance"."tax_computations" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('AUDITOR'::"text"))));
 
 
 
@@ -22463,7 +22954,7 @@ CREATE POLICY "tax_comp_service" ON "finance"."tax_computations" TO "service_rol
 
 
 
-CREATE POLICY "tax_comp_update" ON "finance"."tax_computations" FOR UPDATE TO "authenticated" USING ((("organization_id" = "core"."current_user_org_config_id"()) AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+CREATE POLICY "tax_comp_update" ON "finance"."tax_computations" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_ceo_or_admin"() OR "core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
 
 
 
@@ -23330,12 +23821,7 @@ CREATE POLICY "cash_flow_forecasts_update_org" ON "reporting"."cash_flow_forecas
 
 
 
-
-
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
-
-
-
 
 
 
@@ -23464,8 +23950,20 @@ GRANT ALL ON FUNCTION "core"."same_org"("p_organization_id" "uuid") TO "service_
 
 
 
+REVOKE ALL ON FUNCTION "core"."shared_person_same_org"("p_shared_person_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "core"."shared_person_same_org"("p_shared_person_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "core"."shared_person_same_org"("p_shared_person_id" "uuid") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", "p_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "core"."transfer_ceo_role"("p_new_ceo_user_id" "uuid", "p_outgoing_role_id" "uuid", "p_reason" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "core"."transfer_ceo_role"("p_new_ceo_user_id" "uuid", "p_outgoing_role_id" "uuid", "p_reason" "text") TO "authenticated";
+
 
 
 
@@ -23537,6 +24035,11 @@ GRANT ALL ON FUNCTION "finance"."create_fixed_asset"("p_input" "jsonb", "p_creat
 
 REVOKE ALL ON FUNCTION "finance"."create_platform_settlement_atomic"("p_platform_id" "uuid", "p_financial_account_id" "uuid", "p_settlement_reference" "text", "p_settlement_date" "date", "p_currency" "text", "p_gross_amount" numeric, "p_expected_fee_amount" numeric, "p_actual_fee_amount" numeric, "p_withholding_amount" numeric, "p_withdrawal_fee_amount" numeric, "p_exchange_rate" numeric, "p_notes" "text", "p_fee_variance" numeric, "p_fee_override_reason" "text", "p_fee_override_evidence_reference" "text", "p_lines" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."create_platform_settlement_atomic"("p_platform_id" "uuid", "p_financial_account_id" "uuid", "p_settlement_reference" "text", "p_settlement_date" "date", "p_currency" "text", "p_gross_amount" numeric, "p_expected_fee_amount" numeric, "p_actual_fee_amount" numeric, "p_withholding_amount" numeric, "p_withdrawal_fee_amount" numeric, "p_exchange_rate" numeric, "p_notes" "text", "p_fee_variance" numeric, "p_fee_override_reason" "text", "p_fee_override_evidence_reference" "text", "p_lines" "jsonb") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") TO "authenticated";
 
 
 
@@ -23705,6 +24208,11 @@ GRANT ALL ON FUNCTION "finance"."post_vendor_bill_atomic"("p_bill_id" "uuid", "p
 
 REVOKE ALL ON FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_vendor_payment_batch_atomic"("p_batch_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_vendor_payment_batch_atomic"("p_batch_id" "uuid") TO "authenticated";
 
 
 

@@ -1,80 +1,182 @@
 "use client";
-import { useState } from "react";
-import { useAuth } from "@/context/AuthContext";
+import { useEffect, useState } from "react";
 import { usePermissions } from "@/context/PermissionContext";
-import { Bell, Save, Mail, MessageSquare, Clock, AlertTriangle } from "lucide-react";
+import { Bell, Save, Mail, MessageSquare, Loader2 } from "lucide-react";
 import toast from "react-hot-toast";
 
-interface NotificationSetting {
-  key: string;
-  label: string;
-  description: string;
+// AUD-P1-007 FIX: this page used to render a hardcoded DEFAULT_SETTINGS
+// array (per-event toggles like "invoice_created") and save it into
+// profiles.notification_settings JSONB — a field nothing ever read back —
+// falling back to localStorage on any DB error. Nothing loaded on mount, so
+// every reload silently reset the UI to the hardcoded defaults while the
+// "saved" state (DB or localStorage) sat unread.
+//
+// The real store is public.notification_preferences (one row per user +
+// category + channel, see migration P1_034 / schema.sql), fronted by the
+// already-hardened /api/notifications/preferences GET/POST route. That
+// table's granularity is per-category-per-channel, not per individual
+// event key, so this page now persists at that same granularity: each
+// category below is still described by its underlying events (for
+// context), but what is actually saved/loaded is an Email / In-App / SMS
+// toggle per category, matching what the table and API can actually store.
+
+type Channel = "EMAIL" | "IN_APP" | "SMS";
+const CHANNELS: Channel[] = ["EMAIL", "IN_APP", "SMS"];
+const CHANNEL_LABELS: Record<Channel, string> = { EMAIL: "Email", IN_APP: "In-App", SMS: "SMS" };
+const CHANNEL_ICONS: Record<Channel, typeof Mail> = { EMAIL: Mail, IN_APP: Bell, SMS: MessageSquare };
+
+interface CategoryInfo {
   category: string;
-  enabled: boolean;
+  events: { label: string; description: string }[];
 }
 
-const DEFAULT_SETTINGS: NotificationSetting[] = [
-  // Invoices
-  { key: "invoice_created", label: "Invoice Created", description: "When a new invoice is generated", category: "Invoices", enabled: true },
-  { key: "invoice_overdue", label: "Invoice Overdue", description: "When an invoice passes its due date", category: "Invoices", enabled: true },
-  { key: "payment_received", label: "Payment Received", description: "When a payment receipt is recorded", category: "Invoices", enabled: true },
-  // Expenses
-  { key: "expense_submitted", label: "Expense Submitted", description: "When a new expense is submitted", category: "Expenses", enabled: false },
-  { key: "expense_approved", label: "Expense Approved", description: "When an expense is approved", category: "Expenses", enabled: true },
-  // Budgets
-  { key: "budget_threshold_80", label: "Budget 80% Used", description: "When a budget reaches 80% utilization", category: "Budgets", enabled: true },
-  { key: "budget_threshold_100", label: "Budget Exceeded", description: "When a budget exceeds 100%", category: "Budgets", enabled: true },
-  // Vendor
-  { key: "vendor_bill_due", label: "Vendor Bill Due", description: "When a vendor bill is approaching due date", category: "Vendors", enabled: true },
-  { key: "vendor_payment_made", label: "Vendor Payment Made", description: "When a vendor payment is processed", category: "Vendors", enabled: false },
-  // Tax
-  { key: "tax_filing_due", label: "Tax Filing Due", description: "When a tax filing deadline is approaching", category: "Tax", enabled: true },
-  { key: "tax_filing_overdue", label: "Tax Filing Overdue", description: "When a tax filing deadline has passed", category: "Tax", enabled: true },
-  // System
-  { key: "user_role_changed", label: "User Role Changed", description: "When a user's role is modified", category: "System", enabled: true },
-  { key: "new_user_registered", label: "New User Registered", description: "When a new user signs up", category: "System", enabled: true },
+// Descriptive only — which events fall under each category. Individual
+// events are not separately configurable (the schema doesn't support that
+// granularity); this is shown so the user knows what a category covers.
+const CATEGORY_INFO: CategoryInfo[] = [
+  {
+    category: "Invoices",
+    events: [
+      { label: "Invoice Created", description: "When a new invoice is generated" },
+      { label: "Invoice Overdue", description: "When an invoice passes its due date" },
+      { label: "Payment Received", description: "When a payment receipt is recorded" },
+    ],
+  },
+  {
+    category: "Expenses",
+    events: [
+      { label: "Expense Submitted", description: "When a new expense is submitted" },
+      { label: "Expense Approved", description: "When an expense is approved" },
+    ],
+  },
+  {
+    category: "Budgets",
+    events: [
+      { label: "Budget 80% Used", description: "When a budget reaches 80% utilization" },
+      { label: "Budget Exceeded", description: "When a budget exceeds 100%" },
+    ],
+  },
+  {
+    category: "Vendors",
+    events: [
+      { label: "Vendor Bill Due", description: "When a vendor bill is approaching due date" },
+      { label: "Vendor Payment Made", description: "When a vendor payment is processed" },
+    ],
+  },
+  {
+    category: "Tax",
+    events: [
+      { label: "Tax Filing Due", description: "When a tax filing deadline is approaching" },
+      { label: "Tax Filing Overdue", description: "When a tax filing deadline has passed" },
+    ],
+  },
+  {
+    category: "System",
+    events: [
+      { label: "User Role Changed", description: "When a user's role is modified" },
+      { label: "New User Registered", description: "When a new user signs up" },
+    ],
+  },
 ];
 
-const CATEGORIES = ["Invoices", "Expenses", "Budgets", "Vendors", "Tax", "System"];
-const CHANNEL_ICONS = { email: Mail, in_app: Bell, sms: MessageSquare };
+// enabled defaults to true for any (category, channel) pair with no row yet
+// in notification_preferences — this matches that table's own column
+// default (enabled boolean DEFAULT true).
+type PrefMatrix = Record<string, Record<Channel, boolean>>;
+
+function buildDefaultMatrix(): PrefMatrix {
+  const matrix: PrefMatrix = {};
+  for (const { category } of CATEGORY_INFO) {
+    matrix[category] = { EMAIL: true, IN_APP: true, SMS: false };
+  }
+  return matrix;
+}
 
 export default function NotificationsPage() {
-  const { user } = useAuth();
   const { hasPermission, isLoading: permLoading } = usePermissions();
-  const [settings, setSettings] = useState<NotificationSetting[]>(DEFAULT_SETTINGS);
-  const [channels, setChannels] = useState({ email: true, in_app: true, sms: false });
+  const [matrix, setMatrix] = useState<PrefMatrix>(buildDefaultMatrix());
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const canModify = hasPermission ? hasPermission("SETTINGS_MANAGE") : false;
 
-  function toggleSetting(key: string) {
-    setSettings(prev => prev.map(s => s.key === key ? { ...s, enabled: !s.enabled } : s));
+  // AUD-P1-007 FIX: actually load the user's saved preferences on mount
+  // instead of always starting from hardcoded defaults.
+  useEffect(() => {
+    let cancelled = false;
+    async function loadPreferences() {
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const res = await fetch("/api/notifications/preferences");
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload?.error || "Failed to load notification preferences");
+        if (cancelled) return;
+
+        const next = buildDefaultMatrix();
+        for (const row of payload?.preferences || []) {
+          const category = String(row?.category || "");
+          const channel = String(row?.channel || "").toUpperCase() as Channel;
+          if (next[category] && CHANNELS.includes(channel)) {
+            next[category][channel] = Boolean(row.enabled);
+          }
+        }
+        setMatrix(next);
+      } catch (err: any) {
+        if (!cancelled) setLoadError(err.message || "Failed to load notification preferences");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    loadPreferences();
+    return () => { cancelled = true; };
+  }, []);
+
+  function toggleCell(category: string, channel: Channel) {
+    setMatrix(prev => ({
+      ...prev,
+      [category]: { ...prev[category], [channel]: !prev[category][channel] },
+    }));
   }
 
-  function toggleChannel(ch: "email" | "in_app" | "sms") {
-    setChannels(prev => ({ ...prev, [ch]: !prev[ch] }));
+  function toggleCategoryAll(category: string, enabled: boolean) {
+    setMatrix(prev => ({
+      ...prev,
+      [category]: { EMAIL: enabled, IN_APP: enabled, SMS: enabled },
+    }));
   }
 
-  function toggleCategory(cat: string, enabled: boolean) {
-    setSettings(prev => prev.map(s => s.category === cat ? { ...s, enabled } : s));
+  // Convenience bulk action: flip one channel across every category at
+  // once (e.g. "turn off SMS everywhere"). Purely a local-state shortcut —
+  // it still saves as individual per-category rows, there is no separate
+  // "global channel" concept in the schema.
+  function toggleChannelEverywhere(channel: Channel) {
+    setMatrix(prev => {
+      const allCurrentlyOn = CATEGORY_INFO.every(({ category }) => prev[category][channel]);
+      const next: PrefMatrix = {};
+      for (const { category } of CATEGORY_INFO) {
+        next[category] = { ...prev[category], [channel]: !allCurrentlyOn };
+      }
+      return next;
+    });
   }
 
   async function handleSave() {
     setSaving(true);
-    // Save to profiles.notification_settings or a dedicated table
-    // For now, we save to local storage as a placeholder
     try {
-      const payload = { notification_settings: settings, notification_channels: channels };
-      if (user) {
-        const { error } = await (await import("@/lib/supabase")).supabase
-          .from("profiles")
-          .update({ notification_settings: payload })
-          .eq("user_id", user.id);
-        if (error) {
-          // Fallback: save to localStorage
-          localStorage.setItem(`notif_${user.id}`, JSON.stringify(payload));
-        }
-      }
+      const preferences = CATEGORY_INFO.flatMap(({ category }) =>
+        CHANNELS.map(channel => ({ category, channel, enabled: matrix[category][channel] }))
+      );
+
+      const res = await fetch("/api/notifications/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preferences }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload?.error || "Failed to save preferences");
+
       toast.success("Notification preferences saved");
     } catch (err: any) {
       toast.error("Error saving: " + (err.message || "Unknown"));
@@ -83,14 +185,20 @@ export default function NotificationsPage() {
     }
   }
 
-  if (permLoading) return <div className="p-8 text-center text-gray-500">Loading...</div>;
+  if (permLoading || loading) {
+    return (
+      <div className="p-8 flex items-center justify-center text-gray-500 gap-2">
+        <Loader2 className="w-5 h-5 animate-spin" /> Loading...
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2"><Bell className="w-7 h-7 text-amber-600" /> Notification Preferences</h2>
-          <p className="text-gray-500 dark:text-gray-400 text-sm">Configure which events trigger notifications and how you receive them</p>
+          <p className="text-gray-500 dark:text-gray-400 text-sm">Choose which categories notify you, and through which channel</p>
         </div>
         {canModify && (
           <button onClick={handleSave} disabled={saving} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg font-medium transition-colors w-fit shadow-sm disabled:opacity-50">
@@ -99,44 +207,65 @@ export default function NotificationsPage() {
         )}
       </div>
 
-      {/* Delivery Channels */}
+      {loadError && (
+        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm rounded-xl p-4">
+          Couldn't load your saved preferences ({loadError}). Showing defaults — saving will overwrite them.
+        </div>
+      )}
+
+      {/* Delivery Channels — bulk shortcut, not separately stored */}
       <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
-        <h3 className="text-sm font-bold text-gray-900 dark:text-white mb-4">Delivery Channels</h3>
+        <h3 className="text-sm font-bold text-gray-900 dark:text-white mb-1">Delivery Channels</h3>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">Quickly turn a channel on or off across every category below</p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {(["email", "in_app", "sms"] as const).map(ch => {
+          {CHANNELS.map(ch => {
             const Icon = CHANNEL_ICONS[ch];
-            const labels: Record<string, string> = { email: "Email", in_app: "In-App", sms: "SMS" };
+            const allOn = CATEGORY_INFO.every(({ category }) => matrix[category][ch]);
             return (
-              <label key={ch} className={`flex items-center gap-3 p-3 border rounded-lg cursor-pointer transition-colors ${channels[ch] ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20" : "border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50"}`}>
-                <input type="checkbox" checked={channels[ch]} onChange={() => toggleChannel(ch)} className="w-4 h-4 rounded border-gray-300 text-blue-600" />
-                <Icon size={18} className={channels[ch] ? "text-blue-600" : "text-gray-400"} />
-                <span className="text-sm font-medium text-gray-900 dark:text-white">{labels[ch]}</span>
-              </label>
+              <button
+                key={ch}
+                type="button"
+                onClick={() => toggleChannelEverywhere(ch)}
+                className={`flex items-center gap-3 p-3 border rounded-lg transition-colors text-left ${allOn ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20" : "border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50"}`}
+              >
+                <Icon size={18} className={allOn ? "text-blue-600" : "text-gray-400"} />
+                <span className="text-sm font-medium text-gray-900 dark:text-white">{CHANNEL_LABELS[ch]}</span>
+              </button>
             );
           })}
         </div>
       </div>
 
       {/* Notification Categories */}
-      {CATEGORIES.map(cat => {
-        const catSettings = settings.filter(s => s.category === cat);
-        const allEnabled = catSettings.every(s => s.enabled);
+      {CATEGORY_INFO.map(({ category, events }) => {
+        const allEnabled = CHANNELS.every(ch => matrix[category][ch]);
         return (
-          <div key={cat} className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
+          <div key={category} className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-5">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-bold text-gray-900 dark:text-white">{cat}</h3>
-              <button onClick={() => toggleCategory(cat, !allEnabled)} className={`text-xs font-medium px-2.5 py-1 rounded-lg transition-colors ${allEnabled ? "bg-gray-100 dark:bg-gray-700 text-gray-600 hover:bg-gray-200" : "bg-blue-100 dark:bg-blue-900/30 text-blue-600"}`}>{allEnabled ? "Disable All" : "Enable All"}</button>
+              <h3 className="text-sm font-bold text-gray-900 dark:text-white">{category}</h3>
+              <button onClick={() => toggleCategoryAll(category, !allEnabled)} className={`text-xs font-medium px-2.5 py-1 rounded-lg transition-colors ${allEnabled ? "bg-gray-100 dark:bg-gray-700 text-gray-600 hover:bg-gray-200" : "bg-blue-100 dark:bg-blue-900/30 text-blue-600"}`}>{allEnabled ? "Disable All" : "Enable All"}</button>
             </div>
-            <div className="space-y-2">
-              {catSettings.map(s => (
-                <label key={s.key} className="flex items-center justify-between p-2.5 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/30 cursor-pointer transition-colors">
-                  <div>
-                    <span className="text-sm font-medium text-gray-900 dark:text-white">{s.label}</span>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">{s.description}</p>
-                  </div>
-                  <input type="checkbox" checked={s.enabled} onChange={() => toggleSetting(s.key)} className="w-4 h-4 rounded border-gray-300 text-blue-600 flex-shrink-0" />
-                </label>
+
+            <ul className="mb-4 space-y-1">
+              {events.map(ev => (
+                <li key={ev.label} className="text-xs text-gray-500 dark:text-gray-400">
+                  <span className="font-medium text-gray-700 dark:text-gray-300">{ev.label}:</span> {ev.description}
+                </li>
               ))}
+            </ul>
+
+            <div className="flex flex-wrap gap-2">
+              {CHANNELS.map(ch => {
+                const Icon = CHANNEL_ICONS[ch];
+                const on = matrix[category][ch];
+                return (
+                  <label key={ch} className={`flex items-center gap-2 px-3 py-2 border rounded-lg cursor-pointer transition-colors ${on ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20" : "border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50"}`}>
+                    <input type="checkbox" checked={on} onChange={() => toggleCell(category, ch)} className="w-4 h-4 rounded border-gray-300 text-blue-600" />
+                    <Icon size={16} className={on ? "text-blue-600" : "text-gray-400"} />
+                    <span className="text-sm font-medium text-gray-900 dark:text-white">{CHANNEL_LABELS[ch]}</span>
+                  </label>
+                );
+              })}
             </div>
           </div>
         );

@@ -602,6 +602,42 @@ export default function UsersRolesPage() {
     } finally { setSearchingEmail(false); }
   };
 
+  // AUD-P1-005 FIX: single shared helper that calls the hardened
+  // /api/admin/users endpoint (action: assign_role) instead of writing
+  // core.user_roles (delete + insert) and profiles.role directly from the
+  // browser. That direct-write path bypassed requirePermission('ADMIN_USERS'),
+  // enforceMFA(), and audit.log_action() — all of which this API route
+  // already enforces server-side — and silently ignored the
+  // trg_guard_profiles_privilege_columns trigger error on the profiles
+  // update. core.admin_assign_user_role() (called by the API) performs the
+  // deactivate-old-role + insert-new-role + profiles.role sync as one
+  // transaction, so a failure partway through can no longer leave a user
+  // with no active role.
+  const assignRoleViaApi = async (
+    targetUserId: string,
+    roleId: string,
+    effectiveFrom?: string | null,
+    effectiveTo?: string | null
+  ) => {
+    const roleName = roles.find(r => r.id === roleId)?.name;
+    if (!roleName) throw new Error('Selected role could not be resolved');
+
+    const res = await fetch('/api/admin/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'assign_role',
+        userId: targetUserId,
+        role: roleName,
+        ...(effectiveFrom ? { effectiveFrom } : {}),
+        ...(effectiveTo ? { effectiveTo } : {}),
+      }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload?.error || 'Role assignment failed');
+    return payload;
+  };
+
   const handleAssignRole = async () => {
     const ceoRole = getCEORole();
     if (ceoRole && assignForm.role_id === ceoRole.id) {
@@ -619,42 +655,17 @@ export default function UsersRolesPage() {
 
     setSaving(true);
     try {
-      // Auto-create profile if user doesn't have one
       const targetUser = allUsers.find(u => u.user_id === assignForm.user_id);
-      if (targetUser && !targetUser.has_profile) {
-        const { error: profileErr } = await supabase.rpc('ensure_profile_exists', { target_user_id: assignForm.user_id });
-        if (profileErr) {
-          console.warn('Auto-create profile failed, trying manual insert:', profileErr.message);
-          // Fallback: manual insert
-          const userEmail = targetUser.email || emailManualInput;
-          await supabase.from('profiles').insert({
-            user_id: assignForm.user_id,
-            email: userEmail,
-            full_name: '',
-            role: 'EMPLOYEE'
-          });
-        }
-      }
 
-      // Check if user already has a role
-      if (targetUser?.hasRole) {
-        await supabase.schema("core").from("user_roles").delete().eq("user_id", assignForm.user_id);
-      }
-
-      await supabase.schema("core").from("user_roles").insert({
-        user_id: assignForm.user_id,
-        role_id: assignForm.role_id,
-        effective_from: assignForm.effective_from,
-        effective_to: assignForm.effective_to,
-        delegated_from: assignForm.delegated_from,
-        created_by: user?.id
-      });
-
-      const roleName = roles.find(r => r.id === assignForm.role_id)?.name || 'EMPLOYEE';
-      await supabase.from("profiles").update({ role: roleName }).eq("user_id", assignForm.user_id);
+      await assignRoleViaApi(
+        assignForm.user_id,
+        assignForm.role_id,
+        assignForm.effective_from,
+        assignForm.effective_to
+      );
 
       const userName = targetUser?.full_name || targetUser?.email || emailManualInput || "User";
-      addToast("success", `Role assigned to "${userName}"${!targetUser?.has_profile ? ' (profile auto-created)' : ''}`);
+      addToast("success", `Role assigned to "${userName}"`);
       setShowAssignModal(false);
       fetchInitialData();
     } catch (err: any) { addToast("error", `Failed: ${err.message}`); }
@@ -689,34 +700,7 @@ export default function UsersRolesPage() {
       variant: "warning",
       onConfirm: async () => {
         try {
-          // Auto-create profile if user doesn't have one
-          const targetUser = allUsers.find(u => u.user_id === userId);
-          if (targetUser && !targetUser.has_profile) {
-            const { error: profileErr } = await supabase.rpc('ensure_profile_exists', { target_user_id: userId });
-            if (profileErr) {
-              console.warn('Auto-create profile failed, trying manual insert:', profileErr.message);
-              await supabase.from('profiles').insert({
-                user_id: userId,
-                email: targetUser.email || '',
-                full_name: '',
-                role: 'EMPLOYEE'
-              });
-            }
-          }
-
-          if (hasExistingRole) {
-            await supabase.schema("core").from("user_roles").delete().eq("user_id", userId);
-          }
-          
-          await supabase.schema("core").from("user_roles").insert({ 
-            user_id: userId, 
-            role_id: newRoleId, 
-            effective_from: new Date().toISOString().split('T')[0],
-            created_by: user?.id 
-          });
-
-          const roleName = roles.find(r => r.id === newRoleId)?.name || 'EMPLOYEE';
-          await supabase.from("profiles").update({ role: roleName }).eq("user_id", userId);
+          await assignRoleViaApi(userId, newRoleId, new Date().toISOString().split('T')[0]);
 
           addToast("success", `Role ${actionText.toLowerCase()}d for "${userName}"`);
           fetchInitialData();

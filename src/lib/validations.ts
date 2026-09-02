@@ -248,6 +248,16 @@ export const adminRoleSchema = z.enum([
   'VIEWER', 'AUDITOR', 'TECH_ADMIN', 'TECHNICAL_ADMIN', 'Admin',
 ]);
 
+// AUD-P1-005 FIX: core.roles is not limited to the fixed set above — it
+// also has system roles that were never added to that enum (e.g. 'HOD',
+// see P1_064/P1_065), and organizations can create arbitrary custom roles
+// from this same admin page (see handleCreateRole in
+// users-roles/page.tsx, which stores role names derived from a free-text
+// display name). core.admin_assign_user_role() itself already rejects any
+// name that isn't a real, org-visible role ('Role % is not configured'),
+// so this only needs to be a basic sanity check, not a closed list.
+export const adminRoleNameSchema = z.string().trim().min(1).max(100);
+
 const adminDate = isoDate;
 export const adminInviteSchema = z.object({
   action: z.literal('invite'),
@@ -261,7 +271,7 @@ export const adminInviteSchema = z.object({
 export const adminAssignRoleSchema = z.object({
   action: z.literal('assign_role'),
   userId: uuidSchema,
-  role: adminRoleSchema,
+  role: adminRoleNameSchema,
   effectiveFrom: adminDate.optional(),
   effectiveTo: adminDate.nullable().optional(),
 }).strict();
