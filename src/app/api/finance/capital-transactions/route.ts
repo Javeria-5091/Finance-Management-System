@@ -95,39 +95,14 @@ export async function POST(req:NextRequest)
             if(!['EQUITY','LIABILITY'].includes(equityAccount.account_type))
                 throw new Error('Equity/loan account must be an EQUITY or LIABILITY account');
 
-            const amount=Number(row.amount);
-            const cashLedgerAccountId=financialAccount.linked_ledger_account_id;
-            const equityLedgerAccountId=equityAccount.id;
-            const direction=resolveLegs(row.transaction_type);
+            const amount = Number(row.amount);
 
-            const lines = direction==='CASH_DEBIT'
-              ? [
-                  {account_id:cashLedgerAccountId,debit_amount:amount,credit_amount:0,description:`${row.transaction_type}: cash leg`},
-                  {account_id:equityLedgerAccountId,debit_amount:0,credit_amount:amount,description:`${row.transaction_type}: equity leg`},
-                ]
-              : [
-                  {account_id:equityLedgerAccountId,debit_amount:amount,credit_amount:0,description:`${row.transaction_type}: equity leg`},
-                  {account_id:cashLedgerAccountId,debit_amount:0,credit_amount:amount,description:`${row.transaction_type}: cash leg`},
-                ];
-
-            const {data:journalId,error:postErr}=await supabase.schema('finance').rpc('post_journal_entry',{
-                p_description: row.description || `Capital transaction: ${row.transaction_type}`,
-                p_transaction_date: row.transaction_date,
-                p_period_id: b.period_id,
-                p_lines: lines,
-                p_currency: row.currency || 'PKR',
-                p_exchange_rate: 1,
-                p_source_type: 'CAPITAL_TRANSACTION',
-                p_source_id: row.id,
+            const {data:journalId,error:postErr}=await supabase.schema('finance').rpc('post_capital_transaction_atomic',{
+                p_transaction_id:b.id,
+                p_period_id:b.period_id,
             });
             if(postErr||!journalId)
-                throw new Error('GL posting failed: '+(postErr?.message||'Unknown error'));
-
-            const {error:updateErr}=await supabase.schema('finance').from('capital_transactions')
-                .update({status:'POSTED',journal_entry_id:journalId,posted_by:a.userId,posted_at:new Date().toISOString()})
-                .eq('id',b.id).eq('organization_id',a.orgId);
-            if(updateErr)
-                return NextResponse.json({error:'Journal posted but transaction status update failed: '+updateErr.message,journal_id:journalId,partial_success:true},{status:500});
+                throw new Error('Atomic capital transaction posting failed: '+(postErr?.message||'Unknown error'));
 
             try{
                 await supabase.schema('audit').rpc('log_action',{

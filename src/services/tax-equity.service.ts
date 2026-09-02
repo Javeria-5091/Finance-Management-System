@@ -407,8 +407,18 @@ export const getProfitDistributionWithLines = async (orgId: string, id: string) 
 };
 
 export const createProfitDistribution = async (orgId: string, payload: any) => {
-  const { data, error } = await db.from('profit_distributions').insert({ ...payload, organization_id: orgId }).select().single();
-  return { data: data as ProfitDistribution, error };
+  // AUD-P2-008: never persist a client-declared profit figure. The server
+  // computes the selected fiscal year's posted P&L and applies the active
+  // reserve policy inside one SECURITY DEFINER transaction.
+  const res = await fetch('/api/finance/profit-distributions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ fiscal_year_id: payload?.fiscal_year_id }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) return { data: null, error: new Error(body.error || 'Failed to create profit distribution') };
+  return { data: body.data as ProfitDistribution, error: null };
 };
 
 export const updateProfitDistribution = async (id: string, payload: any) => {

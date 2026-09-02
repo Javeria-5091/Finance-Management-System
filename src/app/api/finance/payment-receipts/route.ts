@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { createHash } from 'crypto';
 import { getAuthSupabase } from '@/lib/api-auth';
 import { requirePermission } from '@/lib/api-auth';
 import { enforceMFA } from '@/lib/mfa-middleware';
@@ -99,6 +100,21 @@ export async function POST(req: NextRequest) {
 
   try {
     const rawBody = await req.json();
+    const idempotencyKey = req.headers.get('Idempotency-Key')?.trim();
+    if (!idempotencyKey) return NextResponse.json({ error: 'Idempotency-Key header is required for payment receipt commands' }, { status: 400 });
+    if (idempotencyKey.length > 200) return NextResponse.json({ error: 'Idempotency-Key is too long' }, { status: 400 });
+    const requestHash = createHash('sha256').update(JSON.stringify(rawBody)).digest('hex');
+    // Replay the stored response before re-validating mutable invoice balances.
+    // This makes a successful command safely retryable even after its invoices
+    // have become PAID/PARTIALLY_PAID.
+    const { data: idempotencyState, error: idempotencyLookupError } = await supabase.schema('finance').rpc('get_payment_receipt_idempotency', {
+      p_idempotency_key: idempotencyKey,
+      p_request_hash: requestHash,
+    });
+    if (idempotencyLookupError) return NextResponse.json({ error: idempotencyLookupError.message }, { status: 400 });
+    if (idempotencyState?.idempotent_replay) {
+      return NextResponse.json({ success: true, ...idempotencyState, message: 'Payment receipt request replayed safely' }, { status: 200 });
+    }
     const validation = validateBody(paymentReceiptSchema, rawBody);
     if (!validation.success) return NextResponse.json({ error: validation.error }, { status: 400 });
     const {
@@ -262,8 +278,9 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // Atomic DB transaction: receipt + allocations + invoice balances + GL posting.
-    const { data: atomicResult, error: atomicError } = await supabase.schema('finance').rpc('post_payment_receipt_atomic', {
+    // AUD-P2-006: idempotency is part of the same DB transaction as receipt
+    // creation, allocations, invoice balance updates and GL posting.
+    const { data: atomicResult, error: atomicError } = await supabase.schema('finance').rpc('post_payment_receipt_idempotent', {
       p_client_id: client_id,
       p_amount: paymentAmount,
       p_currency: currency || 'PKR',
@@ -274,10 +291,16 @@ export async function POST(req: NextRequest) {
       p_financial_account_id: financial_account_id,
       p_notes: notes || null,
       p_allocations: allocationRecords,
+      p_idempotency_key: idempotencyKey,
+      p_request_hash: requestHash,
     });
 
     if (atomicError || !atomicResult) {
       return NextResponse.json({ error: 'Payment receipt transaction failed: ' + (atomicError?.message || 'Unknown error') }, { status: 500 });
+    }
+
+    if (atomicResult.idempotent_replay) {
+      return NextResponse.json({ success: true, ...atomicResult, message: 'Payment receipt request replayed safely' }, { status: 200 });
     }
 
     const receiptId = atomicResult.receipt_id;

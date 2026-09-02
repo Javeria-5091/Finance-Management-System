@@ -57,6 +57,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: rateError }, { status: 400 });
     }
 
+    // P2-005 FIX: enforce invoice arithmetic again at posting time. This protects
+    // against legacy/integration rows that bypassed the create API.
+    const invoiceSubtotal = Number(invoice.subtotal ?? invoice.amount ?? 0);
+    const invoiceTax = Number(invoice.tax_amount ?? 0);
+    const invoiceDiscount = Number(invoice.discount_amount ?? 0);
+    const invoiceTotal = Number(invoice.total_amount ?? invoice.amount ?? 0);
+    const expectedInvoiceTotal = Number((invoiceSubtotal + invoiceTax - invoiceDiscount).toFixed(2));
+    if (invoiceDiscount > invoiceSubtotal + 0.01 || Math.abs(expectedInvoiceTotal - invoiceTotal) > 0.01) {
+      return NextResponse.json({
+        error: `Invoice amounts are inconsistent: total must equal subtotal + tax - discount (${expectedInvoiceTotal.toFixed(2)})`,
+      }, { status: 400 });
+    }
+
     // 2. Idempotency check
     const existingJournal = getData(await supabase
       .schema('finance').from('journal_entries')
@@ -171,9 +184,10 @@ export async function POST(req: NextRequest) {
     }
 
     // 5-9. Post via GL engine (BUG-001 FIX: use RPC with CORRECT signature)
-    const totalAmount = Number(invoice.total_amount) || 0;
-    const totalTax = Number(invoice.tax_amount) || 0;
-    const subtotal = totalAmount - totalTax;
+    const totalAmount = invoiceTotal;
+    const totalTax = invoiceTax;
+    // Revenue is net of discount; tax is posted separately.
+    const subtotal = invoiceSubtotal - invoiceDiscount;
 
     // Build journal lines for RPC (no journal_entry_id or line_number needed — RPC handles these)
     const rpcLines: any[] = [

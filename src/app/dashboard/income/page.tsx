@@ -65,8 +65,17 @@ export default function IncomePage() {
         const res = await supabase.from("incomes").update(data).eq("id", editingData.id);
         error = res.error;
       } else {
-        const res = await supabase.from("incomes").insert({ ...data, user_id: user?.id, organization_id: profile?.organization_id, status: "DRAFT" });
-        error = res.error;
+        // P2-004 FIX: create through the server API so amount validation,
+        // organization ownership and DRAFT status cannot be bypassed.
+        const res = await fetch('/api/finance/incomes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          error = new Error(body.error || res.statusText || 'Failed to create income');
+        }
       }
 
       if (error) {

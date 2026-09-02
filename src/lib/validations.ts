@@ -179,7 +179,29 @@ export const invoiceCreateSchema = z.object({
   issue_date: isoDate.optional(),
   due_date: isoDate,
   notes: z.string().max(2000).nullable().optional(),
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  const subtotal = Number(value.subtotal ?? value.amount);
+  const tax = Number(value.tax_amount ?? 0);
+  const discount = Number(value.discount_amount ?? 0);
+  const total = Number(value.total_amount ?? value.amount);
+  const expected = Number((subtotal + tax - discount).toFixed(2));
+
+  if (discount > subtotal) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['discount_amount'],
+      message: 'Discount cannot exceed subtotal',
+    });
+  }
+
+  if (Math.abs(expected - total) > 0.01) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['total_amount'],
+      message: `Invoice total must equal subtotal + tax - discount (${expected.toFixed(2)})`,
+    });
+  }
+});
 
 // ─── Project Create / Update ───────────────────────────────────────────────
 // FND-BUD-01 (P0): ProjectForm (src/components/sections/ProjectForm.tsx)

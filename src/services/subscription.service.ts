@@ -196,7 +196,7 @@ export async function fetchSubscriptionStats(): Promise<SubscriptionStats> {
   const [activeRes, renewalsRes] = await Promise.all([
     supabase
       .from('subscriptions')
-      .select('id, amount, billing_frequency')
+      .select('id, amount, currency, billing_frequency')
       .eq('status', 'ACTIVE')
       .eq('organization_id', orgId),
     // BUG-027 FIX: v_subscription_renewals has no organization_id column (see
@@ -226,10 +226,13 @@ export async function fetchSubscriptionStats(): Promise<SubscriptionStats> {
     (r: any) => r.renewal_bucket === 'OVERDUE'
   ).length;
 
+  const { data: roundedMonthly } = await supabase.rpc('round_currency_amount', { p_organization_id: orgId, p_currency: 'PKR', p_amount: normalizedMonthly });
+  const { data: roundedAnnualized } = await supabase.rpc('round_currency_amount', { p_organization_id: orgId, p_currency: 'PKR', p_amount: annualizedTotal });
+
   return {
     activeCount: active.length,
-    normalizedMonthly: Math.round(normalizedMonthly * 100) / 100,
-    annualizedTotal: Math.round(annualizedTotal * 100) / 100,
+    normalizedMonthly: Number(roundedMonthly ?? normalizedMonthly),
+    annualizedTotal: Number(roundedAnnualized ?? annualizedTotal),
     upcoming30Days,
     overdueCount,
   };

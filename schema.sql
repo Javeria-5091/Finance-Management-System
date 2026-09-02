@@ -956,6 +956,37 @@ $$;
 ALTER FUNCTION "core"."admin_update_user_profile"("p_user_id" "uuid", "p_department_id" "uuid", "p_manager_id" "uuid", "p_employment_status" "text", "p_clear_department" boolean, "p_clear_manager" boolean) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "core"."advance_approval_chain"("p_entity_type" "text", "p_entity_id" "uuid", "p_approver_id" "uuid", "p_approver_role" "text", "p_organization_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
+    AS $$
+DECLARE v_req core.approval_requests%ROWTYPE; v_step core.approval_steps%ROWTYPE; v_role_id uuid; v_final boolean:=false;
+BEGIN
+ IF auth.uid() IS NULL OR auth.uid()<>p_approver_id OR NOT core.same_org(p_organization_id) THEN RAISE EXCEPTION 'Invalid approval context'; END IF;
+ SELECT * INTO v_req FROM core.approval_requests WHERE entity_type=p_entity_type AND entity_id=p_entity_id AND organization_id=p_organization_id AND status IN ('PENDING','ESCALATED') ORDER BY created_at DESC LIMIT 1 FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'No pending approval chain found'; END IF;
+ SELECT * INTO v_step FROM core.approval_steps WHERE approval_request_id=v_req.id AND step_number=v_req.current_step AND status='PENDING' FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Current approval step is not pending'; END IF;
+ IF v_step.assigned_user_id IS NOT NULL AND v_step.assigned_user_id<>p_approver_id THEN RAISE EXCEPTION 'Approval is assigned to another user'; END IF;
+ IF v_step.required_role_id IS NOT NULL THEN
+   SELECT id INTO v_role_id FROM core.roles WHERE id=v_step.required_role_id AND organization_id=p_organization_id AND upper(name)=upper(p_approver_role) LIMIT 1;
+   IF v_role_id IS NULL THEN RAISE EXCEPTION 'Approver does not hold the required role'; END IF;
+ END IF;
+ IF NOT (core.is_finance_head() OR core.has_role(p_approver_role) OR p_approver_role='CEO') THEN RAISE EXCEPTION 'Insufficient approval privilege'; END IF;
+ UPDATE core.approval_steps SET status='APPROVED' WHERE id=v_step.id;
+ IF EXISTS (SELECT 1 FROM core.approval_steps WHERE approval_request_id=v_req.id AND step_number>v_req.current_step AND status='PENDING') THEN
+   UPDATE core.approval_requests SET current_step=current_step+1,updated_at=now(),status='PENDING' WHERE id=v_req.id;
+ ELSE
+   UPDATE core.approval_requests SET status='APPROVED',updated_at=now() WHERE id=v_req.id;
+   v_final:=true;
+ END IF;
+ RETURN jsonb_build_object('approval_request_id',v_req.id,'step_number',v_step.step_number,'final_approval',v_final);
+END; $$;
+
+
+ALTER FUNCTION "core"."advance_approval_chain"("p_entity_type" "text", "p_entity_id" "uuid", "p_approver_id" "uuid", "p_approver_role" "text", "p_organization_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "core"."block_legacy_table_write"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'pg_catalog', 'public'
@@ -1069,6 +1100,29 @@ ALTER FUNCTION "core"."can_approve_amount"("p_user_id" "uuid", "p_permission_cod
 
 COMMENT ON FUNCTION "core"."can_approve_amount"("p_user_id" "uuid", "p_permission_code" "text", "p_transaction_type" "text", "p_amount" numeric, "p_currency" "text") IS 'Composite approval check: DENY override > ALLOW override/role permission > per-user limit > per-role transaction-type limit > role_permissions.amount_limit (spec 7.2, 7.3).';
 
+
+
+CREATE OR REPLACE FUNCTION "core"."create_approval_chain_for_submission"("p_entity_type" "text", "p_entity_id" "uuid", "p_transaction_type" "text", "p_amount" numeric, "p_currency" "text", "p_requested_by" "uuid", "p_organization_id" "uuid") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
+    AS $$
+DECLARE v_req uuid; r record; v_step int:=0;
+BEGIN
+ IF auth.uid() IS NULL OR auth.uid()<>p_requested_by OR NOT core.same_org(p_organization_id) THEN RAISE EXCEPTION 'Invalid approval context'; END IF;
+ SELECT id INTO v_req FROM core.approval_requests WHERE organization_id=p_organization_id AND entity_type=p_entity_type AND entity_id=p_entity_id AND status='PENDING' LIMIT 1;
+ IF v_req IS NOT NULL THEN RETURN v_req; END IF;
+ INSERT INTO core.approval_requests(entity_type,entity_id,transaction_type,amount,currency,requested_by,current_step,status,organization_id)
+ VALUES(p_entity_type,p_entity_id,p_transaction_type,p_amount,upper(coalesce(p_currency,'PKR')),p_requested_by,1,'PENDING',p_organization_id) RETURNING id INTO v_req;
+ FOR r IN SELECT role_id,user_id,max_amount FROM core.approval_limits WHERE organization_id=p_organization_id AND transaction_type=p_transaction_type AND upper(currency)=upper(coalesce(p_currency,'PKR')) AND effective_from<=CURRENT_DATE AND (effective_to IS NULL OR effective_to>=CURRENT_DATE) AND (max_amount IS NULL OR p_amount<=max_amount) ORDER BY CASE WHEN max_amount IS NULL THEN 999999999999999 ELSE max_amount END, id LOOP
+   v_step:=v_step+1;
+   INSERT INTO core.approval_steps(approval_request_id,step_number,required_role_id,assigned_user_id,sla_hours,status) VALUES(v_req,v_step,r.role_id,r.user_id,24,'PENDING');
+ END LOOP;
+ IF v_step=0 THEN INSERT INTO core.approval_steps(approval_request_id,step_number,sla_hours,status) VALUES(v_req,1,24,'PENDING'); END IF;
+ RETURN v_req;
+END; $$;
+
+
+ALTER FUNCTION "core"."create_approval_chain_for_submission"("p_entity_type" "text", "p_entity_id" "uuid", "p_transaction_type" "text", "p_amount" numeric, "p_currency" "text", "p_requested_by" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "core"."current_user_id"() RETURNS "uuid"
@@ -1434,6 +1488,26 @@ ALTER FUNCTION "core"."is_finance_head"() OWNER TO "postgres";
 
 COMMENT ON FUNCTION "core"."is_finance_head"() IS 'Fixed 2026 (migration 018): removed dead literal ''HOD'' and added the correct ''FINANCE_HEAD'' check -- previously this function could NEVER return true for an actual Finance Head user. See audit issue C7.';
 
+
+
+CREATE OR REPLACE FUNCTION "core"."process_approval_slas"() RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
+    AS $$
+DECLARE r record; n integer:=0;
+BEGIN
+ FOR r IN SELECT s.id,s.approval_request_id,s.step_number,s.escalate_to_user_id
+   FROM core.approval_steps s JOIN core.approval_requests a ON a.id=s.approval_request_id
+   WHERE s.status='PENDING' AND s.sla_hours IS NOT NULL AND s.created_at + make_interval(hours=>s.sla_hours) < now() AND a.status='PENDING' LOOP
+   UPDATE core.approval_steps SET status='ESCALATED', assigned_user_id=coalesce(escalate_to_user_id,assigned_user_id) WHERE id=r.id AND status='PENDING';
+   UPDATE core.approval_requests SET status='ESCALATED', updated_at=now() WHERE id=r.approval_request_id AND status='PENDING';
+   n:=n+1;
+ END LOOP;
+ RETURN n;
+END; $$;
+
+
+ALTER FUNCTION "core"."process_approval_slas"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "core"."same_org"("p_organization_id" "uuid") RETURNS boolean
@@ -2019,6 +2093,45 @@ ALTER FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", 
 
 COMMENT ON FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") IS 'FND-BUDG-003: atomically applies a pending budget revision and marks it approved. Organization and maker-checker checks are enforced inside the transaction.';
 
+
+
+CREATE OR REPLACE FUNCTION "finance"."approve_commission_atomic"("p_commission_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_currency" "text", "p_exchange_rate" numeric, "p_lines" "jsonb") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_comm public.commissions%ROWTYPE;
+  v_period finance.accounting_periods%ROWTYPE;
+  v_journal uuid;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN RAISE EXCEPTION 'Authentication and organization context are required'; END IF;
+  IF NOT core.has_permission(auth.uid(), 'COMMISSION_APPROVE') THEN RAISE EXCEPTION 'COMMISSION_APPROVE permission required'; END IF;
+  SELECT * INTO v_comm FROM public.commissions WHERE id=p_commission_id AND organization_id=v_org FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Commission not found in your organization'; END IF;
+  IF v_comm.status <> 'PENDING' THEN RAISE EXCEPTION 'Only PENDING commissions can be approved'; END IF;
+  IF v_comm.created_by = auth.uid() THEN RAISE EXCEPTION 'Maker-checker: requester cannot approve own commission'; END IF;
+  IF v_comm.accrual_journal_id IS NOT NULL THEN RAISE EXCEPTION 'Commission accrual is already posted'; END IF;
+  SELECT * INTO v_period FROM finance.accounting_periods WHERE id=p_period_id AND organization_id=v_org FOR SHARE;
+  IF NOT FOUND OR v_period.status <> 'OPEN' THEN RAISE EXCEPTION 'Accounting period is not OPEN or does not belong to your organization'; END IF;
+  IF p_lines IS NULL OR jsonb_typeof(p_lines) <> 'array' OR jsonb_array_length(p_lines)=0 THEN RAISE EXCEPTION 'Commission journal lines are required'; END IF;
+
+  v_journal := finance.post_journal_entry(
+    COALESCE(NULLIF(p_description,''),'Commission accrual'), p_transaction_date,
+    p_period_id, p_lines, COALESCE(NULLIF(p_currency,''),'PKR'),
+    COALESCE(p_exchange_rate,1), 'COMMISSION_ACCRUAL', p_commission_id, NULL, NULL
+  );
+
+  UPDATE public.commissions
+     SET status='APPROVED', approved_by=auth.uid(), approved_at=now(), accrual_journal_id=v_journal, updated_at=now()
+   WHERE id=p_commission_id AND organization_id=v_org AND status='PENDING' AND accrual_journal_id IS NULL;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Commission approval update failed; GL posting rolled back'; END IF;
+  RETURN v_journal;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."approve_commission_atomic"("p_commission_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_currency" "text", "p_exchange_rate" numeric, "p_lines" "jsonb") OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "finance"."financial_accounts" (
@@ -2928,6 +3041,234 @@ $$;
 
 
 ALTER FUNCTION "finance"."create_platform_settlement_atomic"("p_platform_id" "uuid", "p_financial_account_id" "uuid", "p_settlement_reference" "text", "p_settlement_date" "date", "p_currency" "text", "p_gross_amount" numeric, "p_expected_fee_amount" numeric, "p_actual_fee_amount" numeric, "p_withholding_amount" numeric, "p_withdrawal_fee_amount" numeric, "p_exchange_rate" numeric, "p_notes" "text", "p_fee_variance" numeric, "p_fee_override_reason" "text", "p_fee_override_evidence_reference" "text", "p_lines" "jsonb") OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."profit_distributions" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "fiscal_year_id" "uuid" NOT NULL,
+    "period_id" "uuid",
+    "total_available_profit" numeric(18,2) DEFAULT 0 NOT NULL,
+    "reserve_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "distributable_amount" numeric(18,2) DEFAULT 0 NOT NULL,
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "declared_by" "uuid",
+    "declared_at" timestamp with time zone,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "posted_by" "uuid",
+    "posted_at" timestamp with time zone,
+    "journal_entry_id" "uuid",
+    "notes" "text",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    "organization_id" "uuid",
+    CONSTRAINT "profit_distributions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
+    CONSTRAINT "profit_distributions_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'DECLARED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'PAID'::"text", 'CANCELLED'::"text"])))
+);
+
+
+ALTER TABLE "finance"."profit_distributions" OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."create_profit_distribution_from_posted_pnl"("p_fiscal_year_id" "uuid") RETURNS "finance"."profit_distributions"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_revenue numeric := 0;
+  v_expense numeric := 0;
+  v_profit numeric(18,2);
+  v_reserve numeric(18,2);
+  v_dist finance.profit_distributions%ROWTYPE;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN RAISE EXCEPTION 'Authentication and organization context are required'; END IF;
+  IF NOT core.has_permission(auth.uid(),'EQUITY_MANAGE') THEN RAISE EXCEPTION 'EQUITY_MANAGE permission required'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM finance.fiscal_years WHERE id=p_fiscal_year_id AND organization_id=v_org) THEN RAISE EXCEPTION 'Fiscal year not found in your organization'; END IF;
+  SELECT COALESCE(sum(balance),0) INTO v_revenue FROM finance.get_pnl_accounts(p_fiscal_year_id,v_org,'REVENUE');
+  SELECT COALESCE(sum(balance),0) INTO v_expense FROM finance.get_pnl_accounts(p_fiscal_year_id,v_org,'EXPENSE');
+  v_profit := round(v_revenue - v_expense,2);
+  IF v_profit < 0 THEN RAISE EXCEPTION 'Posted P&L is a loss (%); profit distribution cannot be created',v_profit; END IF;
+  v_reserve := round(COALESCE(finance.calculate_reserve(v_profit,CURRENT_DATE,v_org),0),2);
+  v_reserve := LEAST(GREATEST(v_reserve,0),v_profit);
+
+  INSERT INTO finance.profit_distributions(fiscal_year_id,total_available_profit,reserve_amount,distributable_amount,status,created_by,organization_id)
+  VALUES(p_fiscal_year_id,v_profit,v_reserve,round(v_profit-v_reserve,2),'DRAFT',auth.uid(),v_org)
+  RETURNING * INTO v_dist;
+  RETURN v_dist;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."create_profit_distribution_from_posted_pnl"("p_fiscal_year_id" "uuid") OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "finance"."vendor_bills" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "bill_number" "text",
+    "vendor_id" "uuid" NOT NULL,
+    "bill_date" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "due_date" "date",
+    "currency" "text" DEFAULT 'PKR'::"text",
+    "exchange_rate" numeric(18,4) DEFAULT 1,
+    "subtotal" numeric(18,2) DEFAULT 0,
+    "tax_amount" numeric(18,2) DEFAULT 0,
+    "withholding_amount" numeric(18,2) DEFAULT 0,
+    "discount_amount" numeric(18,2) DEFAULT 0,
+    "total_amount" numeric(18,2) NOT NULL,
+    "base_subtotal" numeric(18,2) DEFAULT 0,
+    "base_tax_amount" numeric(18,2) DEFAULT 0,
+    "base_withholding_amount" numeric(18,2) DEFAULT 0,
+    "base_discount_amount" numeric(18,2) DEFAULT 0,
+    "base_total_amount" numeric(18,2) NOT NULL,
+    "amount_paid" numeric(18,2) DEFAULT 0,
+    "outstanding_amount" numeric(18,2) DEFAULT 0,
+    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
+    "project_id" "uuid",
+    "description" "text",
+    "submitted_by" "uuid",
+    "submitted_at" timestamp with time zone,
+    "verified_by" "uuid",
+    "verified_at" timestamp with time zone,
+    "approved_by" "uuid",
+    "approved_at" timestamp with time zone,
+    "posted_by" "uuid",
+    "posted_at" timestamp with time zone,
+    "rejection_reason" "text",
+    "created_at" timestamp with time zone DEFAULT "now"(),
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    "created_by" "uuid",
+    "organization_id" "uuid" NOT NULL,
+    "rate_date" "date",
+    "rate_source" "text",
+    "rate_snapshot" "jsonb",
+    CONSTRAINT "vendor_bills_amount_paid_non_negative" CHECK (("amount_paid" >= (0)::numeric)),
+    CONSTRAINT "vendor_bills_base_total_non_negative" CHECK (("base_total_amount" >= (0)::numeric)),
+    CONSTRAINT "vendor_bills_discount_non_negative" CHECK (("discount_amount" >= (0)::numeric)),
+    CONSTRAINT "vendor_bills_outstanding_non_negative" CHECK (("outstanding_amount" >= (0)::numeric)),
+    CONSTRAINT "vendor_bills_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'REJECTED'::"text", 'POSTED'::"text", 'PARTIALLY_PAID'::"text", 'PAID'::"text", 'REVERSED'::"text", 'CANCELLED'::"text"]))),
+    CONSTRAINT "vendor_bills_subtotal_non_negative" CHECK (("subtotal" >= (0)::numeric)),
+    CONSTRAINT "vendor_bills_tax_amount_non_negative" CHECK (("tax_amount" >= (0)::numeric)),
+    CONSTRAINT "vendor_bills_total_amount_non_negative" CHECK (("total_amount" >= (0)::numeric)),
+    CONSTRAINT "vendor_bills_withholding_non_negative" CHECK (("withholding_amount" >= (0)::numeric))
+);
+
+
+ALTER TABLE "finance"."vendor_bills" OWNER TO "postgres";
+
+
+COMMENT ON CONSTRAINT "vendor_bills_status_check" ON "finance"."vendor_bills" IS 'FND-AP-04: widened to include REJECTED, which the application workflow route and the uq_vendor_bill_number partial index already assumed existed.';
+
+
+
+CREATE OR REPLACE FUNCTION "finance"."create_subscription_renewal_bill_atomic"("p_event_id" "uuid", "p_subscription_id" "uuid", "p_vendor_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid", "p_renewal_date" "date", "p_currency" "text", "p_amount" numeric, "p_description" "text") RETURNS "finance"."vendor_bills"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE v_event public.subscription_renewal_events%ROWTYPE;
+        v_bill finance.vendor_bills%ROWTYPE;
+        v_rate numeric := 1;
+        v_currency text := upper(coalesce(p_currency,'PKR'));
+BEGIN
+  IF auth.uid() IS NULL OR p_user_id <> auth.uid() OR NOT core.same_org(p_organization_id) THEN RAISE EXCEPTION 'Invalid organization context'; END IF;
+  IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN RAISE EXCEPTION 'Insufficient privileges'; END IF;
+  SELECT * INTO v_event FROM public.subscription_renewal_events WHERE id=p_event_id AND organization_id=p_organization_id AND subscription_id=p_subscription_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Renewal event not found in your organization'; END IF;
+  IF v_event.draft_vendor_bill_id IS NOT NULL THEN
+    SELECT * INTO v_bill FROM finance.vendor_bills WHERE id=v_event.draft_vendor_bill_id AND organization_id=p_organization_id;
+    IF FOUND THEN RETURN v_bill; END IF;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM finance.vendors WHERE id=p_vendor_id AND organization_id=p_organization_id AND is_active=true AND deleted_at IS NULL) THEN RAISE EXCEPTION 'Vendor is not active or does not belong to the organization'; END IF;
+  IF p_amount < 0 THEN RAISE EXCEPTION 'Subscription amount cannot be negative'; END IF;
+  IF v_currency <> 'PKR' THEN
+    SELECT rate INTO v_rate FROM finance.exchange_rates
+     WHERE organization_id=p_organization_id AND from_currency=v_currency AND to_currency='PKR'
+       AND approved_by IS NOT NULL AND is_locked=true AND rate_date <= p_renewal_date
+     ORDER BY rate_date DESC, approved_at DESC LIMIT 1;
+    IF v_rate IS NULL OR v_rate <= 0 THEN RAISE EXCEPTION 'No approved and locked exchange rate found for % -> PKR on or before %',v_currency,p_renewal_date; END IF;
+  END IF;
+  INSERT INTO finance.vendor_bills(vendor_id,bill_date,due_date,currency,exchange_rate,total_amount,base_total_amount,subtotal,base_subtotal,status,description,created_by,organization_id,rate_date,rate_source,rate_snapshot)
+  VALUES(p_vendor_id,p_renewal_date,p_renewal_date,v_currency,v_rate,p_amount,round(p_amount*v_rate,2),p_amount,round(p_amount*v_rate,2),'DRAFT',p_description,p_user_id,p_organization_id,p_renewal_date,'APPROVED_LOCKED',jsonb_build_object('rate',v_rate,'rate_date',p_renewal_date))
+  RETURNING * INTO v_bill;
+  UPDATE public.subscription_renewal_events SET status='DRAFT_BILL_CREATED',draft_vendor_bill_id=v_bill.id,updated_at=now()
+   WHERE id=v_event.id AND organization_id=p_organization_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Renewal event linkage failed; transaction rolled back'; END IF;
+  RETURN v_bill;
+END; $$;
+
+
+ALTER FUNCTION "finance"."create_subscription_renewal_bill_atomic"("p_event_id" "uuid", "p_subscription_id" "uuid", "p_vendor_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid", "p_renewal_date" "date", "p_currency" "text", "p_amount" numeric, "p_description" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."create_vendor_payment_atomic"("p_vendor_id" "uuid", "p_payment_date" "date", "p_payment_method" "text", "p_financial_account_id" "uuid", "p_reference" "text", "p_description" "text", "p_allocations" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_vendor finance.vendors%ROWTYPE;
+  v_fin finance.financial_accounts%ROWTYPE;
+  v_bill finance.vendor_bills%ROWTYPE;
+  v_alloc jsonb;
+  v_bill_id uuid;
+  v_alloc_amount numeric(18,2);
+  v_total numeric(18,2) := 0;
+  v_currency text;
+  v_rate numeric(18,4) := 1;
+  v_payment_id uuid;
+  v_payment_number text;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN RAISE EXCEPTION 'Authentication and organization context are required'; END IF;
+  IF NOT core.has_permission(auth.uid(), 'VENDOR_PAYMENT_CREATE') THEN RAISE EXCEPTION 'VENDOR_PAYMENT_CREATE permission required'; END IF;
+  IF p_allocations IS NULL OR jsonb_typeof(p_allocations) <> 'array' OR jsonb_array_length(p_allocations)=0 THEN RAISE EXCEPTION 'At least one allocation is required'; END IF;
+  SELECT * INTO v_vendor FROM finance.vendors WHERE id=p_vendor_id AND organization_id=v_org AND is_active FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Vendor not found or inactive'; END IF;
+  IF p_financial_account_id IS NOT NULL THEN
+    SELECT * INTO v_fin FROM finance.financial_accounts WHERE id=p_financial_account_id AND organization_id=v_org AND is_active FOR SHARE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Financial account not found or inactive'; END IF;
+  END IF;
+
+  FOR v_alloc IN SELECT * FROM jsonb_array_elements(p_allocations) LOOP
+    v_bill_id := (v_alloc->>'vendor_bill_id')::uuid;
+    v_alloc_amount := round((v_alloc->>'allocated_amount')::numeric,2);
+    SELECT * INTO v_bill FROM finance.vendor_bills WHERE id=v_bill_id AND organization_id=v_org AND vendor_id=p_vendor_id FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'Vendor bill % not found in your organization',v_bill_id; END IF;
+    IF v_bill.status NOT IN ('POSTED','PARTIALLY_PAID') OR COALESCE(v_bill.outstanding_amount,0) <= 0 THEN RAISE EXCEPTION 'Vendor bill % is not payable in its current state',v_bill.bill_number; END IF;
+    IF v_alloc_amount <= 0 OR v_alloc_amount > v_bill.outstanding_amount + 0.01 THEN RAISE EXCEPTION 'Allocation exceeds outstanding balance for bill %',v_bill.bill_number; END IF;
+    IF v_currency IS NULL THEN v_currency := upper(COALESCE(v_bill.currency,'PKR')); ELSE IF v_currency <> upper(COALESCE(v_bill.currency,'PKR')) THEN RAISE EXCEPTION 'All allocated bills must share the same currency'; END IF; END IF;
+    v_total := v_total + v_alloc_amount;
+  END LOOP;
+  v_total := round(v_total,2);
+  IF v_total <= 0 THEN RAISE EXCEPTION 'Payment amount must be greater than zero'; END IF;
+
+  IF v_currency <> 'PKR' THEN
+    SELECT rate INTO v_rate FROM finance.exchange_rates
+     WHERE organization_id=v_org AND from_currency=v_currency AND to_currency='PKR'
+       AND approved_by IS NOT NULL AND is_locked=true AND rate_date <= p_payment_date
+     ORDER BY rate_date DESC, approved_at DESC NULLS LAST LIMIT 1;
+    IF v_rate IS NULL OR v_rate <= 0 THEN RAISE EXCEPTION 'No approved and locked exchange rate found for % -> PKR on or before %',v_currency,p_payment_date; END IF;
+  END IF;
+
+  v_payment_number := finance.get_next_number('VENDOR_PAYMENT',v_org);
+  IF v_payment_number IS NULL THEN v_payment_number := 'VP-'||to_char(clock_timestamp(),'YYYYMMDDHH24MISSMS'); END IF;
+  INSERT INTO finance.vendor_payments(payment_number,payment_date,amount,currency,exchange_rate,base_amount,vendor_id,financial_account_id,payment_method,reference,description,status,is_batch,created_by,organization_id)
+  VALUES(v_payment_number,p_payment_date,v_total,v_currency,v_rate,round(v_total*v_rate,2),p_vendor_id,p_financial_account_id,p_payment_method,p_reference,p_description,'DRAFT',false,auth.uid(),v_org)
+  RETURNING id INTO v_payment_id;
+
+  FOR v_alloc IN SELECT * FROM jsonb_array_elements(p_allocations) LOOP
+    v_bill_id := (v_alloc->>'vendor_bill_id')::uuid;
+    v_alloc_amount := round((v_alloc->>'allocated_amount')::numeric,2);
+    INSERT INTO finance.vendor_payment_allocations(vendor_payment_id,vendor_bill_id,allocated_amount,base_allocated_amount,allocated_by)
+    VALUES(v_payment_id,v_bill_id,v_alloc_amount,round(v_alloc_amount*v_rate,2),auth.uid());
+  END LOOP;
+
+  RETURN jsonb_build_object('payment_id',v_payment_id,'payment_number',v_payment_number,'amount',v_total,'currency',v_currency,'exchange_rate',v_rate,'base_amount',round(v_total*v_rate,2));
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."create_vendor_payment_atomic"("p_vendor_id" "uuid", "p_payment_date" "date", "p_payment_method" "text", "p_financial_account_id" "uuid", "p_reference" "text", "p_description" "text", "p_allocations" "jsonb") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") RETURNS "jsonb"
@@ -4284,6 +4625,33 @@ COMMENT ON FUNCTION "finance"."get_next_number"("p_type" "text", "p_organization
 
 
 
+CREATE OR REPLACE FUNCTION "finance"."get_payment_receipt_idempotency"("p_idempotency_key" "text", "p_request_hash" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_existing core.idempotency_keys%ROWTYPE;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN RAISE EXCEPTION 'Authentication and organization context are required'; END IF;
+  IF p_idempotency_key IS NULL OR btrim(p_idempotency_key) = '' THEN RAISE EXCEPTION 'Idempotency-Key is required'; END IF;
+  SELECT * INTO v_existing FROM core.idempotency_keys
+   WHERE scope='PAYMENT_RECEIPT' AND key=p_idempotency_key AND organization_id=v_org;
+  IF NOT FOUND THEN RETURN jsonb_build_object('exists',false); END IF;
+  IF v_existing.request_hash IS DISTINCT FROM p_request_hash THEN
+    RAISE EXCEPTION 'Idempotency-Key was already used with a different request';
+  END IF;
+  IF v_existing.response_snapshot IS NULL THEN
+    RETURN jsonb_build_object('exists',true,'ready',false);
+  END IF;
+  RETURN v_existing.response_snapshot || jsonb_build_object('idempotent_replay',true);
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."get_payment_receipt_idempotency"("p_idempotency_key" "text", "p_request_hash" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."get_period_by_date"("p_date" "date") RETURNS TABLE("period_id" "uuid", "fiscal_year_id" "uuid", "fiscal_year_name" "text", "period_number" integer, "period_name" "text", "period_start" "date", "period_end" "date", "period_status" "text", "fy_status" "text")
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
@@ -4760,6 +5128,47 @@ COMMENT ON FUNCTION "finance"."open_period"("p_period_id" "uuid", "p_opened_by" 
 
 
 
+CREATE OR REPLACE FUNCTION "finance"."pay_commission_atomic"("p_commission_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_financial_account_id" "uuid", "p_payment_ref" "text", "p_description" "text", "p_currency" "text", "p_exchange_rate" numeric, "p_lines" "jsonb") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_comm public.commissions%ROWTYPE;
+  v_period finance.accounting_periods%ROWTYPE;
+  v_account finance.financial_accounts%ROWTYPE;
+  v_journal uuid;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN RAISE EXCEPTION 'Authentication and organization context are required'; END IF;
+  IF NOT core.has_permission(auth.uid(), 'COMMISSION_APPROVE') THEN RAISE EXCEPTION 'COMMISSION_APPROVE permission required'; END IF;
+  SELECT * INTO v_comm FROM public.commissions WHERE id=p_commission_id AND organization_id=v_org FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Commission not found in your organization'; END IF;
+  IF v_comm.status <> 'APPROVED' THEN RAISE EXCEPTION 'Only APPROVED commissions can be paid'; END IF;
+  IF v_comm.payment_journal_id IS NOT NULL THEN RAISE EXCEPTION 'Commission payment is already posted'; END IF;
+  SELECT * INTO v_account FROM finance.financial_accounts WHERE id=p_financial_account_id AND organization_id=v_org AND is_active FOR SHARE;
+  IF NOT FOUND OR v_account.linked_ledger_account_id IS NULL THEN RAISE EXCEPTION 'Financial account is missing, inactive, or has no linked GL account'; END IF;
+  SELECT * INTO v_period FROM finance.accounting_periods WHERE id=p_period_id AND organization_id=v_org FOR SHARE;
+  IF NOT FOUND OR v_period.status <> 'OPEN' THEN RAISE EXCEPTION 'Accounting period is not OPEN or does not belong to your organization'; END IF;
+  IF p_lines IS NULL OR jsonb_typeof(p_lines) <> 'array' OR jsonb_array_length(p_lines)=0 THEN RAISE EXCEPTION 'Commission payment journal lines are required'; END IF;
+
+  v_journal := finance.post_journal_entry(
+    COALESCE(NULLIF(p_description,''),'Commission payment'), p_transaction_date,
+    p_period_id, p_lines, COALESCE(NULLIF(p_currency,''),'PKR'),
+    COALESCE(p_exchange_rate,1), 'COMMISSION_PAYMENT', p_commission_id, NULL, NULL
+  );
+
+  UPDATE public.commissions
+     SET status='PAID', payment_date=p_transaction_date, payment_ref=p_payment_ref, payment_journal_id=v_journal, updated_at=now()
+   WHERE id=p_commission_id AND organization_id=v_org AND status='APPROVED' AND payment_journal_id IS NULL;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Commission payment update failed; GL posting rolled back'; END IF;
+  RETURN v_journal;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."pay_commission_atomic"("p_commission_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_financial_account_id" "uuid", "p_payment_ref" "text", "p_description" "text", "p_currency" "text", "p_exchange_rate" numeric, "p_lines" "jsonb") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "finance"."peek_next_number"("p_type" "text") RETURNS "text"
     LANGUAGE "plpgsql" STABLE SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'finance', 'public'
@@ -5229,6 +5638,57 @@ ALTER FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_
 
 COMMENT ON FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'FND-BANK-01 FIX: now atomic. Previously created the GL journal via finance.post_journal_entry() and returned its id but never updated finance.bank_transfers itself, leaving the row at status=APPROVED with journal_entry_id=NULL forever. Because the only guard was "status <> APPROVED", every retry (double-click, network retry) passed the guard again and posted another duplicate journal, with no journal_entry_id ever recorded. Now updates the transfer row to status=POSTED with journal_entry_id/period_id/posted_by/posted_at in the same transaction as the journal insert, re-checking status=APPROVED under the row lock so a race rolls back the journal too, plus an explicit idempotency guard against finance.journal_entries.';
 
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_capital_transaction_atomic"("p_transaction_id" "uuid", "p_period_id" "uuid") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_tx finance.capital_transactions%ROWTYPE;
+  v_period finance.accounting_periods%ROWTYPE;
+  v_fin finance.financial_accounts%ROWTYPE;
+  v_equity finance.chart_of_accounts%ROWTYPE;
+  v_journal uuid;
+  v_amount numeric;
+  v_lines jsonb;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN RAISE EXCEPTION 'Authentication and organization context are required'; END IF;
+  IF NOT core.has_permission(auth.uid(), 'EQUITY_MANAGE') THEN RAISE EXCEPTION 'EQUITY_MANAGE permission required'; END IF;
+  SELECT * INTO v_tx FROM finance.capital_transactions WHERE id=p_transaction_id AND organization_id=v_org FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Capital transaction not found'; END IF;
+  IF v_tx.status <> 'APPROVED' THEN RAISE EXCEPTION 'Only APPROVED capital transactions can be posted. Current: %', v_tx.status; END IF;
+  IF v_tx.journal_entry_id IS NOT NULL THEN RETURN v_tx.journal_entry_id; END IF;
+  SELECT * INTO v_period FROM finance.accounting_periods WHERE id=p_period_id AND organization_id=v_org FOR SHARE;
+  IF NOT FOUND OR v_period.status <> 'OPEN' THEN RAISE EXCEPTION 'Accounting period is not OPEN or does not belong to your organization'; END IF;
+  SELECT * INTO v_fin FROM finance.financial_accounts WHERE id=v_tx.financial_account_id AND organization_id=v_org AND is_active FOR SHARE;
+  IF NOT FOUND OR v_fin.linked_ledger_account_id IS NULL THEN RAISE EXCEPTION 'Bank/cash account is missing, inactive, or has no linked GL ledger account'; END IF;
+  SELECT * INTO v_equity FROM finance.chart_of_accounts WHERE id=v_tx.equity_account_id AND organization_id=v_org AND is_active AND COALESCE(posting_allowed,true) FOR SHARE;
+  IF NOT FOUND OR v_equity.account_type NOT IN ('EQUITY','LIABILITY') THEN RAISE EXCEPTION 'Equity/loan account is missing, inactive, or not postable'; END IF;
+  v_amount := v_tx.amount;
+  IF v_tx.transaction_type IN ('CAPITAL_CONTRIBUTION','OWNER_LOAN_ADVANCE') THEN
+    v_lines := jsonb_build_array(
+      jsonb_build_object('account_id',v_fin.linked_ledger_account_id,'debit_amount',v_amount,'credit_amount',0,'description',v_tx.transaction_type||': cash leg'),
+      jsonb_build_object('account_id',v_equity.id,'debit_amount',0,'credit_amount',v_amount,'description',v_tx.transaction_type||': equity leg')
+    );
+  ELSE
+    v_lines := jsonb_build_array(
+      jsonb_build_object('account_id',v_equity.id,'debit_amount',v_amount,'credit_amount',0,'description',v_tx.transaction_type||': equity leg'),
+      jsonb_build_object('account_id',v_fin.linked_ledger_account_id,'debit_amount',0,'credit_amount',v_amount,'description',v_tx.transaction_type||': cash leg')
+    );
+  END IF;
+  v_journal := finance.post_journal_entry(COALESCE(NULLIF(v_tx.description,''),'Capital transaction: '||v_tx.transaction_type),v_tx.transaction_date,p_period_id,v_lines,COALESCE(v_tx.currency,'PKR'),1,'CAPITAL_TRANSACTION',p_transaction_id,NULL,NULL);
+  UPDATE finance.capital_transactions
+     SET status='POSTED', journal_entry_id=v_journal, posted_by=auth.uid(), posted_at=now(), updated_at=now()
+   WHERE id=p_transaction_id AND organization_id=v_org AND status='APPROVED' AND journal_entry_id IS NULL;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Capital transaction status update failed; GL posting rolled back'; END IF;
+  RETURN v_journal;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_capital_transaction_atomic"("p_transaction_id" "uuid", "p_period_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_credit_note"("p_cn_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") RETURNS "uuid"
@@ -6293,6 +6753,64 @@ ALTER FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_
 
 COMMENT ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") IS 'AR-03 fix: added an invoice-status guard (ISSUED/PARTIALLY_PAID/OVERDUE only) inside the allocation loop so DRAFT or VOID invoices can no longer be pushed to PARTIALLY_PAID/PAID via a new payment receipt.';
 
+
+
+CREATE OR REPLACE FUNCTION "finance"."post_payment_receipt_idempotent"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text" DEFAULT 'PKR'::"text", "p_exchange_rate" numeric DEFAULT 1, "p_payment_date" "date" DEFAULT CURRENT_DATE, "p_payment_method" "text" DEFAULT 'BANK_TRANSFER'::"text", "p_reference" "text" DEFAULT NULL::"text", "p_financial_account_id" "uuid" DEFAULT NULL::"uuid", "p_notes" "text" DEFAULT NULL::"text", "p_allocations" "jsonb" DEFAULT '[]'::"jsonb", "p_idempotency_key" "text" DEFAULT NULL::"text", "p_request_hash" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
+    AS $$
+DECLARE
+  v_org uuid := core.current_user_org_id();
+  v_existing core.idempotency_keys%ROWTYPE;
+  v_result jsonb;
+BEGIN
+  IF auth.uid() IS NULL OR v_org IS NULL THEN
+    RAISE EXCEPTION 'Authentication and organization context are required';
+  END IF;
+  IF NOT (core.has_permission(auth.uid(), 'APPROVE_INVOICE') OR core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
+    RAISE EXCEPTION 'Insufficient privileges to record a payment receipt';
+  END IF;
+  IF p_idempotency_key IS NULL OR btrim(p_idempotency_key) = '' THEN
+    RAISE EXCEPTION 'Idempotency-Key is required';
+  END IF;
+  IF length(p_idempotency_key) > 200 THEN
+    RAISE EXCEPTION 'Idempotency-Key is too long';
+  END IF;
+
+  INSERT INTO core.idempotency_keys(scope, key, request_hash, organization_id)
+  VALUES ('PAYMENT_RECEIPT', p_idempotency_key, p_request_hash, v_org)
+  ON CONFLICT (scope, key, organization_id) DO NOTHING;
+
+  SELECT * INTO v_existing
+    FROM core.idempotency_keys
+   WHERE scope = 'PAYMENT_RECEIPT'
+     AND key = p_idempotency_key
+     AND organization_id = v_org
+   FOR UPDATE;
+
+  IF v_existing.response_snapshot IS NOT NULL THEN
+    IF v_existing.request_hash IS DISTINCT FROM p_request_hash THEN
+      RAISE EXCEPTION 'Idempotency-Key was already used with a different request';
+    END IF;
+    RETURN v_existing.response_snapshot || jsonb_build_object('idempotent_replay', true);
+  END IF;
+
+  v_result := finance.post_payment_receipt_atomic(
+    p_client_id, p_amount, p_currency, p_exchange_rate, p_payment_date,
+    p_payment_method, p_reference, p_financial_account_id, p_notes, p_allocations
+  );
+
+  v_result := v_result || jsonb_build_object('idempotent_replay', false);
+  UPDATE core.idempotency_keys
+     SET response_snapshot = v_result
+   WHERE id = v_existing.id;
+
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."post_payment_receipt_idempotent"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."post_payroll_run_atomic"("p_payroll_run_id" "uuid", "p_period_id" "uuid" DEFAULT NULL::"uuid", "p_salary_expense_account_id" "uuid" DEFAULT NULL::"uuid", "p_salary_payable_account_id" "uuid" DEFAULT NULL::"uuid", "p_tax_payable_account_id" "uuid" DEFAULT NULL::"uuid", "p_deductions_payable_account_id" "uuid" DEFAULT NULL::"uuid", "p_staff_advance_account_id" "uuid" DEFAULT NULL::"uuid") RETURNS "jsonb"
@@ -7959,54 +8477,27 @@ $$;
 ALTER FUNCTION "finance"."reverse_vendor_bill_atomic"("p_vendor_bill_id" "uuid", "p_reversal_date" "date", "p_reason" "text") OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "finance"."vendor_bills" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "bill_number" "text",
-    "vendor_id" "uuid" NOT NULL,
-    "bill_date" "date" DEFAULT CURRENT_DATE NOT NULL,
-    "due_date" "date",
-    "currency" "text" DEFAULT 'PKR'::"text",
-    "exchange_rate" numeric(18,4) DEFAULT 1,
-    "subtotal" numeric(18,2) DEFAULT 0,
-    "tax_amount" numeric(18,2) DEFAULT 0,
-    "withholding_amount" numeric(18,2) DEFAULT 0,
-    "discount_amount" numeric(18,2) DEFAULT 0,
-    "total_amount" numeric(18,2) NOT NULL,
-    "base_subtotal" numeric(18,2) DEFAULT 0,
-    "base_tax_amount" numeric(18,2) DEFAULT 0,
-    "base_withholding_amount" numeric(18,2) DEFAULT 0,
-    "base_discount_amount" numeric(18,2) DEFAULT 0,
-    "base_total_amount" numeric(18,2) NOT NULL,
-    "amount_paid" numeric(18,2) DEFAULT 0,
-    "outstanding_amount" numeric(18,2) DEFAULT 0,
-    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
-    "project_id" "uuid",
-    "description" "text",
-    "submitted_by" "uuid",
-    "submitted_at" timestamp with time zone,
-    "verified_by" "uuid",
-    "verified_at" timestamp with time zone,
-    "approved_by" "uuid",
-    "approved_at" timestamp with time zone,
-    "posted_by" "uuid",
-    "posted_at" timestamp with time zone,
-    "rejection_reason" "text",
-    "created_at" timestamp with time zone DEFAULT "now"(),
-    "updated_at" timestamp with time zone DEFAULT "now"(),
-    "created_by" "uuid",
-    "organization_id" "uuid" NOT NULL,
-    "rate_date" "date",
-    "rate_source" "text",
-    "rate_snapshot" "jsonb",
-    CONSTRAINT "vendor_bills_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'REJECTED'::"text", 'POSTED'::"text", 'PARTIALLY_PAID'::"text", 'PAID'::"text", 'REVERSED'::"text", 'CANCELLED'::"text"])))
-);
+CREATE OR REPLACE FUNCTION "finance"."round_currency_amount"("p_organization_id" "uuid", "p_currency" "text", "p_amount" numeric) RETURNS numeric
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'finance', 'core', 'public'
+    AS $$
+DECLARE v_dec integer:=2; v_method text:='HALF_UP';
+BEGIN
+ SELECT decimals,rounding_method INTO v_dec,v_method FROM finance.currency_settings WHERE organization_id=p_organization_id AND currency=upper(p_currency) AND enabled=true LIMIT 1;
+ IF v_method='DOWN' THEN RETURN trunc(p_amount,v_dec); END IF;
+ IF v_method='UP' THEN RETURN ceil(p_amount * power(10,v_dec))/power(10,v_dec); END IF;
+ IF v_method='FLOOR' THEN RETURN floor(p_amount * power(10,v_dec))/power(10,v_dec); END IF;
+ IF v_method='CEILING' THEN RETURN ceil(p_amount * power(10,v_dec))/power(10,v_dec); END IF;
+ IF v_method='HALF_EVEN' THEN
+   RETURN CASE WHEN abs(p_amount * power(10,v_dec) - trunc(p_amount * power(10,v_dec))) = 0.5
+     THEN trunc(p_amount * power(10,v_dec)) + CASE WHEN mod(abs(trunc(p_amount * power(10,v_dec)))::bigint,2)=0 THEN 0 ELSE sign(p_amount) END
+     ELSE round(p_amount,v_dec) END / power(10,v_dec);
+ END IF;
+ RETURN round(p_amount,v_dec);
+END; $$;
 
 
-ALTER TABLE "finance"."vendor_bills" OWNER TO "postgres";
-
-
-COMMENT ON CONSTRAINT "vendor_bills_status_check" ON "finance"."vendor_bills" IS 'FND-AP-04: widened to include REJECTED, which the application workflow route and the uq_vendor_bill_number partial index already assumed existed.';
-
+ALTER FUNCTION "finance"."round_currency_amount"("p_organization_id" "uuid", "p_currency" "text", "p_amount" numeric) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."save_vendor_bill_atomic"("p_bill_id" "uuid", "p_payload" "jsonb", "p_lines" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "finance"."vendor_bills"
@@ -8304,34 +8795,6 @@ $$;
 
 
 ALTER FUNCTION "finance"."sync_budget_line_committed_amount"() OWNER TO "postgres";
-
-
-CREATE TABLE IF NOT EXISTS "finance"."profit_distributions" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "fiscal_year_id" "uuid" NOT NULL,
-    "period_id" "uuid",
-    "total_available_profit" numeric(18,2) DEFAULT 0 NOT NULL,
-    "reserve_amount" numeric(18,2) DEFAULT 0 NOT NULL,
-    "distributable_amount" numeric(18,2) DEFAULT 0 NOT NULL,
-    "status" "text" DEFAULT 'DRAFT'::"text" NOT NULL,
-    "declared_by" "uuid",
-    "declared_at" timestamp with time zone,
-    "approved_by" "uuid",
-    "approved_at" timestamp with time zone,
-    "posted_by" "uuid",
-    "posted_at" timestamp with time zone,
-    "journal_entry_id" "uuid",
-    "notes" "text",
-    "created_at" timestamp with time zone DEFAULT "now"(),
-    "updated_at" timestamp with time zone DEFAULT "now"(),
-    "created_by" "uuid",
-    "organization_id" "uuid",
-    CONSTRAINT "profit_distributions_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
-    CONSTRAINT "profit_distributions_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'DECLARED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'PAID'::"text", 'CANCELLED'::"text"])))
-);
-
-
-ALTER TABLE "finance"."profit_distributions" OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "finance"."transition_profit_distribution"("p_distribution_id" "uuid", "p_status" "text", "p_reason" "text" DEFAULT NULL::"text") RETURNS "finance"."profit_distributions"
@@ -10925,31 +11388,36 @@ COMMENT ON FUNCTION "reporting"."get_profit_and_loss"("p_start_date" "date", "p_
 CREATE OR REPLACE FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p_end_date" "date") RETURNS TABLE("project_id" "uuid", "project_name" "text", "total_revenue" numeric, "total_costs" numeric, "gross_profit" numeric, "margin_pct" numeric)
     LANGUAGE "sql" STABLE
     SET "search_path" TO 'pg_catalog', 'reporting', 'public'
-    AS $$ SELECT 
+    AS $$
+SELECT
     je.project_id,
     COALESCE(p.name, 'Unassigned') AS project_name,
     COALESCE(SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END), 0) AS total_revenue,
     COALESCE(SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES', 'OPERATING_EXPENSE') THEN jl.base_debit ELSE 0 END), 0) AS total_costs,
-    COALESCE(SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END), 0) - 
-    COALESCE(SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES', 'OPERATING_EXPENSE') THEN jl.base_debit ELSE 0 END), 0) AS gross_profit,
-    CASE 
+    COALESCE(SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END), 0)
+      - COALESCE(SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES', 'OPERATING_EXPENSE') THEN jl.base_debit ELSE 0 END), 0) AS gross_profit,
+    CASE
         WHEN SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END) = 0 THEN 0
         ELSE ROUND(
-            ((SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END) - 
-              SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES', 'OPERATING_EXPENSE') THEN jl.base_debit ELSE 0 END)) / 
-             NULLIF(SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END), 0)) * 100, 2
+            ((SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END)
+              - SUM(CASE WHEN coa.account_type IN ('COST_OF_SALES', 'OPERATING_EXPENSE') THEN jl.base_debit ELSE 0 END))
+             / NULLIF(SUM(CASE WHEN coa.account_type = 'REVENUE' THEN jl.base_credit ELSE 0 END), 0)) * 100,
+            2
         )
     END AS margin_pct
 FROM finance.journal_lines jl
-JOIN finance.journal_entries je ON je.id = jl.journal_entry_id AND je.status = 'POSTED'
+JOIN finance.journal_entries je
+  ON je.id = jl.journal_entry_id
+ AND je.status IN ('POSTED', 'REVERSED')
 JOIN finance.accounting_periods ap ON ap.id = je.period_id
 JOIN finance.chart_of_accounts coa ON coa.id = jl.account_id
-LEFT JOIN public.projects p ON p.id = je.project_id 
-WHERE ap.start_date >= p_start_date AND ap.end_date <= p_end_date
+LEFT JOIN public.projects p ON p.id = je.project_id
+WHERE ap.start_date >= p_start_date
+  AND ap.end_date <= p_end_date
   AND coa.account_type IN ('REVENUE', 'COST_OF_SALES', 'OPERATING_EXPENSE')
 GROUP BY je.project_id, p.name
 ORDER BY gross_profit DESC;
- $$;
+$$;
 
 
 ALTER FUNCTION "reporting"."get_project_profitability"("p_start_date" "date", "p_end_date" "date") OWNER TO "postgres";
@@ -13900,7 +14368,14 @@ CREATE TABLE IF NOT EXISTS "finance"."vendor_bill_lines" (
     "line_total" numeric(18,2) NOT NULL,
     "project_id" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"(),
-    "updated_at" timestamp with time zone DEFAULT "now"()
+    "updated_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "vendor_bill_lines_line_total_non_negative" CHECK (("line_total" >= (0)::numeric)),
+    CONSTRAINT "vendor_bill_lines_quantity_positive" CHECK (("quantity" > (0)::numeric)),
+    CONSTRAINT "vendor_bill_lines_tax_amount_non_negative" CHECK (("tax_amount" >= (0)::numeric)),
+    CONSTRAINT "vendor_bill_lines_tax_rate_non_negative" CHECK (("tax_rate" >= (0)::numeric)),
+    CONSTRAINT "vendor_bill_lines_unit_price_non_negative" CHECK (("unit_price" >= (0)::numeric)),
+    CONSTRAINT "vendor_bill_lines_withholding_amount_non_negative" CHECK (("withholding_amount" >= (0)::numeric)),
+    CONSTRAINT "vendor_bill_lines_withholding_rate_non_negative" CHECK (("withholding_rate" >= (0)::numeric))
 );
 
 
@@ -14468,6 +14943,7 @@ CREATE TABLE IF NOT EXISTS "public"."expenses" (
     "rate_date" "date",
     "rate_source" "text",
     "rate_snapshot" "jsonb",
+    CONSTRAINT "expenses_amount_non_negative_check" CHECK (("amount" >= (0)::numeric)),
     CONSTRAINT "expenses_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
 );
 
@@ -14593,6 +15069,7 @@ CREATE TABLE IF NOT EXISTS "public"."incomes" (
     "rate_date" "date",
     "rate_source" "text",
     "rate_snapshot" "jsonb",
+    CONSTRAINT "incomes_amount_non_negative_check" CHECK (("amount" >= (0)::numeric)),
     CONSTRAINT "incomes_org_required_going_forward" CHECK (("organization_id" IS NOT NULL)),
     CONSTRAINT "incomes_status_check" CHECK (("status" = ANY (ARRAY['DRAFT'::"text", 'SUBMITTED'::"text", 'VERIFIED'::"text", 'APPROVED'::"text", 'POSTED'::"text", 'REVERSED'::"text", 'REJECTED'::"text", 'CANCELLED'::"text"])))
 );
@@ -14650,6 +15127,7 @@ CREATE TABLE IF NOT EXISTS "public"."invoices" (
     "verified_by" "uuid",
     "verified_at" timestamp with time zone,
     "rejection_reason" "text",
+    CONSTRAINT "invoices_amounts_consistency_check" CHECK (("round"((("subtotal" + "tax_amount") - "discount_amount"), 2) = "round"("total_amount", 2))),
     CONSTRAINT "invoices_amounts_non_negative_check" CHECK ((("amount" >= (0)::numeric) AND ("subtotal" >= (0)::numeric) AND ("tax_amount" >= (0)::numeric) AND ("discount_amount" >= (0)::numeric) AND ("total_amount" >= (0)::numeric) AND ("base_subtotal" >= (0)::numeric) AND ("base_tax_amount" >= (0)::numeric) AND ("base_discount_amount" >= (0)::numeric) AND ("base_total_amount" >= (0)::numeric) AND ("amount_paid" >= (0)::numeric) AND ("base_amount_paid" >= (0)::numeric) AND ("outstanding_amount" >= (0)::numeric) AND ("base_outstanding_amount" >= (0)::numeric))),
     CONSTRAINT "invoices_status_check" CHECK ((("status")::"text" = ANY ((ARRAY['DRAFT'::character varying, 'SUBMITTED'::character varying, 'PENDING_APPROVAL'::character varying, 'VERIFIED'::character varying, 'APPROVED'::character varying, 'ISSUED'::character varying, 'PARTIALLY_PAID'::character varying, 'PAID'::character varying, 'OVERDUE'::character varying, 'VOID'::character varying, 'CREDITED'::character varying, 'REFUNDED'::character varying])::"text"[])))
 );
@@ -17752,11 +18230,19 @@ CREATE INDEX "idx_integration_events_org" ON "core"."integration_events" USING "
 
 
 
+CREATE INDEX "idx_integration_events_pending" ON "core"."integration_events" USING "btree" ("processing_status", "created_at");
+
+
+
 CREATE INDEX "idx_integration_events_status" ON "core"."integration_events" USING "btree" ("processing_status");
 
 
 
 CREATE INDEX "idx_integration_failures_event" ON "core"."integration_failures" USING "btree" ("integration_event_id");
+
+
+
+CREATE INDEX "idx_integration_failures_retry" ON "core"."integration_failures" USING "btree" ("next_retry_at") WHERE ("dead_letter" = false);
 
 
 
@@ -18517,6 +19003,10 @@ CREATE INDEX "idx_invoices_user_id" ON "public"."invoices" USING "btree" ("user_
 
 
 CREATE INDEX "idx_notification_deliveries_notification" ON "public"."notification_deliveries" USING "btree" ("notification_id");
+
+
+
+CREATE INDEX "idx_notification_deliveries_pending" ON "public"."notification_deliveries" USING "btree" ("status", "created_at");
 
 
 
@@ -23237,7 +23727,12 @@ CREATE POLICY "fa_pub_insert_frozen" ON "legacy"."financial_accounts" FOR INSERT
 
 
 
-CREATE POLICY "fa_pub_select" ON "legacy"."financial_accounts" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
+CREATE POLICY "fa_pub_select_org_scoped" ON "legacy"."financial_accounts" FOR SELECT TO "authenticated" USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")) AND (("user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
+   FROM "public"."profiles" "up"
+  WHERE (("up"."user_id" = "auth"."uid"()) AND ("up"."organization_id" = ( SELECT "x"."organization_id"
+           FROM "public"."profiles" "x"
+          WHERE ("x"."user_id" = "financial_accounts"."user_id")
+         LIMIT 1))))))));
 
 
 
@@ -23256,7 +23751,7 @@ CREATE POLICY "numbering_insert_frozen" ON "legacy"."numbering_sequences" FOR IN
 
 
 
-CREATE POLICY "numbering_select_role_restricted" ON "legacy"."numbering_sequences" FOR SELECT USING (("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text")));
+CREATE POLICY "numbering_select_service_only" ON "legacy"."numbering_sequences" FOR SELECT TO "authenticated" USING (false);
 
 
 
@@ -23821,7 +24316,12 @@ CREATE POLICY "cash_flow_forecasts_update_org" ON "reporting"."cash_flow_forecas
 
 
 
+
+
 ALTER PUBLICATION "supabase_realtime" OWNER TO "postgres";
+
+
+
 
 
 
@@ -23928,6 +24428,16 @@ GRANT ALL ON FUNCTION "core"."admin_update_user_profile"("p_user_id" "uuid", "p_
 
 
 
+REVOKE ALL ON FUNCTION "core"."advance_approval_chain"("p_entity_type" "text", "p_entity_id" "uuid", "p_approver_id" "uuid", "p_approver_role" "text", "p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "core"."advance_approval_chain"("p_entity_type" "text", "p_entity_id" "uuid", "p_approver_id" "uuid", "p_approver_role" "text", "p_organization_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "core"."create_approval_chain_for_submission"("p_entity_type" "text", "p_entity_id" "uuid", "p_transaction_type" "text", "p_amount" numeric, "p_currency" "text", "p_requested_by" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "core"."create_approval_chain_for_submission"("p_entity_type" "text", "p_entity_id" "uuid", "p_transaction_type" "text", "p_amount" numeric, "p_currency" "text", "p_requested_by" "uuid", "p_organization_id" "uuid") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "core"."current_user_org_config_id"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."current_user_org_config_id"() TO "authenticated";
 GRANT ALL ON FUNCTION "core"."current_user_org_config_id"() TO "service_role";
@@ -23941,6 +24451,11 @@ GRANT ALL ON FUNCTION "core"."current_user_org_id"() TO "service_role";
 
 
 GRANT ALL ON FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permission_code" "text") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "core"."process_approval_slas"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "core"."process_approval_slas"() TO "service_role";
 
 
 
@@ -23966,7 +24481,6 @@ GRANT ALL ON FUNCTION "core"."transfer_ceo_role"("p_new_ceo_user_id" "uuid", "p_
 
 
 
-
 REVOKE ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."allocate_payment_atomic"("p_payment_receipt_id" "uuid", "p_allocations" "jsonb", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
 
@@ -23978,6 +24492,11 @@ GRANT ALL ON FUNCTION "finance"."approve_and_post_journal_entry"("p_journal_id" 
 
 REVOKE ALL ON FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."approve_budget_revision_atomic"("p_budget_id" "uuid", "p_revision_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."approve_commission_atomic"("p_commission_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_currency" "text", "p_exchange_rate" numeric, "p_lines" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."approve_commission_atomic"("p_commission_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_description" "text", "p_currency" "text", "p_exchange_rate" numeric, "p_lines" "jsonb") TO "authenticated";
 
 
 
@@ -24038,6 +24557,31 @@ GRANT ALL ON FUNCTION "finance"."create_platform_settlement_atomic"("p_platform_
 
 
 
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN ON TABLE "finance"."profit_distributions" TO "authenticated";
+GRANT ALL ON TABLE "finance"."profit_distributions" TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."create_profit_distribution_from_posted_pnl"("p_fiscal_year_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."create_profit_distribution_from_posted_pnl"("p_fiscal_year_id" "uuid") TO "authenticated";
+
+
+
+GRANT ALL ON TABLE "finance"."vendor_bills" TO "authenticated";
+GRANT ALL ON TABLE "finance"."vendor_bills" TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."create_subscription_renewal_bill_atomic"("p_event_id" "uuid", "p_subscription_id" "uuid", "p_vendor_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid", "p_renewal_date" "date", "p_currency" "text", "p_amount" numeric, "p_description" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."create_subscription_renewal_bill_atomic"("p_event_id" "uuid", "p_subscription_id" "uuid", "p_vendor_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid", "p_renewal_date" "date", "p_currency" "text", "p_amount" numeric, "p_description" "text") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."create_vendor_payment_atomic"("p_vendor_id" "uuid", "p_payment_date" "date", "p_payment_method" "text", "p_financial_account_id" "uuid", "p_reference" "text", "p_description" "text", "p_allocations" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."create_vendor_payment_atomic"("p_vendor_id" "uuid", "p_payment_date" "date", "p_payment_method" "text", "p_financial_account_id" "uuid", "p_reference" "text", "p_description" "text", "p_allocations" "jsonb") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."create_vendor_payment_batch_atomic"("p_organization_id" "uuid", "p_user_id" "uuid", "p_payment_date" "date", "p_financial_account_id" "uuid", "p_payment_method" "text", "p_reference" "text", "p_description" "text", "p_payments" "jsonb") TO "authenticated";
 
@@ -24085,6 +24629,11 @@ GRANT ALL ON FUNCTION "finance"."get_current_period"() TO "authenticated";
 
 
 
+REVOKE ALL ON FUNCTION "finance"."get_payment_receipt_idempotency"("p_idempotency_key" "text", "p_request_hash" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."get_payment_receipt_idempotency"("p_idempotency_key" "text", "p_request_hash" "text") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "finance"."get_period_by_date"("p_date" "date") TO "authenticated";
 
 
@@ -24127,6 +24676,11 @@ GRANT ALL ON FUNCTION "finance"."open_period"("p_period_id" "uuid", "p_opened_by
 
 
 
+REVOKE ALL ON FUNCTION "finance"."pay_commission_atomic"("p_commission_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_financial_account_id" "uuid", "p_payment_ref" "text", "p_description" "text", "p_currency" "text", "p_exchange_rate" numeric, "p_lines" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."pay_commission_atomic"("p_commission_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date", "p_financial_account_id" "uuid", "p_payment_ref" "text", "p_description" "text", "p_currency" "text", "p_exchange_rate" numeric, "p_lines" "jsonb") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "finance"."post_asset_disposal"("p_asset_id" "uuid", "p_disposal_date" "date", "p_disposal_value" numeric, "p_disposal_currency" "text", "p_disposal_method" "text") TO "authenticated";
 
 
@@ -24141,6 +24695,11 @@ GRANT ALL ON FUNCTION "finance"."post_asset_transfer"("p_asset_id" "uuid", "p_tr
 
 REVOKE ALL ON FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."post_bank_transfer"("p_transfer_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_capital_transaction_atomic"("p_transaction_id" "uuid", "p_period_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_capital_transaction_atomic"("p_transaction_id" "uuid", "p_period_id" "uuid") TO "authenticated";
 
 
 
@@ -24180,6 +24739,11 @@ GRANT ALL ON FUNCTION "finance"."post_invoice_refund_atomic"("p_refund_id" "uuid
 
 REVOKE ALL ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."post_payment_receipt_atomic"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "finance"."post_payment_receipt_idempotent"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."post_payment_receipt_idempotent"("p_client_id" "uuid", "p_amount" numeric, "p_currency" "text", "p_exchange_rate" numeric, "p_payment_date" "date", "p_payment_method" "text", "p_reference" "text", "p_financial_account_id" "uuid", "p_notes" "text", "p_allocations" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text") TO "authenticated";
 
 
 
@@ -24262,8 +24826,9 @@ GRANT ALL ON FUNCTION "finance"."reverse_vendor_bill_atomic"("p_vendor_bill_id" 
 
 
 
-GRANT ALL ON TABLE "finance"."vendor_bills" TO "authenticated";
-GRANT ALL ON TABLE "finance"."vendor_bills" TO "service_role";
+REVOKE ALL ON FUNCTION "finance"."round_currency_amount"("p_organization_id" "uuid", "p_currency" "text", "p_amount" numeric) FROM PUBLIC;
+GRANT ALL ON FUNCTION "finance"."round_currency_amount"("p_organization_id" "uuid", "p_currency" "text", "p_amount" numeric) TO "authenticated";
+GRANT ALL ON FUNCTION "finance"."round_currency_amount"("p_organization_id" "uuid", "p_currency" "text", "p_amount" numeric) TO "service_role";
 
 
 
@@ -24273,11 +24838,6 @@ GRANT ALL ON FUNCTION "finance"."save_vendor_bill_atomic"("p_bill_id" "uuid", "p
 
 REVOKE ALL ON FUNCTION "finance"."suggest_bank_statement_matches"("p_statement_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."suggest_bank_statement_matches"("p_statement_id" "uuid") TO "authenticated";
-
-
-
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN ON TABLE "finance"."profit_distributions" TO "authenticated";
-GRANT ALL ON TABLE "finance"."profit_distributions" TO "service_role";
 
 
 
@@ -25419,6 +25979,7 @@ GRANT SELECT ON TABLE "reporting"."v_project_profitability" TO "authenticated";
 GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
+
 
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";

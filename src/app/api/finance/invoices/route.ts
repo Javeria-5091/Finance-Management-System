@@ -40,6 +40,26 @@ function computeAmounts(input: {
   };
 }
 
+function validateInvoiceAmounts(input: {
+  amount: number;
+  subtotal?: number;
+  tax_amount?: number;
+  discount_amount?: number;
+  total_amount?: number;
+}): string | null {
+  const subtotal = Number(input.subtotal ?? input.amount);
+  const tax = Number(input.tax_amount ?? 0);
+  const discount = Number(input.discount_amount ?? 0);
+  const total = Number(input.total_amount ?? input.amount);
+  const expected = Number((subtotal + tax - discount).toFixed(2));
+
+  if (discount > subtotal + 0.01) return 'Discount cannot exceed subtotal';
+  if (Math.abs(expected - total) > 0.01) {
+    return `Invoice total must equal subtotal + tax - discount (${expected.toFixed(2)})`;
+  }
+  return null;
+}
+
 /**
  * Server-side invoice creation. Invoice numbers, organization_id, and
  * workflow status are never trusted from the browser; collisions on the
@@ -60,6 +80,9 @@ export async function POST(req: NextRequest) {
       discount_amount, total_amount, currency, exchange_rate, issue_date,
       due_date, notes,
     } = parsed.data;
+
+    const amountError = validateInvoiceAmounts({ amount, subtotal, tax_amount, discount_amount, total_amount });
+    if (amountError) return NextResponse.json({ error: amountError }, { status: 400 });
 
     // BUG-010 FIX: derive the organization from the authenticated session and
     // generate the invoice reference server-side. Never trust a client number.
@@ -154,6 +177,9 @@ export async function PATCH(req: NextRequest) {
       discount_amount, total_amount, currency, exchange_rate, issue_date,
       due_date, notes,
     } = parsed.data;
+
+    const amountError = validateInvoiceAmounts({ amount, subtotal, tax_amount, discount_amount, total_amount });
+    if (amountError) return NextResponse.json({ error: amountError }, { status: 400 });
 
     const { data: existing, error: fetchErr } = await supabase
       .from('invoices')

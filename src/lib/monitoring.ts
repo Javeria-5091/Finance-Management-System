@@ -1,3 +1,6 @@
+// AUD-P2-016: service-role monitoring is server-only.
+import 'server-only';
+
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 export type MonitoringSeverity = 'info' | 'warning' | 'error' | 'critical';

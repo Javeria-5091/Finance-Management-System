@@ -12,7 +12,6 @@ import {
   useOwners,
   useFiscalYears,
   useOpenPeriod,
-  useCalculateReserve,
 } from '@/hooks/useTaxEquity';
 import ReasonModal from '@/components/finance/ReasonModal';
 import { TrendingUp, Plus, Loader2, AlertCircle, CheckCircle } from 'lucide-react';
@@ -67,13 +66,11 @@ export default function ProfitDistributionPage() {
   const updateDist = useUpdateProfitDistribution();
   const saveLines = useSaveDistributionLines();
   const postDist = usePostProfitDistribution();
-  const calcReserve = useCalculateReserve();
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [createForm, setCreateForm] = useState({
     fiscal_year_id: '',
-    total_available_profit: '',
   });
   const [reasonState, setReasonState] = useState({
     open: false,
@@ -131,33 +128,17 @@ export default function ProfitDistributionPage() {
 
   /* ── Create distribution ── */
   const handleCreate = async () => {
-    if (!createForm.fiscal_year_id || !createForm.total_available_profit) {
-      alert('All fields required');
+    if (!createForm.fiscal_year_id) {
+      alert('Fiscal year is required');
       return;
-    }
-    const profit = parseFloat(createForm.total_available_profit) || 0;
-
-    let reserve = 0;
-    try {
-      const result = await calcReserve.mutateAsync({ profit });
-      reserve = (result as any)?.data ?? (result as any) ?? 0;
-    } catch {
-      /* fallback 0 */
     }
 
     createDist.mutate(
-      {
-        fiscal_year_id: createForm.fiscal_year_id,
-        total_available_profit: profit,
-        reserve_amount: reserve,
-        distributable_amount: profit - reserve,
-        status: 'DRAFT',
-        created_by: user?.id,
-      },
+      { fiscal_year_id: createForm.fiscal_year_id },
       {
         onSuccess: () => {
           setShowCreate(false);
-          setCreateForm({ fiscal_year_id: '', total_available_profit: '' });
+          setCreateForm({ fiscal_year_id: '' });
         },
       }
     );
@@ -554,29 +535,13 @@ export default function ProfitDistributionPage() {
                   >
                     <option value="">Select fiscal year...</option>
                     {fiscalYears?.map((fy: any) => (
-                      <option key={fy.name} value={fy.name}>{fy.year_label || fy.name}</option>
+                      <option key={fy.id} value={fy.id}>{fy.year_label || fy.name}</option>
                     ))}
                   </select>
                 </div>
-                <div>
-                  <label className={labelCls}>Total Available Profit (PKR) *</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={createForm.total_available_profit}
-                    onChange={(e) => setCreateForm((p) => ({ ...p, total_available_profit: e.target.value }))}
-                    className={`${inputCls} text-right text-lg font-bold`}
-                    placeholder="0.00"
-                  />
+                <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/30 rounded-lg p-3 text-xs text-blue-600 dark:text-blue-400">
+                  Posted P&L is calculated by the server from POSTED revenue and expense journal entries for the selected fiscal year. The active reserve policy is then applied automatically.
                 </div>
-                {createForm.total_available_profit && (
-                  <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/30 rounded-lg p-3 text-xs text-blue-600 dark:text-blue-400">
-                    <p>
-                      Note: This should be the Profit Before Tax minus actual tax paid for the selected fiscal year.
-                      The system will calculate reserve based on the active policy and show distributable amount.
-                    </p>
-                  </div>
-                )}
                 <div className="flex justify-end gap-3 pt-2">
                   <button
                     onClick={() => setShowCreate(false)}
@@ -586,7 +551,7 @@ export default function ProfitDistributionPage() {
                   </button>
                   <button
                     onClick={handleCreate}
-                    disabled={createDist.isPending || !createForm.fiscal_year_id || !createForm.total_available_profit}
+                    disabled={createDist.isPending || !createForm.fiscal_year_id}
                     className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium disabled:opacity-50 flex items-center gap-2"
                   >
                     {createDist.isPending && <Loader2 size={14} className="animate-spin" />}

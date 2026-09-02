@@ -10,7 +10,7 @@ import {LayoutDashboard, FolderKanban, ArrowDownCircle, ArrowUpCircle, FileText,
   ChevronRight, ArrowLeftRight, Scale, TrendingUp, TrendingDown, Calculator, Shield, Landmark, PieChart, Receipt,
   RotateCcw, Download, Upload, CheckCircle, PiggyBank, UserCircle, UserPlus, Bell, FileSpreadsheet, Hash, BookCheck,
   FileBarChart, UsersRound, FileCheck, CircleDollarSign, Banknote, Repeat, HardHat, Percent, ShieldAlert, KeyRound, 
-  Coins, History,
+  Coins, History
 } from "lucide-react";
  
 interface SidebarProps {
@@ -142,6 +142,7 @@ const navGroups: NavGroup[] = [
       { id: "coa", label: "Chart of Accounts", icon: "BookOpen", path: "/dashboard/accounting/chart-of-accounts", perm: "COA_READ" },
       { id: "journals", label: "Journal Entries", icon: "ScrollText", path: "/dashboard/accounting/journal-entries", perm: "JOURNAL_READ" },
       { id: "fiscal", label: "Fiscal Calendar", icon: "CalendarDays", path: "/dashboard/accounting/fiscal-calendar", perm: "PERIOD_READ" },
+      {id: "opening-balance", label: "Opening Balance", icon: "Scale", path: "/dashboard/accounting/opening-balance", perm: "JOURNAL_READ"}
     ],
   },
   {

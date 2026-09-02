@@ -3,7 +3,7 @@
 // OSYSTIC Finance Management System — Payroll Management Page (P1)
 // ================================================================
 
-import { useState, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { usePermissions } from "@/context/PermissionContext";
 import { logAudit } from "@/lib/logAction";
@@ -236,17 +236,16 @@ export default function PayrollPage() {
     setReimbLoading(false);
   }, []);
 
-  // ─── Load projects on mount ───
-  useState(() => {
+  // AUD-P2-017: side effects belong in useEffect, not useState initializers.
+  useEffect(() => {
     fetchProjects();
-  });
+  }, [fetchProjects]);
 
-  // Load reimbursements when tab is active
-  useState(() => {
+  useEffect(() => {
     if (activeTab === "reimbursements") {
       fetchReimbursements();
     }
-  });
+  }, [activeTab, fetchReimbursements]);
 
   // ==========================================
   // EMPLOYEE CRUD

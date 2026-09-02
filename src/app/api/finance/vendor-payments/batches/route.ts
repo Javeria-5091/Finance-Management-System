@@ -10,6 +10,33 @@ import { z } from 'zod';
 // used by the vendor-payment BATCH routes in this codebase
 // (src/app/api/finance/vendor-payments/batches/route.ts).
 
+async function resolveApprovedLockedRate(
+  supabase: any,
+  organizationId: string,
+  fromCurrency: string,
+  rateDate: string,
+): Promise<{ rate: number; id: string; rate_date: string } | null> {
+  const currency = fromCurrency.toUpperCase();
+  if (currency === 'PKR') return { rate: 1, id: 'BASE-CURRENCY', rate_date: rateDate };
+
+  const { data, error } = await supabase
+    .schema('finance').from('exchange_rates')
+    .select('id, rate, rate_date')
+    .eq('organization_id', organizationId)
+    .eq('from_currency', currency)
+    .eq('to_currency', 'PKR')
+    .not('approved_by', 'is', null)
+    .eq('is_locked', true)
+    .lte('rate_date', rateDate)
+    .order('rate_date', { ascending: false })
+    .order('approved_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data || Number(data.rate) <= 0) return null;
+  return { rate: Number(data.rate), id: data.id, rate_date: data.rate_date };
+}
+
 const createSchema = z.object({
   vendor_id: z.string().uuid(),
   payment_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -44,6 +71,10 @@ export async function POST(req: NextRequest) {
   const auth = await requirePermission('VENDOR_PAYMENT_CREATE');
   if (auth instanceof NextResponse) return auth;
   const { supabase } = await getAuthSupabase(req);
+  const organizationId = auth.orgId;
+  if (!organizationId) {
+    return NextResponse.json({ error: 'Authenticated user is not associated with an organization' }, { status: 403 });
+  }
 
   const parsed = createSchema.safeParse(await req.json());
   if (!parsed.success) {
@@ -92,6 +123,17 @@ export async function POST(req: NextRequest) {
   }
   const currency = [...currencies][0] as string;
 
+  // P2-002 FIX: vendor payments must use an approved and locked accounting
+  // rate for the payment currency. Never default a foreign-currency payment
+  // to 1 PKR per unit.
+  const fx = await resolveApprovedLockedRate(supabase, organizationId, currency, payment_date);
+  if (!fx) {
+    return NextResponse.json({
+      error: `No approved and locked exchange rate found for ${currency} -> PKR on or before ${payment_date}. Approve and lock a rate before recording this payment.`,
+    }, { status: 400 });
+  }
+
+
   // 3. Validate each requested allocation against the SERVER's outstanding
   // figure (not whatever the browser sent), and sum a server-computed total.
   const billMap = new Map(bills.map((b: any) => [b.id, b]));
@@ -120,8 +162,8 @@ export async function POST(req: NextRequest) {
       payment_date,
       amount: total,
       currency,
-      exchange_rate: 1,
-      base_amount: total,
+      exchange_rate: fx.rate,
+      base_amount: Number((total * fx.rate).toFixed(2)),
       vendor_id,
       financial_account_id: financial_account_id || null,
       payment_method,
@@ -147,7 +189,7 @@ export async function POST(req: NextRequest) {
     vendor_payment_id: payment.id,
     vendor_bill_id: a.vendor_bill_id,
     allocated_amount: a.allocated_amount,
-    base_allocated_amount: a.allocated_amount,
+    base_allocated_amount: Number((a.allocated_amount * fx.rate).toFixed(2)),
     allocated_by: auth.userId,
   }));
   const { error: allocError } = await supabase.schema('finance').from('vendor_payment_allocations').insert(allocRows);

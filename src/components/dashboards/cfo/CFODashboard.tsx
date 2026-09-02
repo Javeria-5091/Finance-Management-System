@@ -218,7 +218,7 @@ export function CFODashboard() {
   const { data: reconSummary } = useQuery({
     queryKey: ['cfo-recon-summary'],
     queryFn: async () => {
-      const { data, error } = await supabase.rpc('reconciliation_summary');
+      const { data, error } = await supabase.schema('reporting').from('reconciliation_summary').select('*');
       if (error) throw new Error(error.message);
       return data || [];
     },

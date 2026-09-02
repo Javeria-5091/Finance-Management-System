@@ -47,6 +47,33 @@ async function findAccount(
   return fallback.length ? fallback[0] : null;
 }
 
+async function resolveApprovedLockedRate(
+  supabase: any,
+  organizationId: string,
+  fromCurrency: string,
+  rateDate: string,
+): Promise<number | null> {
+  const currency = (fromCurrency || 'PKR').toUpperCase();
+  if (currency === 'PKR') return 1;
+
+  const { data, error } = await supabase
+    .schema('finance').from('exchange_rates')
+    .select('rate')
+    .eq('organization_id', organizationId)
+    .eq('from_currency', currency)
+    .eq('to_currency', 'PKR')
+    .not('approved_by', 'is', null)
+    .eq('is_locked', true)
+    .lte('rate_date', rateDate)
+    .order('rate_date', { ascending: false })
+    .order('approved_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data || Number(data.rate) <= 0) return null;
+  return Number(data.rate);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Schemas                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -164,6 +191,7 @@ interface CommissionRow {
   rate_or_amount?: number | string | null;
   base_amount?: number | string | null;
   commission_amount?: number | string | null;
+  currency?: string | null;
 
   [key: string]: unknown;
 }
@@ -490,14 +518,24 @@ export async function PATCH(
         lines.push({ account_id: whtAccount.id, debit_amount: 0, credit_amount: taxWithheld, description: `Withholding tax on commission: ${row.person_name}` });
       }
 
+      const accrualDate = new Date().toISOString().slice(0, 10);
+      const accrualExchangeRate = await resolveApprovedLockedRate(
+        supabase, organizationId, row.currency || 'PKR', accrualDate
+      );
+      if (accrualExchangeRate === null) {
+        return NextResponse.json({
+          error: `No approved and locked exchange rate found for ${(row.currency || 'PKR').toUpperCase()} -> PKR on or before ${accrualDate}. Approve and lock a rate before approving this commission.`,
+        }, { status: 400 });
+      }
+
       const { data: journalId, error: postErr } = await supabase
         .schema('finance').rpc('post_journal_entry', {
           p_description: `Commission accrual: ${row.person_name} (${row.commission_type})`,
-          p_transaction_date: new Date().toISOString().slice(0, 10),
+          p_transaction_date: accrualDate,
           p_period_id: period.id,
           p_lines: lines,
           p_currency: row.currency || 'PKR',
-          p_exchange_rate: 1,
+          p_exchange_rate: accrualExchangeRate,
           p_source_type: 'COMMISSION_ACCRUAL',
           p_source_id: row.id,
         });
@@ -652,6 +690,18 @@ export async function PATCH(
         return NextResponse.json({ error: 'No Commission Payable (LIABILITY) account found in Chart of Accounts' }, { status: 400 });
       }
 
+      const paymentDate =
+        input.payment_date ??
+        new Date().toISOString().slice(0, 10);
+      const paymentExchangeRate = await resolveApprovedLockedRate(
+        supabase, organizationId, row.currency || 'PKR', paymentDate
+      );
+      if (paymentExchangeRate === null) {
+        return NextResponse.json({
+          error: `No approved and locked exchange rate found for ${(row.currency || 'PKR').toUpperCase()} -> PKR on or before ${paymentDate}. Approve and lock a rate before paying this commission.`,
+        }, { status: 400 });
+      }
+
       const { data: journalId, error: postErr } = await supabase
         .schema('finance').rpc('post_journal_entry', {
           p_description: `Commission payment: ${row.person_name}`,
@@ -662,19 +712,13 @@ export async function PATCH(
             { account_id: financialAccount.linked_ledger_account_id, debit_amount: 0, credit_amount: netAmountToPay, description: `Commission paid: ${row.person_name}` },
           ],
           p_currency: row.currency || 'PKR',
-          p_exchange_rate: 1,
+          p_exchange_rate: paymentExchangeRate,
           p_source_type: 'COMMISSION_PAYMENT',
           p_source_id: row.id,
         });
       if (postErr || !journalId) {
         return NextResponse.json({ error: 'GL posting failed: ' + (postErr?.message || 'Unknown error') }, { status: 500 });
       }
-
-      const paymentDate =
-        input.payment_date ??
-        new Date()
-          .toISOString()
-          .slice(0, 10);
 
       const {
         data,

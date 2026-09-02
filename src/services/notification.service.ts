@@ -96,6 +96,29 @@ export const notificationService = {
       .single();
 
     if (error) throw error;
+
+    // AUD-P2-019: enqueue an EMAIL delivery when the recipient explicitly
+    // enabled email for this notification category. The cron worker owns
+    // provider delivery and records DELIVERED/FAILED; the in-app row remains
+    // the source notification and is never removed on email failure.
+    try {
+      const { data: pref } = await db
+        .from('notification_preferences')
+        .select('enabled')
+        .eq('user_id', params.userId)
+        .eq('category', params.type)
+        .eq('channel', 'EMAIL')
+        .maybeSingle();
+      if (pref?.enabled === true) {
+        await db.from('notification_deliveries').insert({
+          notification_id: data.id,
+          channel: 'EMAIL',
+          status: 'PENDING',
+        });
+      }
+    } catch (deliveryQueueError) {
+      console.error('Failed to enqueue notification email delivery:', deliveryQueueError);
+    }
     return data;
   },
 
