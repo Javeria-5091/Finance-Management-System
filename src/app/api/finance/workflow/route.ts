@@ -251,8 +251,14 @@ export async function POST(req: NextRequest) {
  
     if (action === 'approve') {
       const amount = Number(record[config.amountField]) || 0;
+      // AL-01 FIX: pass the record's actual currency (instead of implicitly
+      // defaulting to PKR) and the exact permission code that already gates
+      // this transition (transition.perm) -- NOT a derived
+      // `${transactionType}_APPROVE` string, since that convention doesn't
+      // hold for every module (journal_entry uses APPROVE_JOURNAL,
+      // credit_note uses APPROVE_INVOICE).
       const limitCheck = await checkApprovalLimitAsync(
-        supabase, auth.orgId, auth.userId, auth.role, config.transactionType, amount
+        supabase, auth.orgId, auth.userId, auth.role, config.transactionType, amount, record.currency || 'PKR', transition.perm
       );
       if (!limitCheck.allowed) return NextResponse.json({ error: limitCheck.reason }, { status: 403 });
     }

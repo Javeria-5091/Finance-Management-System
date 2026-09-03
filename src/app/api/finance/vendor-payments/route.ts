@@ -195,8 +195,22 @@ export async function POST(req: NextRequest) {
   }));
   const { error: allocError } = await supabase.schema('finance').from('vendor_payment_allocations').insert(allocRows);
   if (allocError) {
-    // Roll back the orphaned DRAFT payment.
-    await supabase.schema('finance').from('vendor_payments').delete().eq('id', payment.id).eq('organization_id', auth.orgId);
+    // Roll back the orphaned DRAFT payment. AP-02 FIX: finance.vendor_payments
+    // had RLS enabled with no DELETE policy at all, so this used to be a
+    // silent no-op that left a permanent orphan DRAFT row behind. A new
+    // vp_delete_draft_org_scoped policy (see the accompanying migration)
+    // now permits deleting a caller's own org's DRAFT payments. Log if it
+    // still doesn't delete anything so an orphan doesn't go unnoticed.
+    const { data: rolledBack, error: rollbackError } = await supabase
+      .schema('finance').from('vendor_payments')
+      .delete().eq('id', payment.id).eq('organization_id', auth.orgId)
+      .select('id');
+    if (rollbackError || !rolledBack || rolledBack.length === 0) {
+      console.error(
+        `AP-02 guard: failed to roll back orphaned DRAFT vendor payment ${payment.id} ` +
+        `after allocation insert failure.`, rollbackError
+      );
+    }
     return NextResponse.json({ error: `Allocation failed: ${allocError.message}` }, { status: 500 });
   }
 

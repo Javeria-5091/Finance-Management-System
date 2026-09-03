@@ -252,6 +252,26 @@ export function enforceMakerChecker(creatorId: string, approverId: string): bool
   return creatorId !== approverId;
 }
 
+// AL-01 FIX (root cause shared by AP-06, RBAC-02, AR-06): this used to query
+// core.approval_limits directly with the request-scoped (RLS) client and
+// fall back to hardcoded PKR constants when the query came back empty.
+// RLS policy approval_limits_select_own only exposes a row when
+// `user_id = auth.uid()` OR the caller holds ADMIN_USERS, so every
+// role-based limit (user_id IS NULL) was invisible to the approver it was
+// actually meant to constrain (CEO, FINANCE_HEAD, ACCOUNTANT, HOD,
+// PROJECT_MANAGER) -- the lookup always came back empty for them, and the
+// code silently fell through to source-compiled defaults that an admin had
+// no way to tighten, and that ignored currency entirely (a USD amount was
+// compared straight against a PKR ceiling).
+//
+// core.can_approve_amount(...) (schema.sql ~1017) is SECURITY DEFINER, so it
+// evaluates the full spec 7.2/7.3 cascade -- per-user DENY override, then
+// ALLOW override/base permission, then per-user limit, then per-role limit,
+// then role_permissions.amount_limit as the org-configured (not hardcoded)
+// default -- against the real rows in core.approval_limits regardless of
+// what RLS would let this request-scoped client see directly. Currency is
+// passed straight through so a foreign-currency transaction is matched
+// against a limit configured in that same currency instead of a PKR one.
 export async function checkApprovalLimitAsync(
   supabase: any,
   orgId: string | null,
@@ -259,94 +279,47 @@ export async function checkApprovalLimitAsync(
   userRole: string,
   transactionType: string,
   amount: number,
-  currency: string = 'PKR'
+  currency: string = 'PKR',
+  // AL-01 FIX: the permission code gating "approve" is NOT uniform
+  // `${transactionType}_APPROVE` across modules -- e.g. journal_entry uses
+  // 'APPROVE_JOURNAL' and credit_note uses 'APPROVE_INVOICE' (see
+  // workflow/route.ts MODULES). Deriving the code from transactionType
+  // would silently deny every legitimate approver for those modules
+  // (core.has_permission would look up a code that was never granted).
+  // Callers should pass the exact same permission code they already used
+  // to gate the action; this only falls back to the `${transactionType}_APPROVE`
+  // convention when a caller doesn't supply one (true for VENDOR_PAYMENT).
+  permissionCode?: string
 ): Promise<{ allowed: boolean; reason: string }> {
-  const today = new Date().toISOString().split('T')[0];
+  const permCode = permissionCode || `${transactionType}_APPROVE`;
 
-  try {
-    // 1. User-specific override, if any (Spec 7.2: per-user limit
-    // independent of role).
-    const { data: userLimit } = await supabase
-      .schema('core')
-      .from('approval_limits')
-      .select('max_amount')
-      .eq('user_id', userId)
-      .eq('transaction_type', transactionType)
-      .eq('currency', currency)
-      .lte('effective_from', today)
-      .or(`effective_to.is.null,effective_to.gte.${today}`)
-      .order('effective_from', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+  const { data: allowed, error } = await supabase
+    .schema('core')
+    .rpc('can_approve_amount', {
+      p_user_id: userId,
+      p_permission_code: permCode,
+      p_transaction_type: transactionType,
+      p_amount: amount,
+      p_currency: currency,
+    });
 
-    if (userLimit && userLimit.max_amount !== null) {
-      const limit = Number(userLimit.max_amount);
-      if (amount <= limit) return { allowed: true, reason: '' };
-      return {
-        allowed: false,
-        reason: `Amount ${currency} ${amount.toLocaleString()} exceeds your configured approval limit of ${currency} ${limit.toLocaleString()}. Requires ${getNextApproverRole(userRole)} approval.`,
-      };
-    }
-
-    // 2. Role-based limit (resolve role name -> core.roles.id first).
-    const { data: role } = await supabase
-      .schema('core')
-      .from('roles')
-      .select('id')
-      .eq('name', userRole)
-      .maybeSingle();
-
-    if (role?.id) {
-      const { data: roleLimit } = await supabase
-        .schema('core')
-        .from('approval_limits')
-        .select('max_amount')
-        .eq('role_id', role.id)
-        .is('user_id', null)
-        .eq('transaction_type', transactionType)
-        .eq('currency', currency)
-        .lte('effective_from', today)
-        .or(`effective_to.is.null,effective_to.gte.${today}`)
-        .order('effective_from', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (roleLimit && roleLimit.max_amount !== null) {
-        const limit = Number(roleLimit.max_amount);
-        if (amount <= limit) return { allowed: true, reason: '' };
-        return {
-          allowed: false,
-          reason: `Amount ${currency} ${amount.toLocaleString()} exceeds the configured ${userRole} approval limit of ${currency} ${limit.toLocaleString()}. Requires ${getNextApproverRole(userRole)} approval.`,
-        };
-      }
-    }
-  } catch (err: any) {
-    // If the config lookup itself fails (e.g. transient DB error), fall
-    // through to the hardcoded default below rather than either silently
-    // allowing an unlimited approval or hard-failing the request.
-    console.error('checkApprovalLimitAsync: config lookup failed, using hardcoded fallback:', err.message);
+  if (error) {
+    // Fail closed: the caller has already passed a permission check to get
+    // here, so if the authoritative DB-side cascade can't be evaluated
+    // (transient DB error, etc.) we must not silently approve on a
+    // hardcoded default -- that's exactly the bug this replaces.
+    console.error('checkApprovalLimitAsync: core.can_approve_amount RPC failed:', error.message);
+    return {
+      allowed: false,
+      reason: 'Unable to verify your approval limit right now. Please try again shortly or contact an administrator.',
+    };
   }
 
-  // 3. No configured row found for this role/transaction type/currency —
-  // fall back to the hardcoded defaults so the system is still usable
-  // before an admin has populated core.approval_limits.
-  return checkApprovalLimit(userRole, amount);
-}
+  if (allowed) return { allowed: true, reason: '' };
 
-export function checkApprovalLimit(userRole: string, amount: number): { allowed: boolean; reason: string } {
-  const LIMITS: Record<string, number> = {
-    CEO: Infinity,
-    FINANCE_HEAD: 500000,
-    ACCOUNTANT: 100000,
-    HOD: 100000,
-    PROJECT_MANAGER: 25000,
-  };
-
-  const limit = LIMITS[userRole] ?? 0;
-  if (amount <= limit) return { allowed: true, reason: '' };
   return {
     allowed: false,
-    reason: `Amount PKR ${amount.toLocaleString()} exceeds your approval limit of PKR ${limit.toLocaleString()}. Requires ${getNextApproverRole(userRole)} approval.`,
+    reason: `Amount ${currency} ${amount.toLocaleString()} exceeds your configured ${userRole} approval limit for this transaction type. Requires ${getNextApproverRole(userRole)} approval.`,
   };
 }
 

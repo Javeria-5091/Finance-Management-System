@@ -95,7 +95,22 @@ export async function POST(req: NextRequest) {
     calculated.map((l: any) => ({ ...l, vendor_bill_id: bill.id }))
   );
   if (lineError) {
-    await supabase.schema('finance').from('vendor_bills').delete().eq('id', bill.id).eq('organization_id', auth.orgId);
+    // AP-02 FIX: finance.vendor_bills had RLS enabled with no DELETE policy
+    // at all, so this used to be a silent no-op that left a permanent
+    // orphan DRAFT bill (with no lines) behind. A new
+    // vb_delete_draft_org_scoped policy (see the accompanying migration)
+    // now permits deleting a caller's own org's DRAFT bills. Log if it
+    // still doesn't delete anything so an orphan doesn't go unnoticed.
+    const { data: rolledBack, error: rollbackError } = await supabase
+      .schema('finance').from('vendor_bills')
+      .delete().eq('id', bill.id).eq('organization_id', auth.orgId)
+      .select('id');
+    if (rollbackError || !rolledBack || rolledBack.length === 0) {
+      console.error(
+        `AP-02 guard: failed to roll back orphaned DRAFT vendor bill ${bill.id} ` +
+        `after bill-lines insert failure.`, rollbackError
+      );
+    }
     return NextResponse.json({ error: `Bill lines failed: ${lineError.message}` }, { status: 500 });
   }
 

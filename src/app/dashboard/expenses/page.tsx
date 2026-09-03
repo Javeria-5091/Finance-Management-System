@@ -62,8 +62,20 @@ export default function ExpensesPage() {
     try {
       let error;
       if (editingData) {
-        const res = await supabase.from("expenses").update(data).eq("id", editingData.id);
-        error = res.error;
+        // EXP-02 FIX: edits now go through the server API, which
+        // re-verifies (server-side) that the expense is still DRAFT before
+        // allowing the amount/other fields to change -- the browser can no
+        // longer PATCH an APPROVED/SUBMITTED row's amount directly via
+        // PostgREST.
+        const res = await fetch(`/api/finance/expenses/${editingData.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          error = new Error(body.error || res.statusText || 'Failed to update expense');
+        }
       } else {
         // P2-004 FIX: create through the server API so amount validation,
         // organization ownership and DRAFT status cannot be bypassed.
@@ -165,15 +177,24 @@ export default function ExpensesPage() {
 
   async function confirmDelete() {
     if (!selectedExp) return;
-    // Only DRAFT expenses can be deleted
+    // Only DRAFT expenses can be deleted. This is still checked here for
+    // a fast, friendly error message, but it is no longer the only guard --
+    // EXP-02 FIX: the actual delete now goes through the server API, which
+    // re-checks status server-side (and the DB itself rejects a non-DRAFT
+    // delete via expenses_delete_org_scoped), so a direct PostgREST call
+    // from the browser can no longer delete a SUBMITTED/APPROVED expense.
     if (selectedExp.status !== 'DRAFT') {
       toast.error("Only DRAFT expenses can be deleted.");
       setShowDeleteModal(false);
       return;
     }
     try {
-      const { error } = await supabase.from("expenses").delete().eq("id", selectedExp.id);
-      if (error) { toast.error("Delete failed: " + error.message); return; }
+      const res = await fetch(`/api/finance/expenses/${selectedExp.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        toast.error("Delete failed: " + (body.error || res.statusText));
+        return;
+      }
       toast.success("Expense deleted");
       setShowDeleteModal(false); fetchExpenses();
     } catch (err: any) {

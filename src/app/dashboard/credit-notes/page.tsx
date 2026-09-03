@@ -25,6 +25,7 @@ interface InvoiceOption {
   total_amount: number;
   outstanding_amount: number;
   currency: string;
+  exchange_rate: number | null;
 }
 
 interface CreditNoteRow {
@@ -227,7 +228,7 @@ export default function CreditNotesPage() {
     const { data: invData, error: invError } = await supabase
       .from("invoices")
       .select(
-        "id, invoice_number, client_name, total_amount, outstanding_amount, currency"
+        "id, invoice_number, client_name, total_amount, outstanding_amount, currency, exchange_rate"
       )
       .in("status", ["ISSUED", "PARTIALLY_PAID", "PAID"])
       .gt("total_amount", 0)
@@ -316,7 +317,15 @@ export default function CreditNotesPage() {
           reason: form.reason.trim(),
           total_amount: amountNum,
           currency: selectedInvoice.currency || "PKR",
-          exchange_rate: 1,
+          // AR-01 FIX: this used to hardcode 1 regardless of the invoice's
+          // actual currency, so a credit note against a foreign-currency
+          // invoice posted base_amount = amount * 1 to the GL while
+          // finance.recompute_invoice_ar_balance relieves the receivable
+          // using the invoice's real rate — the two diverged by the FX
+          // factor. The invoice's own rate is now sent (and the server
+          // independently re-derives/enforces it as authoritative; see
+          // /api/finance/credit-notes/route.ts).
+          exchange_rate: selectedInvoice.exchange_rate ?? 1,
         }),
       });
       const result = await res.json();

@@ -1,0 +1,48 @@
+-- ═══════════════════════════════════════════════════════════════════════
+-- P2_036: RPT-01 — reporting.general_ledger bypasses RLS for every user
+-- ═══════════════════════════════════════════════════════════════════════
+-- Apply this migration to the database (e.g. via the Supabase CLI /
+-- migration runner). schema.sql in this repo has already been updated to
+-- match the end state produced by this migration.
+--
+-- RPT-01 (P0, multi-tenant security / cross-tenant data exposure)
+-- ---------------------------------------------------------------------
+-- reporting.general_ledger was the only one of this project's reporting
+-- views created WITHOUT WITH (security_invoker='true'). A view without
+-- security_invoker executes with the VIEW OWNER's privileges (postgres)
+-- rather than the querying role's. Because finance.journal_entries and
+-- finance.journal_lines have RLS enabled but the view ran as their owner,
+-- every SELECT against reporting.general_ledger silently bypassed:
+--   - je_select (finance.journal_entries): requires is_finance_head() OR
+--     has_role('ACCOUNTANT') OR has_role('VIEWER'), same_org(...)
+--   - jl_select (finance.journal_lines): scoped via journal_entries
+--   - coa_select_active (finance.chart_of_accounts): same_org(...)
+--
+-- The view's only WHERE clause filters on je.status, with no organization
+-- predicate at all -- so with RLS bypassed, SELECT (granted to
+-- 'authenticated') returned every organization's journal lines (amounts,
+-- accounts, descriptions, projects) to any signed-in user, including
+-- roles (e.g. EMPLOYEE) that RLS denies outright on the base tables.
+-- Confirmed reachable both directly via PostgREST
+-- (schema=reporting&table=general_ledger) and through the app's General
+-- Ledger report (src/services/report.service.ts getGeneralLedger ->
+-- src/app/dashboard/reports/general-ledger/page.tsx).
+--
+-- Fix: set security_invoker on the view so it runs as the querying role
+-- and is subject to the same RLS as every direct query against
+-- journal_entries / journal_lines / chart_of_accounts -- exactly like
+-- every other reporting view already does. No column or query-shape
+-- change; existing consumers (public.general_ledger, which already had
+-- security_invoker but reads through this view, and
+-- reporting.general_ledger_multi_currency, which already queries the
+-- base tables directly with security_invoker) are unaffected and, in the
+-- case of public.general_ledger, become correctly org-scoped as a side
+-- effect of this fix.
+--
+-- No application code changes are required: the app's report pages
+-- (including this one) rely entirely on RLS for tenant scoping and never
+-- filter by organization_id client-side -- that pattern is correct only
+-- once every view actually enforces it, which this migration restores.
+-- ═══════════════════════════════════════════════════════════════════════
+
+ALTER VIEW "reporting"."general_ledger" SET ("security_invoker" = 'true');

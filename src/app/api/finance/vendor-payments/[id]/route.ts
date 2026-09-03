@@ -130,12 +130,41 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   }
   if (!reason) return NextResponse.json({ error: 'Cancellation reason is required' }, { status: 400 });
 
-  // Release any allocations first so finance.auto_update_bill_status()
-  // restores the bills' outstanding_amount/status.
-  const { error: allocDeleteError } = await supabase
+  // AP-02 FIX: finance.vendor_payment_allocations had RLS enabled with no
+  // DELETE policy, so this delete used to succeed with 0 rows affected —
+  // allocations survived, bills stayed PARTIALLY_PAID forever, and the API
+  // still returned success:true. A DELETE policy (vpa_delete_org_scoped,
+  // see the accompanying migration) now permits this for non-POSTED
+  // payments in the caller's org. We additionally verify the row count
+  // here instead of trusting a no-error/no-rows response as success, so a
+  // future RLS/permission regression fails loudly instead of silently
+  // corrupting bill balances again.
+  const { data: existingAllocs, error: allocSelectError } = await supabase
     .schema('finance').from('vendor_payment_allocations')
-    .delete().eq('vendor_payment_id', params.id);
-  if (allocDeleteError) return NextResponse.json({ error: allocDeleteError.message }, { status: 500 });
+    .select('id').eq('vendor_payment_id', params.id);
+  if (allocSelectError) return NextResponse.json({ error: allocSelectError.message }, { status: 500 });
+
+  if (existingAllocs && existingAllocs.length > 0) {
+    // Release the allocations first so finance.auto_update_bill_status()
+    // restores the bills' outstanding_amount/status.
+    const { data: deletedAllocs, error: allocDeleteError } = await supabase
+      .schema('finance').from('vendor_payment_allocations')
+      .delete().eq('vendor_payment_id', params.id)
+      .select('id');
+    if (allocDeleteError) return NextResponse.json({ error: allocDeleteError.message }, { status: 500 });
+
+    if (!deletedAllocs || deletedAllocs.length !== existingAllocs.length) {
+      console.error(
+        `AP-02 guard: expected to delete ${existingAllocs.length} allocation(s) for payment ${params.id}, ` +
+        `deleted ${deletedAllocs?.length ?? 0}. Refusing to mark the payment REVERSED to avoid an ` +
+        `orphaned bill balance.`
+      );
+      return NextResponse.json(
+        { error: 'Failed to release payment allocations — cancellation aborted before any status change.' },
+        { status: 500 }
+      );
+    }
+  }
 
   const { data, error } = await supabase
     .schema('finance').from('vendor_payments')

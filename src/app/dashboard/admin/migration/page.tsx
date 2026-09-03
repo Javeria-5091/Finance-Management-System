@@ -1,11 +1,20 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { Database, ArrowRightLeft, AlertTriangle, CheckCircle2, ListChecks } from 'lucide-react';
+import { Database, ArrowRightLeft, AlertTriangle, CheckCircle2, ListChecks, ShieldAlert } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
+import { usePermissions } from '@/context/PermissionContext';
 
 interface OldCat { category: string; type: 'income' | 'expense'; count: number; total: number; }
 
 export default function DataMigrationPage() {
+  // SEC-01 FIX: client-side gate for UX only — the authoritative check is
+  // the server-side ADMIN_MIGRATION re-check added to the
+  // migrate-historical-data edge function. Without this, a user who can
+  // reach /dashboard/admin via ADMIN_AUDIT alone (see dashboard layout's
+  // ADMIN_USERS || ADMIN_AUDIT gate) would see a fully working-looking
+  // migration UI and only discover it's blocked after clicking "Execute
+  // Data Migration" and getting a 403 from the edge function.
+  const { hasPermission, isLoading: permissionsLoading } = usePermissions();
   const [categories, setCategories] = useState<OldCat[]>([]);
   const [accounts, setAccounts] = useState<any[]>([]);
   const [mapping, setMapping] = useState<Record<string, string>>({});
@@ -57,7 +66,12 @@ export default function DataMigrationPage() {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${(await supabase.auth.getSession()).data.session?.access_token}` },
         body: JSON.stringify({ mapping: payload })
       });
-      setResult(await res.json());
+      const body = await res.json();
+      if (!res.ok) {
+        alert(body?.error || 'Migration failed.');
+      } else {
+        setResult(body);
+      }
     } catch { alert('Migration failed due to a network error.'); }
     finally { setLoading(false); }
   };
@@ -99,6 +113,33 @@ export default function DataMigrationPage() {
       </div>
     </div>
   );
+
+  if (permissionsLoading) {
+    return (
+      <div className="p-8 max-w-6xl mx-auto flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full"></div>
+      </div>
+    );
+  }
+
+  // SEC-01 FIX: UI-level gate mirroring the edge function's server-side
+  // ADMIN_MIGRATION check. This is not the security boundary (the edge
+  // function is), but it prevents showing a fully-interactive,
+  // GL-posting workflow to a user (e.g. an ADMIN_AUDIT-only user who can
+  // reach /dashboard/admin at all) who will simply be rejected on submit.
+  if (!hasPermission('ADMIN_MIGRATION')) {
+    return (
+      <div className="min-h-[60vh] flex items-center justify-center px-4">
+        <div className="max-w-md text-center">
+          <div className="w-20 h-20 bg-red-100 dark:bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
+            <ShieldAlert className="w-10 h-10 text-red-600 dark:text-red-400" />
+          </div>
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-3">Access Denied</h2>
+          <p className="text-gray-600 dark:text-gray-400 mb-6 text-sm">You do not have permission to run the data migration.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-8 max-w-6xl mx-auto space-y-8">

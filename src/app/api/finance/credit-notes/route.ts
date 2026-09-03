@@ -82,13 +82,44 @@ export async function POST(req: NextRequest) {
     // Validate the referenced invoice exists and belongs to org
     const invoice = getData(await supabase
       .from('invoices')
-      .select('id, invoice_number, client_id, total_amount, amount_paid, status, currency')
+      .select('id, invoice_number, client_id, total_amount, amount_paid, status, currency, exchange_rate')
       .eq('id', invoice_id)
       .eq('organization_id', auth.orgId)
       .single());
 
     if (!invoice) {
       return NextResponse.json({ error: 'Referenced invoice not found' }, { status: 404 });
+    }
+
+    // AR-01 FIX: a credit note is a reduction against a specific invoice and
+    // must be valued at that invoice's own (immutable, rate-snapshotted) FX
+    // rate -- never a rate supplied by the client or a hardcoded 1. The old
+    // code accepted whatever `exchange_rate` the UI sent (which always sent
+    // 1, regardless of invoice currency) and stored it as-is, so
+    // base_amount = amount * 1 while finance.recompute_invoice_ar_balance
+    // relieves the receivable using SUM(cn.amount * invoice.exchange_rate).
+    // For a foreign-currency invoice those two no longer match and AR goes
+    // out of reconciliation with the subledger by the FX factor. Same fix
+    // already applied to refunds (see invoices/refunds/route.ts) -- the
+    // invoice's rate is authoritative; a caller-supplied rate is only
+    // accepted if it matches.
+    const invoiceRateError = validateExchangeRate(invoice.currency, invoice.exchange_rate);
+    if (invoiceRateError) {
+      return NextResponse.json({ error: invoiceRateError }, { status: 400 });
+    }
+    const invoiceRate = Number(invoice.exchange_rate || 1);
+    const requestedRate = exchange_rate ?? invoiceRate;
+
+    const requestedRateError = validateExchangeRate(currency || invoice.currency, requestedRate);
+    if (requestedRateError) {
+      return NextResponse.json({ error: requestedRateError }, { status: 400 });
+    }
+
+    if (requestedRate !== invoiceRate) {
+      return NextResponse.json(
+        { error: 'Credit note exchange_rate must match the invoice exchange_rate' },
+        { status: 400 },
+      );
     }
 
     const { data: existingCreditNotes, error: creditNoteLookupError } = await supabase
@@ -128,7 +159,10 @@ export async function POST(req: NextRequest) {
         total_amount,
         tax_amount: tax_amount || 0,
         currency: currency || invoice.currency || 'PKR',
-        exchange_rate: exchange_rate || 1,
+        // AR-01 FIX: was `exchange_rate || 1` (the raw, unenforced client
+        // value / hardcoded UI default). Always store the invoice's own
+        // rate, already validated above to match whatever the caller sent.
+        exchange_rate: invoiceRate,
         notes: notes || null,
         status: 'DRAFT',
         organization_id: auth.orgId,

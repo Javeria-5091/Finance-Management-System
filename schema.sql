@@ -3653,17 +3653,50 @@ CREATE OR REPLACE FUNCTION "finance"."finalize_bank_reconciliation"("p_statement
     SET "search_path" TO 'pg_catalog', 'finance', 'public', 'core'
     AS $$
 DECLARE
-  v_org uuid := COALESCE(p_organization_id, core.current_user_org_id());
+  -- BANK-01 FIX: v_org is now always derived from the authenticated
+  -- session, never from the client-supplied parameter. p_organization_id
+  -- is still accepted below purely to be validated against this value --
+  -- it is never itself the source of truth.
+  v_org uuid := core.current_user_org_id();
   v_statement RECORD;
   v_unresolved integer;
   v_result finance.bank_statements;
 BEGIN
+  -- BANK-01 FIX: authenticate inside the function itself instead of
+  -- relying solely on the app route (bypassable via direct PostgREST/RPC
+  -- calls, exactly as the UI itself already does).
+  IF auth.uid() IS NULL THEN
+    RAISE EXCEPTION 'finalize_bank_reconciliation: must be called by an authenticated user'
+      USING ERRCODE = '28000';
+  END IF;
+
   IF v_org IS NULL THEN
     RAISE EXCEPTION 'Organization context is required';
   END IF;
+
+  -- BANK-01 FIX: if the caller supplies p_organization_id at all, it must
+  -- match their own organization -- never let it select a different
+  -- tenant's statement. (A NULL/omitted value is fine and simply uses the
+  -- caller's own organization, preserving the existing default-parameter
+  -- call shape for every current call site, all of which already pass
+  -- their own organization_id.)
+  IF p_organization_id IS NOT NULL AND p_organization_id IS DISTINCT FROM v_org THEN
+    RAISE EXCEPTION 'finalize_bank_reconciliation: p_organization_id does not match the caller''s organization'
+      USING ERRCODE = '42501';
+  END IF;
+
   IF p_user_id IS NULL THEN
     RAISE EXCEPTION 'Approving user is required';
   END IF;
+
+  -- BANK-01 FIX: p_user_id must be the caller themselves. It is recorded
+  -- verbatim as reconciled_by, so accepting an arbitrary value let a
+  -- caller attribute the approval to someone else entirely.
+  IF p_user_id IS DISTINCT FROM auth.uid() THEN
+    RAISE EXCEPTION 'finalize_bank_reconciliation: p_user_id must match the authenticated caller'
+      USING ERRCODE = '42501';
+  END IF;
+
   IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
     RAISE EXCEPTION 'Access denied';
   END IF;
@@ -3693,7 +3726,7 @@ BEGIN
       reconciled_by = p_user_id,
       reconciled_at = now(),
       updated_at = now()
-  WHERE id = p_statement_id
+  WHERE id = p_statement_id AND organization_id = v_org
   RETURNING * INTO v_result;
 
   RETURN v_result;
@@ -3702,6 +3735,10 @@ $$;
 
 
 ALTER FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") IS 'BANK-01 fix: now requires auth.uid() IS NOT NULL, rejects any p_organization_id that does not match core.current_user_org_id(), and requires p_user_id = auth.uid(). Previously trusted both as ordinary client parameters (v_org := COALESCE(p_organization_id, core.current_user_org_id())), which let an authenticated finance-head/accountant of one tenant finalize another tenant''s bank statement reconciliation and attribute the approval (reconciled_by) to an arbitrary user id.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."finalize_platform_settlement"("p_batch_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") RETURNS "uuid"
@@ -7346,6 +7383,12 @@ BEGIN
    WHERE organization_id = v_org AND (code = '4910' OR name ILIKE '%discount%') AND is_active = true AND posting_allowed = true
    ORDER BY (code = '4910') DESC LIMIT 1;
 
+  -- AP-01 FIX: finance.vendor_payment_allocations has no organization_id
+  -- column. Org membership of each allocation is established solely by
+  -- joining to finance.vendor_bills (which does have organization_id),
+  -- exactly like this table's own RLS policies (vpa_insert_org_scoped /
+  -- vpa_select_org_scoped) already do, and matching the fix already
+  -- applied to finance.post_vendor_payment() in P2_017.
   SELECT
     COALESCE(SUM(vpa.allocated_amount), 0),
     COALESCE(SUM((SELECT COALESCE(SUM(COALESCE(bl.base_withholding_amount, bl.withholding_amount, 0)), 0)
@@ -7354,11 +7397,17 @@ BEGIN
   INTO v_total_allocated, v_total_withholding, v_total_discount
   FROM finance.vendor_payment_allocations vpa
   JOIN finance.vendor_bills vb ON vb.id = vpa.vendor_bill_id AND vb.organization_id = v_org
-  WHERE vpa.vendor_payment_id = p_payment_id AND vpa.organization_id = v_org;
+  WHERE vpa.vendor_payment_id = p_payment_id;
 
+  -- AP-01 FIX: same defensive cross-org check as before, rewritten to go
+  -- through the vendor_bills join instead of the nonexistent
+  -- vpa.organization_id column. Catches an allocation whose bill belongs
+  -- to a different organization than the caller's.
   IF EXISTS (
     SELECT 1 FROM finance.vendor_payment_allocations vpa
-    WHERE vpa.vendor_payment_id = p_payment_id AND vpa.organization_id IS DISTINCT FROM v_org
+    JOIN finance.vendor_bills vb ON vb.id = vpa.vendor_bill_id
+    WHERE vpa.vendor_payment_id = p_payment_id
+      AND vb.organization_id IS DISTINCT FROM v_org
   ) THEN
     RAISE EXCEPTION 'Vendor payment allocation organization mismatch';
   END IF;
@@ -7388,7 +7437,7 @@ BEGIN
     'PKR', 1, 'VENDOR_PAYMENT', p_payment_id, NULL, NULL
   );
 
-  -- AP-02 FIX: this UPDATE now runs in the SAME transaction as the journal
+  -- AP-02 FIX: this UPDATE runs in the SAME transaction as the journal
   -- insert above (inside finance.post_journal_entry), instead of as a
   -- second, independent PostgREST call from the route. Either both commit
   -- or neither does.
@@ -7417,7 +7466,7 @@ $$;
 ALTER FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'AP-02 fix: atomic replacement for the previous post_vendor_payment-then-separate-UPDATE two-step in src/app/api/finance/vendor-payments/[id]/route.ts and src/app/api/finance/vendor-payments/batches/[id]/route.ts. Creates the journal via finance.post_journal_entry() and marks the vendor payment POSTED (with journal_entry_id/period_id linkage) in the same DB transaction. finance.post_vendor_payment() is left in place, unchanged, for backward compatibility; the app no longer calls it.';
+COMMENT ON FUNCTION "finance"."post_vendor_payment_atomic"("p_payment_id" "uuid", "p_period_id" "uuid", "p_transaction_date" "date") IS 'AP-01 FIX (P0, re-applied): removed two references to vpa.organization_id, a column that does not exist on finance.vendor_payment_allocations. These had been correctly removed from finance.post_vendor_payment() by P2_017 but were reintroduced here when P2_017b copied that function''s pre-fix body to create post_vendor_payment_atomic, breaking every vendor-payment GL posting (single and batch) with 42703. Org membership of each allocation is now established solely via the existing JOIN to finance.vendor_bills.organization_id, matching this table''s own RLS policies. AP-02 atomicity behavior (journal + status flip in one transaction) is unchanged.';
 
 
 
@@ -9647,6 +9696,36 @@ $$;
 
 
 ALTER FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text", "p_full_name" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."enforce_expense_fields_immutable_after_draft"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+BEGIN
+  IF OLD.status <> 'DRAFT' THEN
+    IF NEW.amount IS DISTINCT FROM OLD.amount
+    OR NEW.title IS DISTINCT FROM OLD.title
+    OR NEW.category IS DISTINCT FROM OLD.category
+    OR NEW.expense_date IS DISTINCT FROM OLD.expense_date
+    OR NEW.currency IS DISTINCT FROM OLD.currency
+    OR NEW.exchange_rate IS DISTINCT FROM OLD.exchange_rate
+    OR NEW.project_id IS DISTINCT FROM OLD.project_id
+    OR NEW.account_id IS DISTINCT FROM OLD.account_id
+    OR NEW.vendor_id IS DISTINCT FROM OLD.vendor_id
+    OR NEW.notes IS DISTINCT FROM OLD.notes
+    THEN
+      RAISE EXCEPTION
+        'Expense % cannot have its amount or details changed once it has left DRAFT status (current status: %). Reopen it first (status -> DRAFT) to make corrections.',
+        OLD.id, OLD.status
+        USING ERRCODE = '23514'; -- check_violation, so callers can distinguish this from a generic 500
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."enforce_expense_fields_immutable_after_draft"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."ensure_profile_exists"("target_user_id" "uuid") RETURNS "uuid"
@@ -12449,6 +12528,10 @@ CREATE TABLE IF NOT EXISTS "core"."permissions" (
 ALTER TABLE "core"."permissions" OWNER TO "postgres";
 
 
+COMMENT ON COLUMN "core"."permissions"."code" IS 'Unique permission code referenced by core.has_permission() and the application''s PermCode union (src/context/PermissionContext.tsx). ADMIN_MIGRATION added in migration P1_101 (SEC-01 fix) to gate supabase/functions/data-processing/migrate-historical-data server-side.';
+
+
+
 CREATE TABLE IF NOT EXISTS "core"."role_permissions" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "role_id" "uuid" NOT NULL,
@@ -14789,7 +14872,7 @@ COMMENT ON COLUMN "public"."expenses"."receipt_hash" IS 'SHA-256 hash of the upl
 
 
 
-CREATE OR REPLACE VIEW "reporting"."general_ledger" AS
+CREATE OR REPLACE VIEW "reporting"."general_ledger" WITH ("security_invoker"='true') AS
  SELECT "je"."id" AS "journal_entry_id",
     "je"."reference" AS "journal_reference",
     "je"."description" AS "journal_description",
@@ -19975,6 +20058,14 @@ CREATE OR REPLACE TRIGGER "trg_expenses_fx_snapshot" BEFORE INSERT ON "public"."
 
 
 
+CREATE OR REPLACE TRIGGER "trg_expenses_immutable_after_draft" BEFORE UPDATE ON "public"."expenses" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_expense_fields_immutable_after_draft"();
+
+
+
+COMMENT ON TRIGGER "trg_expenses_immutable_after_draft" ON "public"."expenses" IS 'EXP-02: blocks amount/title/category/expense_date/currency/exchange_rate/project_id/account_id/vendor_id/notes changes once status leaves DRAFT. Status + workflow metadata (submitted_by/at, verified_by/at, approved_by/at, rejection_reason, reversal fields, journal_entry_id, posted_at, etc.) may still change so submit/verify/approve/reject/reverse/reopen and posting continue to work unmodified.';
+
+
+
 CREATE OR REPLACE TRIGGER "trg_guard_profiles_privilege_columns" BEFORE UPDATE ON "public"."profiles" FOR EACH ROW EXECUTE FUNCTION "core"."guard_profiles_privilege_columns"();
 
 
@@ -23498,6 +23589,10 @@ CREATE POLICY "v_update" ON "finance"."vendors" FOR UPDATE USING ((("core"."is_f
 
 
 
+CREATE POLICY "vb_delete_draft_org_scoped" ON "finance"."vendor_bills" FOR DELETE USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id") AND ("status" = 'DRAFT'::"text")));
+
+
+
 CREATE POLICY "vb_insert" ON "finance"."vendor_bills" FOR INSERT WITH CHECK ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id")));
 
 
@@ -23569,6 +23664,10 @@ ALTER TABLE "finance"."vendor_payments" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "finance"."vendors" ENABLE ROW LEVEL SECURITY;
 
 
+CREATE POLICY "vp_delete_draft_org_scoped" ON "finance"."vendor_payments" FOR DELETE USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND "core"."same_org"("organization_id") AND ("status" = 'DRAFT'::"text")));
+
+
+
 CREATE POLICY "vp_insert_org_scoped" ON "finance"."vendor_payments" FOR INSERT WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
 
 
@@ -23578,6 +23677,14 @@ CREATE POLICY "vp_select_org_scoped" ON "finance"."vendor_payments" FOR SELECT U
 
 
 CREATE POLICY "vp_update_org_scoped" ON "finance"."vendor_payments" FOR UPDATE USING ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id"))) WITH CHECK ((("auth"."uid"() IS NOT NULL) AND "core"."same_org"("organization_id")));
+
+
+
+CREATE POLICY "vpa_delete_org_scoped" ON "finance"."vendor_payment_allocations" FOR DELETE USING ((("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")) AND (EXISTS ( SELECT 1
+   FROM "finance"."vendor_payments" "vp"
+  WHERE (("vp"."id" = "vendor_payment_allocations"."vendor_payment_id") AND "core"."same_org"("vp"."organization_id") AND ("vp"."status" <> 'POSTED'::"text")))) AND (EXISTS ( SELECT 1
+   FROM "finance"."vendor_bills" "vb"
+  WHERE (("vb"."id" = "vendor_payment_allocations"."vendor_bill_id") AND "core"."same_org"("vb"."organization_id"))))));
 
 
 
@@ -23842,7 +23949,7 @@ CREATE POLICY "contractors_update_org_scoped" ON "public"."contractors" FOR UPDA
 ALTER TABLE "public"."expenses" ENABLE ROW LEVEL SECURITY;
 
 
-CREATE POLICY "expenses_delete_org_scoped" ON "public"."expenses" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "public"."is_admin"()) AND ("journal_entry_id" IS NULL)));
+CREATE POLICY "expenses_delete_org_scoped" ON "public"."expenses" FOR DELETE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "public"."is_admin"()) AND ("journal_entry_id" IS NULL) AND ("status" = 'DRAFT'::"text")));
 
 
 
@@ -24520,7 +24627,9 @@ GRANT ALL ON TABLE "finance"."bank_statements" TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "finance"."finalize_bank_reconciliation"("p_statement_id" "uuid", "p_user_id" "uuid", "p_organization_id" "uuid") TO "service_role";
 
 
 
@@ -24817,6 +24926,12 @@ GRANT ALL ON FUNCTION "public"."cash_flow"("p_start" "date", "p_end" "date") TO 
 
 GRANT ALL ON FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text", "p_full_name" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."create_user_by_admin"("p_email" "text", "p_password" "text", "p_role" "text", "p_full_name" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."enforce_expense_fields_immutable_after_draft"() TO "anon";
+GRANT ALL ON FUNCTION "public"."enforce_expense_fields_immutable_after_draft"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."enforce_expense_fields_immutable_after_draft"() TO "service_role";
 
 
 
@@ -25913,7 +26028,6 @@ GRANT ALL ON TABLE "reporting"."v_tax_computation_summary" TO "service_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "ai_readonly_role";
 GRANT SELECT ON TABLE "reporting"."v_tax_computation_summary" TO "authenticated";
 
-
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "core" GRANT ALL ON TABLES TO "service_role";
 
@@ -25960,4 +26074,3 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "reporting" GRANT ALL ON TABLES TO "service_role";
-

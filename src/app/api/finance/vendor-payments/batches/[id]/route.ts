@@ -77,13 +77,29 @@ export async function PATCH(
       );
     }
 
+    // AL-01 FIX: finance.vendor_payment_batches has no currency column of
+    // its own -- transition_vendor_payment_batch_atomic (P1_096) already
+    // enforces that every payment grouped into a batch shares one currency,
+    // so read it off any linked payment instead of implicitly defaulting to
+    // PKR. This ensures e.g. a USD batch total is checked against a
+    // USD-configured limit rather than a PKR one.
+    const { data: batchPayment } = await supabase
+      .schema('finance')
+      .from('vendor_payments')
+      .select('currency')
+      .eq('batch_id', params.id)
+      .limit(1)
+      .maybeSingle();
+
     const limitCheck = await checkApprovalLimitAsync(
       supabase,
       auth.orgId,
       auth.userId,
       auth.role,
       'VENDOR_PAYMENT',
-      Number(batch.total_amount) || 0
+      Number(batch.total_amount) || 0,
+      batchPayment?.currency || 'PKR',
+      'VENDOR_PAYMENT_APPROVE'
     );
     if (!limitCheck.allowed) {
       return NextResponse.json({ error: limitCheck.reason }, { status: 403 });
