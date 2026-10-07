@@ -97,6 +97,7 @@ const navGroups: NavGroup[] = [
     items: [
       { id: "incomes", label: "Income", icon: "ArrowDownCircle", path: "/dashboard/income", perm: "INCOME_READ" },
       { id: "expenses", label: "Expenses", icon: "ArrowUpCircle", path: "/dashboard/expenses", perm: "EXPENSE_READ" },
+      { id: "approvals", label: "Approvals", icon: "CheckCircle", path: "/dashboard/approvals", perm: "EXPENSE_APPROVE" },
       { id: "budgets", label: "Budgets", icon: "PieChart", path: "/dashboard/budgets", perm: "BUDGET_READ" },
     ],
   },

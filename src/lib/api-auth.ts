@@ -125,9 +125,18 @@ export async function getAuthUser(): Promise<AuthResult | NextResponse> {
   // RPC and profile role are unavailable, the request fails closed with 503.
   const { data: profile, error: profileError } = await supabase
     .from('profiles')
-    .select('role, organization_id')
+    .select('role, organization_id, employment_status')
     .eq('user_id', session.user.id)
     .maybeSingle();
+
+  // DEF-08 FIX: server-side enforcement. Any API route using getAuthUser()
+  // now rejects INACTIVE / TERMINATED accounts even if a stale session exists.
+  if (profile && profile.employment_status && profile.employment_status !== 'ACTIVE') {
+    return NextResponse.json(
+      { error: 'Account is inactive. Access denied.' },
+      { status: 403 }
+    );
+  }
 
   if (profileError) {
     console.error('[api-auth] profile lookup failed', {

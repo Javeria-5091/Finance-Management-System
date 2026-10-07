@@ -1490,6 +1490,36 @@ COMMENT ON FUNCTION "core"."is_finance_head"() IS 'Fixed 2026 (migration 018): r
 
 
 
+CREATE OR REPLACE FUNCTION "core"."is_hod_for_user"("p_target_user_id" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'core', 'public'
+    AS $$
+  SELECT core.has_role('HOD')
+     AND p_target_user_id IS NOT NULL
+     AND p_target_user_id <> auth.uid()
+     AND EXISTS (
+       SELECT 1
+       FROM public.profiles me
+       JOIN public.profiles emp
+         ON emp.organization_id = me.organization_id
+       WHERE me.user_id  = auth.uid()
+         AND emp.user_id = p_target_user_id
+         AND me.organization_id IS NOT NULL
+         AND (
+              (me.department_id IS NOT NULL AND emp.department_id = me.department_id)
+           OR  emp.manager_id = me.user_id
+         )
+     );
+$$;
+
+
+ALTER FUNCTION "core"."is_hod_for_user"("p_target_user_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "core"."is_hod_for_user"("p_target_user_id" "uuid") IS 'DEF-01: true when the caller holds the HOD role and p_target_user_id is in the caller''s department or reports directly to the caller (same organization).';
+
+
+
 CREATE OR REPLACE FUNCTION "core"."process_approval_slas"() RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'core', 'public'
@@ -2493,6 +2523,34 @@ $$;
 
 
 ALTER FUNCTION "finance"."check_journal_balance"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "finance"."check_vendor_bill_lines_match_total"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    AS $$
+DECLARE
+  v_lines_total numeric(18,2);
+BEGIN
+  SELECT COALESCE(SUM(line_total), 0) INTO v_lines_total
+  FROM finance.vendor_bill_lines
+  WHERE vendor_bill_id = NEW.id;
+
+  IF round(v_lines_total, 2) <> round(NEW.total_amount, 2) THEN
+    RAISE EXCEPTION
+      'Vendor bill % cannot be submitted: line items total % but the bill total is %. Fix the line items or the bill total before submitting.',
+      COALESCE(NEW.bill_number, NEW.id::text), v_lines_total, NEW.total_amount;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "finance"."check_vendor_bill_lines_match_total"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "finance"."check_vendor_bill_lines_match_total"() IS 'DEF-06 prevention: blocks submitting a vendor bill whose line items do not add up to its total_amount, so list view and detail view can never disagree again.';
+
 
 
 CREATE OR REPLACE FUNCTION "finance"."close_period"("p_period_id" "uuid", "p_closed_by" "uuid" DEFAULT NULL::"uuid", "p_status" "text" DEFAULT 'SOFT_CLOSED'::"text", "p_reason" "text" DEFAULT NULL::"text") RETURNS "void"
@@ -9328,6 +9386,10 @@ DECLARE
   v_emp RECORD;
   v_comp RECORD;
   v_basic NUMERIC(14,2);
+  v_housing NUMERIC(14,2);
+  v_medical NUMERIC(14,2);
+  v_conveyance NUMERIC(14,2);
+  v_other_allow NUMERIC(14,2);
   v_commission NUMERIC(14,2);
   v_tax NUMERIC(14,2);
   v_pf NUMERIC(14,2);
@@ -9350,25 +9412,16 @@ BEGIN
       USING ERRCODE = '28000';
   END IF;
 
-  -- p_org_id must be the caller's own organization -- never trust it as a
-  -- free client parameter, or any authenticated user could recalculate
-  -- another tenant's payroll by guessing/enumerating org UUIDs.
   IF p_org_id IS DISTINCT FROM core.current_user_org_id() THEN
     RAISE EXCEPTION 'calculate_payroll_run: p_org_id does not match the caller''s organization'
       USING ERRCODE = '42501';
   END IF;
 
-  -- p_actor must be the caller themselves -- never let a client stamp an
-  -- arbitrary calculated_by.
   IF p_actor IS DISTINCT FROM auth.uid() THEN
     RAISE EXCEPTION 'calculate_payroll_run: p_actor must match the authenticated caller'
       USING ERRCODE = '42501';
   END IF;
 
-  -- Same permission the app route already enforces
-  -- (src/app/api/finance/payroll/route.ts requires PAYROLL_UPDATE for the
-  -- 'calculate' action) -- now also enforced here, so it can't be
-  -- bypassed by calling the RPC directly.
   IF NOT core.has_permission(auth.uid(), 'PAYROLL_UPDATE') THEN
     RAISE EXCEPTION 'calculate_payroll_run: PAYROLL_UPDATE permission required'
       USING ERRCODE = '42501';
@@ -9382,38 +9435,35 @@ BEGIN
     RAISE EXCEPTION 'Only DRAFT payroll runs can be calculated (current status: %)', v_run.status;
   END IF;
 
-  -- Idempotent: wipe any partial lines from a previous failed attempt.
   DELETE FROM public.payroll_lines WHERE payroll_run_id = p_run_id;
 
   FOR v_emp IN
     SELECT * FROM public.payroll_employees
     WHERE organization_id = p_org_id AND status = 'ACTIVE'
   LOOP
-    -- Most recent compensation record active on/covering the run's period end.
     SELECT * INTO v_comp
     FROM public.payroll_compensation
     WHERE employee_id = v_emp.id
       AND is_active = true
+      AND compensation_type NOT IN ('HOUSING_ALLOWANCE','MEDICAL_ALLOWANCE','CONVEYANCE_ALLOWANCE','OTHER_ALLOWANCE')
       AND effective_from <= v_run.period_end
       AND (effective_to IS NULL OR effective_to >= v_run.period_start)
     ORDER BY effective_from DESC
     LIMIT 1;
 
     IF NOT FOUND THEN
-      -- No active compensation on record — cannot pay this employee.
-      -- Skip rather than fabricate a salary; spec 5.9 requires an
-      -- explicit compensation record for every paid employee.
       CONTINUE;
     END IF;
 
-    -- NOTE: this system does not (yet) track hourly/daily attendance, so
-    -- HOURLY_RATE / DAILY_RATE / PROJECT_BASED / COMMISSION_ONLY /
-    -- FIXED_CONTRACT compensation types are all treated as the flat
-    -- per-period amount, same as MONTHLY_SALARY. Time-based proration is
-    -- a separate feature, not part of this bug fix.
     v_basic := COALESCE(v_comp.amount, 0);
 
-    -- Approved commissions earned for this specific payroll period.
+    -- P2_043: resolve each allowance (employee override -> company default
+    -- -> zero), as PKR or % of this employee's own basic salary.
+    v_housing    := public.resolve_payroll_allowance(v_emp.id, p_org_id, 'HOUSING_ALLOWANCE',    v_run.period_start, v_run.period_end, v_basic);
+    v_medical    := public.resolve_payroll_allowance(v_emp.id, p_org_id, 'MEDICAL_ALLOWANCE',    v_run.period_start, v_run.period_end, v_basic);
+    v_conveyance := public.resolve_payroll_allowance(v_emp.id, p_org_id, 'CONVEYANCE_ALLOWANCE', v_run.period_start, v_run.period_end, v_basic);
+    v_other_allow:= public.resolve_payroll_allowance(v_emp.id, p_org_id, 'OTHER_ALLOWANCE',      v_run.period_start, v_run.period_end, v_basic);
+
     SELECT COALESCE(SUM(commission_amount), 0) INTO v_commission
     FROM public.payroll_commissions
     WHERE employee_id = v_emp.id
@@ -9421,9 +9471,8 @@ BEGIN
       AND status = 'APPROVED'
       AND period_month = v_run.payroll_period;
 
-    v_gross := v_basic + v_commission;
+    v_gross := v_basic + v_housing + v_medical + v_conveyance + v_other_allow + v_commission;
 
-    -- Recurring deduction rules active for this period.
     v_tax := 0; v_pf := 0; v_eobi := 0; v_other_ded := 0;
     v_ded_snapshot := '[]'::JSONB;
     FOR v_ded IN
@@ -9448,11 +9497,6 @@ BEGIN
       END;
     END LOOP;
 
-    -- Outstanding salary advances due for recovery this period. This is a
-    -- preview only (payroll_advances.remaining_balance is NOT decremented
-    -- here) — balances are adjusted when the run is POSTED, so a run can
-    -- be recalculated freely while still in DRAFT/CALCULATED without
-    -- double-deducting.
     SELECT COALESCE(SUM(LEAST(COALESCE(monthly_deduction, remaining_balance), remaining_balance)), 0)
     INTO v_advance
     FROM public.payroll_advances
@@ -9463,8 +9507,6 @@ BEGIN
       AND (start_deduction_month IS NULL OR start_deduction_month <= v_run.payroll_period);
 
     v_total_ded := v_tax + v_pf + v_eobi + v_advance + v_other_ded;
-    -- Safety clamp: never let deductions exceed gross pay (would violate
-    -- the payroll_lines_nonnegative_check constraint on net_pay).
     IF v_total_ded > v_gross THEN
       v_total_ded := v_gross;
     END IF;
@@ -9481,7 +9523,7 @@ BEGIN
       compensation_snapshot, deduction_snapshot
     ) VALUES (
       p_run_id, v_emp.id, p_org_id,
-      v_basic, 0, 0, 0, 0,
+      v_basic, v_housing, v_medical, v_conveyance, v_other_allow,
       0, v_commission, 0,
       v_gross, v_tax, v_pf, v_eobi, v_advance, v_other_ded,
       v_total_ded, v_net, v_gross,
@@ -9518,7 +9560,7 @@ $$;
 ALTER FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") IS 'FND-RLS-02 fix: now requires auth.uid() IS NOT NULL, p_org_id = core.current_user_org_id(), p_actor = auth.uid(), and core.has_permission(auth.uid(),''PAYROLL_UPDATE'') before touching any payroll data. Previously trusted p_org_id/p_actor as ordinary client parameters with no auth check at all, and was grantable to anon.';
+COMMENT ON FUNCTION "public"."calculate_payroll_run"("p_run_id" "uuid", "p_org_id" "uuid", "p_actor" "uuid") IS 'P2_043: now resolves and stores real housing/medical/conveyance/other allowances via resolve_payroll_allowance() (employee override in payroll_compensation, else company default in payroll_allowance_policy, else zero), instead of always writing zero. The basic-compensation lookup now explicitly excludes the four *_ALLOWANCE compensation_type rows so they are never mistaken for the employee''s basic salary. All other logic (RLS/permission checks, commissions, deductions, advances, snapshotting) is unchanged from the prior version.';
 
 
 
@@ -10366,6 +10408,54 @@ COMMENT ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date")
 
 
 
+CREATE OR REPLACE FUNCTION "public"."resolve_payroll_allowance"("p_employee_id" "uuid", "p_org_id" "uuid", "p_allowance_type" character varying, "p_period_start" "date", "p_period_end" "date", "p_basic" numeric) RETURNS numeric
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+  v_method character varying(20);
+  v_amount numeric(14,2);
+BEGIN
+  -- Employee-specific override wins if one is active for this period.
+  SELECT calculation_method, amount INTO v_method, v_amount
+  FROM public.payroll_compensation
+  WHERE employee_id = p_employee_id
+    AND is_active = true
+    AND compensation_type = p_allowance_type
+    AND effective_from <= p_period_end
+    AND (effective_to IS NULL OR effective_to >= p_period_start)
+  ORDER BY effective_from DESC
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    -- Fall back to the company-level default for this organization.
+    SELECT calculation_method, amount INTO v_method, v_amount
+    FROM public.payroll_allowance_policy
+    WHERE organization_id = p_org_id
+      AND allowance_type = p_allowance_type
+      AND is_active = true
+      AND effective_from <= p_period_end
+      AND (effective_to IS NULL OR effective_to >= p_period_start)
+    ORDER BY effective_from DESC
+    LIMIT 1;
+  END IF;
+
+  IF NOT FOUND THEN
+    RETURN 0;
+  END IF;
+
+  IF v_method = 'PERCENT_OF_BASIC' THEN
+    RETURN ROUND(COALESCE(p_basic, 0) * COALESCE(v_amount, 0) / 100.0, 2);
+  ELSE
+    RETURN COALESCE(v_amount, 0);
+  END IF;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."resolve_payroll_allowance"("p_employee_id" "uuid", "p_org_id" "uuid", "p_allowance_type" character varying, "p_period_start" "date", "p_period_end" "date", "p_basic" numeric) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."rls_auto_enable"() RETURNS "event_trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog'
@@ -10413,13 +10503,19 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_compensation" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "organization_id" "uuid",
+    "calculation_method" character varying(20) DEFAULT 'FIXED'::character varying NOT NULL,
     CONSTRAINT "payroll_compensation_amount_check" CHECK (("amount" >= (0)::numeric)),
-    CONSTRAINT "payroll_compensation_compensation_type_check" CHECK ((("compensation_type")::"text" = ANY ((ARRAY['MONTHLY_SALARY'::character varying, 'HOURLY_RATE'::character varying, 'DAILY_RATE'::character varying, 'PROJECT_BASED'::character varying, 'COMMISSION_ONLY'::character varying, 'FIXED_CONTRACT'::character varying])::"text"[]))),
+    CONSTRAINT "payroll_compensation_calculation_method_check" CHECK ((("calculation_method")::"text" = ANY (ARRAY['FIXED'::"text", 'PERCENT_OF_BASIC'::"text"]))),
+    CONSTRAINT "payroll_compensation_compensation_type_check" CHECK ((("compensation_type")::"text" = ANY (ARRAY['MONTHLY_SALARY'::"text", 'HOURLY_RATE'::"text", 'DAILY_RATE'::"text", 'PROJECT_BASED'::"text", 'COMMISSION_ONLY'::"text", 'FIXED_CONTRACT'::"text", 'HOUSING_ALLOWANCE'::"text", 'MEDICAL_ALLOWANCE'::"text", 'CONVEYANCE_ALLOWANCE'::"text", 'OTHER_ALLOWANCE'::"text"]))),
     CONSTRAINT "payroll_compensation_org_required_going_forward" CHECK (("organization_id" IS NOT NULL))
 );
 
 
 ALTER TABLE "public"."payroll_compensation" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."payroll_compensation"."calculation_method" IS 'FIXED = amount is a PKR value. PERCENT_OF_BASIC = amount is a percentage applied to the employee''s own basic-salary compensation row. Only meaningful for the four *_ALLOWANCE compensation_type rows; salary rows are always FIXED.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") RETURNS "public"."payroll_compensation"
@@ -10429,6 +10525,7 @@ CREATE OR REPLACE FUNCTION "public"."set_payroll_compensation_atomic"("p_employe
 DECLARE
   v_org_id UUID;
   v_effective_from DATE;
+  v_type TEXT;
   v_row public.payroll_compensation;
 BEGIN
   SELECT organization_id INTO v_org_id
@@ -10439,44 +10536,41 @@ BEGIN
     RAISE EXCEPTION 'Employee % not found', p_employee_id;
   END IF;
 
-  -- Org isolation: caller must belong to the same org as the employee.
   IF v_org_id IS DISTINCT FROM (
     SELECT organization_id FROM public.profiles WHERE user_id = auth.uid()
   ) THEN
     RAISE EXCEPTION 'Not authorized to set compensation for this employee';
   END IF;
 
-  -- F-P0-2 fix: role check. This function is SECURITY DEFINER, so it
-  -- bypasses the payroll_compensation RLS insert/update policies -- the
-  -- org check above is NOT a substitute for a permission check. Only
-  -- CEO/FINANCE_HEAD/ACCOUNTANT may write compensation; every other role
-  -- (EMPLOYEE, VIEWER, TECH_ADMIN, HOD, PM, etc.) must be rejected here.
   IF NOT (core.is_finance_head() OR core.has_role('ACCOUNTANT')) THEN
     RAISE EXCEPTION 'Only CEO, Finance Head, or Accountant may set employee compensation';
   END IF;
 
+  v_type := COALESCE(p_compensation->>'compensation_type', 'MONTHLY_SALARY');
   v_effective_from := COALESCE((p_compensation->>'effective_from')::DATE, CURRENT_DATE);
 
   IF COALESCE((p_compensation->>'amount')::NUMERIC, -1) < 0 THEN
     RAISE EXCEPTION 'Compensation amount must be zero or greater';
   END IF;
 
-  -- Close out any currently-active compensation the day before the new
-  -- record starts, so payroll calculation always finds at most one
-  -- active row per employee for a given date.
+  -- P2_043 FIX: only close out a prior row of the SAME compensation_type.
+  -- An employee's salary and their allowances are independent, concurrently
+  -- active records, not a single slot being replaced.
   UPDATE public.payroll_compensation
   SET is_active = false,
       effective_to = LEAST(COALESCE(effective_to, v_effective_from - 1), v_effective_from - 1),
       updated_at = now()
   WHERE employee_id = p_employee_id
+    AND compensation_type = v_type
     AND is_active = true;
 
   INSERT INTO public.payroll_compensation (
-    employee_id, organization_id, compensation_type, amount, currency,
+    employee_id, organization_id, compensation_type, calculation_method, amount, currency,
     effective_from, effective_to, is_active, project_id, notes, created_by
   ) VALUES (
     p_employee_id, v_org_id,
-    COALESCE(p_compensation->>'compensation_type', 'MONTHLY_SALARY'),
+    v_type,
+    COALESCE(NULLIF(p_compensation->>'calculation_method', ''), 'FIXED'),
     (p_compensation->>'amount')::NUMERIC,
     COALESCE(p_compensation->>'currency', 'PKR'),
     v_effective_from,
@@ -10494,6 +10588,10 @@ $$;
 
 
 ALTER FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."set_payroll_compensation_atomic"("p_employee_id" "uuid", "p_compensation" "jsonb") IS 'P2_043 fix: closing out a prior compensation row is now scoped to the same compensation_type, so setting an allowance no longer closes out the employee''s salary (or vice versa). Also now accepts calculation_method (FIXED / PERCENT_OF_BASIC).';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."sync_invoice_client_name"() RETURNS "trigger"
@@ -11436,6 +11534,71 @@ ALTER FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[], "p_organ
 
 
 COMMENT ON FUNCTION "reporting"."get_trial_balance"("p_period_ids" "uuid"[], "p_organization_id" "uuid") IS 'FND-GL-01 fix: INNER JOIN (was LEFT JOIN) so a non-matching status or period actually removes the line from the sums instead of silently passing it through with je.* = NULL. AC-02 FIX (P1): status widened from POSTED-only to POSTED or REVERSED so a reversed journal nets to zero against its offsetting reversal entry.';
+
+
+
+CREATE OR REPLACE FUNCTION "reporting"."my_pending_approvals"() RETURNS json
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'pg_catalog', 'reporting', 'core', 'public'
+    AS $$
+DECLARE
+  v_org uuid;
+  v_uid uuid := auth.uid();
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'Authentication required';
+  END IF;
+
+  v_org := core.current_user_org_id();
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'Access denied: no organization';
+  END IF;
+
+  IF NOT (core.has_role('CEO') OR core.has_permission(v_uid, 'EXPENSE_APPROVE')) THEN
+    RETURN '[]'::json;
+  END IF;
+
+  RETURN COALESCE((
+    SELECT json_agg(row_to_json(t) ORDER BY t.submitted_at NULLS LAST, t.created_at)
+    FROM (
+      SELECT
+        e.id,
+        'EXPENSE'::text                       AS module_type,
+        e.title,
+        e.amount,
+        COALESCE(e.currency, 'PKR')           AS currency,
+        e.status,
+        e.expense_date,
+        e.created_at,
+        e.submitted_at,
+        e.user_id                             AS requester_id,
+        COALESCE(NULLIF(p.full_name, ''), p.email, 'Unknown') AS requester_name,
+        (e.user_id = v_uid)                   AS is_own,
+        (
+          e.user_id <> v_uid
+          AND (
+                core.has_role('CEO')
+             OR core.can_approve_amount(v_uid, 'EXPENSE_APPROVE', 'EXPENSE', e.amount, COALESCE(e.currency, 'PKR'))
+          )
+        )                                     AS can_approve
+      FROM public.expenses e
+      LEFT JOIN public.profiles p ON p.user_id = e.user_id
+      WHERE e.organization_id = v_org
+        AND e.status IN ('SUBMITTED', 'VERIFIED')
+        AND (
+              core.is_finance_head()
+           OR core.is_hod_for_user(e.user_id)
+        )
+    ) t
+  ), '[]'::json);
+END;
+$$;
+
+
+ALTER FUNCTION "reporting"."my_pending_approvals"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "reporting"."my_pending_approvals"() IS 'DEF-02: approvals inbox. CEO/FINANCE_HEAD see the whole organization, HOD sees own department/direct reports, others get an empty list. can_approve reflects maker-checker and the configured monetary limit.';
 
 
 
@@ -15342,6 +15505,33 @@ CREATE TABLE IF NOT EXISTS "public"."payroll_advances" (
 ALTER TABLE "public"."payroll_advances" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."payroll_allowance_policy" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "organization_id" "uuid" NOT NULL,
+    "allowance_type" character varying(30) NOT NULL,
+    "calculation_method" character varying(20) DEFAULT 'FIXED'::character varying NOT NULL,
+    "amount" numeric(14,2) NOT NULL,
+    "is_active" boolean DEFAULT true NOT NULL,
+    "effective_from" "date" DEFAULT CURRENT_DATE NOT NULL,
+    "effective_to" "date",
+    "notes" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "payroll_allowance_policy_amount_check" CHECK (("amount" >= (0)::numeric)),
+    CONSTRAINT "payroll_allowance_policy_dates_chk" CHECK ((("effective_to" IS NULL) OR ("effective_to" >= "effective_from"))),
+    CONSTRAINT "payroll_allowance_policy_method_check" CHECK ((("calculation_method")::"text" = ANY (ARRAY['FIXED'::"text", 'PERCENT_OF_BASIC'::"text"]))),
+    CONSTRAINT "payroll_allowance_policy_type_check" CHECK ((("allowance_type")::"text" = ANY (ARRAY['HOUSING_ALLOWANCE'::"text", 'MEDICAL_ALLOWANCE'::"text", 'CONVEYANCE_ALLOWANCE'::"text", 'OTHER_ALLOWANCE'::"text"])))
+);
+
+
+ALTER TABLE "public"."payroll_allowance_policy" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."payroll_allowance_policy" IS 'Company-level default allowance rule per type (CTO-approved direction, 7 Oct 2026). A per-employee row in payroll_compensation with the matching compensation_type overrides this for that employee. No rows are seeded by this migration -- resolves to zero until Settings is used to configure one.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."payroll_commissions" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "employee_id" "uuid" NOT NULL,
@@ -17738,6 +17928,11 @@ ALTER TABLE ONLY "finance"."vendor_bill_lines"
 
 
 
+ALTER TABLE "finance"."vendor_bills"
+    ADD CONSTRAINT "vendor_bills_amounts_consistency_check" CHECK (("round"(((("subtotal" + "tax_amount") - "withholding_amount") - "discount_amount"), 2) = "round"("total_amount", 2))) NOT VALID;
+
+
+
 ALTER TABLE ONLY "finance"."vendor_bills"
     ADD CONSTRAINT "vendor_bills_pkey" PRIMARY KEY ("id");
 
@@ -17885,6 +18080,11 @@ ALTER TABLE ONLY "public"."payments"
 
 ALTER TABLE ONLY "public"."payroll_advances"
     ADD CONSTRAINT "payroll_advances_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."payroll_allowance_policy"
+    ADD CONSTRAINT "payroll_allowance_policy_pkey" PRIMARY KEY ("id");
 
 
 
@@ -19947,6 +20147,10 @@ CREATE OR REPLACE TRIGGER "trg_validate_payment_allocation" BEFORE INSERT OR UPD
 
 
 CREATE OR REPLACE TRIGGER "trg_validate_vendor_payment_allocation" BEFORE INSERT OR UPDATE ON "finance"."vendor_payment_allocations" FOR EACH ROW EXECUTE FUNCTION "finance"."validate_vendor_payment_allocation"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_vendor_bill_lines_match_total" BEFORE UPDATE ON "finance"."vendor_bills" FOR EACH ROW WHEN ((("old"."status" = 'DRAFT'::"text") AND ("new"."status" = 'SUBMITTED'::"text"))) EXECUTE FUNCTION "finance"."check_vendor_bill_lines_match_total"();
 
 
 
@@ -23881,7 +24085,7 @@ CREATE POLICY "budgets_insert_org_scoped" ON "public"."budgets" FOR INSERT TO "a
 
 CREATE POLICY "budgets_select_org_scoped" ON "public"."budgets" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR ("user_id" = "auth"."uid"()) OR (("project_id" IS NOT NULL) AND (EXISTS ( SELECT 1
    FROM "public"."projects" "p"
-  WHERE (("p"."id" = "budgets"."project_id") AND ("p"."user_id" = "auth"."uid"()))))))));
+  WHERE (("p"."id" = "budgets"."project_id") AND ("p"."user_id" = "auth"."uid"()))))) OR "core"."is_hod_for_user"("user_id"))));
 
 
 
@@ -23959,11 +24163,11 @@ CREATE POLICY "expenses_insert_org_scoped" ON "public"."expenses" FOR INSERT TO 
 
 CREATE POLICY "expenses_select_org_scoped" ON "public"."expenses" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR ("user_id" = "auth"."uid"()) OR (("project_id" IS NOT NULL) AND (EXISTS ( SELECT 1
    FROM "public"."projects" "p"
-  WHERE (("p"."id" = "expenses"."project_id") AND ("p"."user_id" = "auth"."uid"()))))))));
+  WHERE (("p"."id" = "expenses"."project_id") AND ("p"."user_id" = "auth"."uid"()))))) OR ("core"."is_hod_for_user"("user_id") AND ("status" <> 'DRAFT'::"text")))));
 
 
 
-CREATE POLICY "expenses_update_org_scoped" ON "public"."expenses" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "public"."is_admin"()) AND ("journal_entry_id" IS NULL))) WITH CHECK (("core"."same_org"("organization_id") AND (("auth"."uid"() = "user_id") OR "public"."is_admin"()) AND ("journal_entry_id" IS NULL)));
+CREATE POLICY "expenses_update_org_scoped" ON "public"."expenses" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("journal_entry_id" IS NULL) AND (("auth"."uid"() = "user_id") OR "public"."is_admin"() OR ("core"."is_hod_for_user"("user_id") AND ("status" = ANY (ARRAY['SUBMITTED'::"text", 'VERIFIED'::"text"])))))) WITH CHECK (("core"."same_org"("organization_id") AND ("journal_entry_id" IS NULL) AND (("auth"."uid"() = "user_id") OR "public"."is_admin"() OR ("core"."is_hod_for_user"("user_id") AND ("status" = ANY (ARRAY['VERIFIED'::"text", 'APPROVED'::"text", 'REJECTED'::"text"]))))));
 
 
 
@@ -24001,7 +24205,7 @@ CREATE POLICY "invoices_insert_org_scoped" ON "public"."invoices" FOR INSERT TO 
 
 CREATE POLICY "invoices_select_org_scoped" ON "public"."invoices" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text") OR "core"."has_role"('VIEWER'::"text") OR ("user_id" = "auth"."uid"()) OR (EXISTS ( SELECT 1
    FROM "public"."projects" "p"
-  WHERE (("p"."id" = "invoices"."project_id") AND ("p"."user_id" = "auth"."uid"())))))));
+  WHERE (("p"."id" = "invoices"."project_id") AND ("p"."user_id" = "auth"."uid"())))) OR "core"."is_hod_for_user"("user_id"))));
 
 
 
@@ -24081,6 +24285,17 @@ CREATE POLICY "payroll_advances_select_org_scoped" ON "public"."payroll_advances
 
 
 CREATE POLICY "payroll_advances_update_org_scoped" ON "public"."payroll_advances" FOR UPDATE TO "authenticated" USING (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text")))) WITH CHECK (("core"."same_org"("organization_id") AND ("core"."is_finance_head"() OR "core"."has_role"('ACCOUNTANT'::"text"))));
+
+
+
+ALTER TABLE "public"."payroll_allowance_policy" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "payroll_allowance_policy_select" ON "public"."payroll_allowance_policy" FOR SELECT TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."has_permission"("auth"."uid"(), 'PAYROLL_READ'::"text")));
+
+
+
+CREATE POLICY "payroll_allowance_policy_write" ON "public"."payroll_allowance_policy" TO "authenticated" USING (("core"."same_org"("organization_id") AND "core"."has_permission"("auth"."uid"(), 'PAYROLL_UPDATE'::"text"))) WITH CHECK (("core"."same_org"("organization_id") AND "core"."has_permission"("auth"."uid"(), 'PAYROLL_UPDATE'::"text")));
 
 
 
@@ -24465,6 +24680,11 @@ GRANT ALL ON FUNCTION "core"."has_permission"("p_user_id" "uuid", "p_permission_
 
 
 
+REVOKE ALL ON FUNCTION "core"."is_hod_for_user"("p_target_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "core"."is_hod_for_user"("p_target_user_id" "uuid") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "core"."process_approval_slas"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."process_approval_slas"() TO "service_role";
 
@@ -24489,6 +24709,7 @@ GRANT ALL ON FUNCTION "core"."soft_delete"("p_schema" "text", "p_table" "text", 
 
 REVOKE ALL ON FUNCTION "core"."transfer_ceo_role"("p_new_ceo_user_id" "uuid", "p_outgoing_role_id" "uuid", "p_reason" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "core"."transfer_ceo_role"("p_new_ceo_user_id" "uuid", "p_outgoing_role_id" "uuid", "p_reason" "text") TO "authenticated";
+
 
 
 
@@ -25021,6 +25242,13 @@ GRANT ALL ON FUNCTION "public"."profit_and_loss"("p_start" "date", "p_end" "date
 
 
 
+REVOKE ALL ON FUNCTION "public"."resolve_payroll_allowance"("p_employee_id" "uuid", "p_org_id" "uuid", "p_allowance_type" character varying, "p_period_start" "date", "p_period_end" "date", "p_basic" numeric) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."resolve_payroll_allowance"("p_employee_id" "uuid", "p_org_id" "uuid", "p_allowance_type" character varying, "p_period_start" "date", "p_period_end" "date", "p_basic" numeric) TO "anon";
+GRANT ALL ON FUNCTION "public"."resolve_payroll_allowance"("p_employee_id" "uuid", "p_org_id" "uuid", "p_allowance_type" character varying, "p_period_start" "date", "p_period_end" "date", "p_basic" numeric) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."resolve_payroll_allowance"("p_employee_id" "uuid", "p_org_id" "uuid", "p_allowance_type" character varying, "p_period_start" "date", "p_period_end" "date", "p_basic" numeric) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
 
@@ -25114,6 +25342,11 @@ GRANT ALL ON FUNCTION "reporting"."get_project_profitability"("p_start_date" "da
 REVOKE ALL ON FUNCTION "reporting"."get_project_profitability_cost_structure"("p_start_date" "date", "p_end_date" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "reporting"."get_project_profitability_cost_structure"("p_start_date" "date", "p_end_date" "date") TO "authenticated";
 GRANT ALL ON FUNCTION "reporting"."get_project_profitability_cost_structure"("p_start_date" "date", "p_end_date" "date") TO "ai_readonly_role";
+
+
+
+REVOKE ALL ON FUNCTION "reporting"."my_pending_approvals"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "reporting"."my_pending_approvals"() TO "authenticated";
 
 
 
@@ -25745,6 +25978,12 @@ GRANT ALL ON TABLE "public"."payments" TO "service_role";
 
 GRANT ALL ON TABLE "public"."payroll_advances" TO "authenticated";
 GRANT ALL ON TABLE "public"."payroll_advances" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."payroll_allowance_policy" TO "anon";
+GRANT ALL ON TABLE "public"."payroll_allowance_policy" TO "authenticated";
+GRANT ALL ON TABLE "public"."payroll_allowance_policy" TO "service_role";
 
 
 

@@ -163,6 +163,10 @@ export interface EmployeeFormData {
 export interface CompensationFormData {
   employee_id: string;
   compensation_type: string;
+  // P2_043: FIXED (a PKR amount) or PERCENT_OF_BASIC (a % of the employee's
+  // own basic salary). Only meaningful for the *_ALLOWANCE types below;
+  // salary-type rows are always treated as FIXED.
+  calculation_method: string;
   amount: string;
   effective_from: string;
   effective_to: string;

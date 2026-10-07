@@ -81,6 +81,31 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
+  // DEF-08 FIX: enforce account status on every protected request.
+  // A valid Supabase session alone is not enough -- the profile must still be
+  // ACTIVE. (The auth routes stay reachable so a user can sign out.)
+  if (!(pathname.startsWith('/api/') && API_AUTH_ROUTES.some(route => pathname.startsWith(route)))) {
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('employment_status')
+      .eq('user_id', session.user.id)
+      .maybeSingle();
+
+    // Fail closed only on a definite non-ACTIVE status. A transient lookup
+    // error must not lock out every user (API routes re-check in getAuthUser).
+    if (!profileError && profile && profile.employment_status !== 'ACTIVE') {
+      if (pathname.startsWith('/api/')) {
+        return NextResponse.json(
+          { error: 'Account is inactive. Access denied.' },
+          { status: 403 }
+        );
+      }
+      const inactiveUrl = new URL('/login', request.url);
+      inactiveUrl.searchParams.set('reason', 'inactive');
+      return NextResponse.redirect(inactiveUrl);
+    }
+  }
+
   return response;
 }
 

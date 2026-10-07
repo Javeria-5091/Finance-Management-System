@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import { logSecurityEvent } from '@/lib/logAction';
@@ -16,6 +16,15 @@ export default function LoginPage() {
   const [mfaChallengeId, setMfaChallengeId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // DEF-08: middleware redirects here with ?reason=inactive when an active
+  // session belongs to a deactivated account; clear the session and explain.
+  useEffect(() => {
+    if (searchParams.get('reason') === 'inactive') {
+      supabase.auth.signOut();
+      setError('Your account is inactive. Please contact your administrator.');
+    }
+  }, [searchParams]);
 
   function sanitizeRedirect(raw: string | null): string {
     if (!raw) return '/dashboard';
@@ -50,9 +59,26 @@ export default function LoginPage() {
 
       const { data: profile } = await supabase
         .from('profiles')
-        .select('role, organization_id')
+        .select('role, organization_id, employment_status')
         .eq('user_id', signInData.user.id)
         .maybeSingle();
+
+      // DEF-08 FIX: an account whose profile is INACTIVE / TERMINATED must not
+      // be able to start a session. Previously employment_status was only
+      // displayed in the admin UI and never enforced at login.
+      if (profile?.employment_status && profile.employment_status !== 'ACTIVE') {
+        await logSecurityEvent({
+          eventType: 'LOGIN_FAILURE',
+          success: false,
+          userId: signInData.user.id,
+          userEmail: signInData.user.email,
+          details: { reason: 'ACCOUNT_' + profile.employment_status },
+        });
+        await supabase.auth.signOut();
+        setError('Your account is inactive. Please contact your administrator.');
+        setLoading(false);
+        return;
+      }
 
       const mfaRequiredRoles = [
         'CEO', 'FINANCE_HEAD', 'ACCOUNTANT', 'HOD',

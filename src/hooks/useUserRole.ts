@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 
-type RoleType = 'CEO' | 'FINANCE_HEAD' | 'ACCOUNTANT' | 'PROJECT_MANAGER' | 'EMPLOYEE' | 'VIEWER';
+type RoleType = 'CEO' | 'FINANCE_HEAD' | 'ACCOUNTANT' | 'PROJECT_MANAGER' | 'HOD' | 'EMPLOYEE' | 'VIEWER';
 
 // FIX (bug: CEO seeing wrong dashboard):
 // This hook used to query `.from('user_roles')` and `.from('roles')` with no
@@ -65,7 +65,9 @@ export function useUserRole() {
           const roleMap: Record<string, RoleType> = {
             'CEO': 'CEO',
             'Admin': 'CEO',
-            'HOD': 'FINANCE_HEAD',
+            // DEF-01: HOD used to be mapped to FINANCE_HEAD here, which would
+            // hand a HOD the CFO dashboard whenever this fallback ran.
+            'HOD': 'HOD',
             'FINANCE_HEAD': 'FINANCE_HEAD',
             'Program Manager': 'ACCOUNTANT',
             'ACCOUNTANT': 'ACCOUNTANT',

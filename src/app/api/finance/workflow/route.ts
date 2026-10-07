@@ -268,6 +268,30 @@ export async function POST(req: NextRequest) {
     const periodCheck = await assertPeriodOpenForTransition(supabase, config, record, auth.orgId, action);
     if (periodCheck) return NextResponse.json({ error: periodCheck.error }, { status: 400 });
 
+    // DEF-10 FIX (spec 12.2: "issue -> receivable journal"): issuing an invoice
+    // used to only flip status to ISSUED. Nothing in the app ever called
+    // /api/finance/post-invoice, so no invoice reached the General Ledger and
+    // AR / Revenue / Trial Balance / dashboard KPIs stayed empty.
+    // Post FIRST (the posting route accepts APPROVED), and only then mark the
+    // invoice ISSUED, so an invoice can never be ISSUED-but-unposted.
+    // "Already posted" is treated as success so a retry after a partial
+    // failure (journal committed, status update failed) recovers cleanly.
+    if (module === 'invoice' && action === 'issue') {
+      const postRes = await fetch(new URL('/api/finance/post-invoice', req.url), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', cookie: req.headers.get('cookie') || '' },
+        body: JSON.stringify({ invoiceId: recordId }),
+      });
+      const postData = await postRes.json().catch(() => ({}));
+      const alreadyPosted = postRes.status === 400 && typeof postData?.error === 'string' && postData.error.startsWith('Already posted to GL');
+      if (!postRes.ok && !alreadyPosted) {
+        return NextResponse.json(
+          { error: 'Invoice was not issued because GL posting failed: ' + (postData?.error || 'unknown error') },
+          { status: postRes.status >= 400 ? postRes.status : 500 }
+        );
+      }
+    }
+
     // BUG-004 FIX (Critical): When reversing a POSTED record, the linked
     // journal entry MUST be reversed via finance.reverse_journal_entry()
     // (swapped DR/CR) — otherwise the GL continues to reflect the original

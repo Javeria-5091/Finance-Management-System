@@ -3,6 +3,7 @@ import { useUserRole } from '@/hooks/useUserRole';
 import { CEODashboard } from '@/components/dashboards/ceo/CEODashboard';
 import { CFODashboard } from '@/components/dashboards/cfo/CFODashboard';
 import { AccountantDashboard } from '@/components/dashboards/accountant/AccountantDashboard';
+import { HODDashboard } from '@/components/dashboards/hod/HODDashboard';
 import { PMDashboard } from '@/components/dashboards/pm/PMDashboard';
 import { ViewerDashboard } from '@/components/dashboards/viewer/ViewerDashboard';
 import { EmployeeDashboard } from '@/components/dashboards/employee/EmployeeDashboard';
@@ -24,8 +25,9 @@ export default function DashboardPage() {
     case 'FINANCE_HEAD': return <CFODashboard />;
     case 'ACCOUNTANT': return <AccountantDashboard />;
     case 'PROJECT_MANAGER': return <PMDashboard />;
+    case 'HOD': return <HODDashboard />;
     case 'EMPLOYEE': return <EmployeeDashboard />;
     case 'VIEWER': return <ViewerDashboard />;
-    default: return <ViewerDashboard />; // EMPLOYEE bhi yehi dekhega
+    default: return <ViewerDashboard />; 
   }
 }

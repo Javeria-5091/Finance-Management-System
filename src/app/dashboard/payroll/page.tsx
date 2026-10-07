@@ -57,6 +57,17 @@ const COMPENSATION_TYPES = [
   { value: "PROJECT_BASED", label: "Project Based" },
   { value: "COMMISSION_ONLY", label: "Commission Only" },
   { value: "FIXED_CONTRACT", label: "Fixed Contract" },
+  // P2_043: per-employee allowance override. Each is independent of salary
+  // and of the other allowance types -- setting one does not close the
+  // others (fixed in set_payroll_compensation_atomic).
+  { value: "HOUSING_ALLOWANCE", label: "Housing Allowance" },
+  { value: "MEDICAL_ALLOWANCE", label: "Medical Allowance" },
+  { value: "CONVEYANCE_ALLOWANCE", label: "Conveyance Allowance" },
+  { value: "OTHER_ALLOWANCE", label: "Other Allowance" },
+];
+
+const ALLOWANCE_COMPENSATION_TYPES = [
+  "HOUSING_ALLOWANCE", "MEDICAL_ALLOWANCE", "CONVEYANCE_ALLOWANCE", "OTHER_ALLOWANCE",
 ];
 
 // COMMISSION TYPES
@@ -316,6 +327,7 @@ export default function PayrollPage() {
         employeeId: formData.employee_id,
         compData: {
           compensation_type: formData.compensation_type,
+          calculation_method: formData.calculation_method || "FIXED",
           amount: parseFloat(formData.amount),
           effective_from: formData.effective_from || new Date().toISOString().split("T")[0],
           effective_to: formData.effective_to || null,
@@ -2571,6 +2583,7 @@ function CompensationForm({
   const [form, setForm] = useState<CompensationFormData>({
     employee_id: employeeId,
     compensation_type: "MONTHLY_SALARY",
+    calculation_method: "FIXED",
     amount: "",
     effective_from: new Date().toISOString().split("T")[0],
     effective_to: "",
@@ -2603,9 +2616,29 @@ function CompensationForm({
           ))}
         </select>
       </div>
+      {ALLOWANCE_COMPENSATION_TYPES.includes(form.compensation_type) && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+            Calculation Method
+          </label>
+          <select
+            value={form.calculation_method}
+            onChange={(e) => setForm({ ...form, calculation_method: e.target.value })}
+            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+          >
+            <option value="FIXED">Fixed PKR amount</option>
+            <option value="PERCENT_OF_BASIC">Percentage of basic salary</option>
+          </select>
+          <p className="text-xs text-gray-500 mt-1">
+            This overrides the company default for this employee only, for this allowance type only. It does not affect their salary or any other allowance.
+          </p>
+        </div>
+      )}
       <div>
         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-          Amount (PKR) *
+          {ALLOWANCE_COMPENSATION_TYPES.includes(form.compensation_type) && form.calculation_method === "PERCENT_OF_BASIC"
+            ? "Percentage of Basic Salary (%) *"
+            : "Amount (PKR) *"}
         </label>
         <input
           type="number"

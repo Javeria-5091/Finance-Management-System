@@ -346,8 +346,14 @@ export function CEODashboard() {
   };
   const barColors = ['#6366f1', '#f97316', '#22c55e', '#06b6d4', '#f43f5e', '#8b5cf6'];
 
-  const fyStart = fiscal.data?.[0]?.start_date?.slice(0, 4) || '2025';
-  const fyEnd = fiscal.data?.[fiscal.data?.length - 1]?.end_date?.slice(0, 4) || '2026';
+  // DEF-09 FIX: this used to fall back to a hardcoded '2025' / '2026' when
+  // ceo_table_fiscal() returned no periods (i.e. no OPEN fiscal year for the
+  // organization), which silently displayed a fake, out-of-date fiscal year
+  // instead of the real one. Spec 4.3 / 5.1: nothing about the fiscal
+  // calendar may be assumed -- show that it is not configured instead.
+  const hasFiscalData = !!fiscal.data && fiscal.data.length > 0;
+  const fyStart = hasFiscalData ? fiscal.data[0]?.start_date?.slice(0, 4) : null;
+  const fyEnd = hasFiscalData ? fiscal.data[fiscal.data.length - 1]?.end_date?.slice(0, 4) : null;
 
   return (
     <div className="p-6 max-w-[1700px] mx-auto space-y-5">
@@ -620,7 +626,11 @@ export function CEODashboard() {
           <div className="mb-3">
             <div className="flex items-center gap-2">
               <Calendar className="w-4 h-4 text-blue-500" />
-              <p className="text-sm font-medium text-gray-900 dark:text-white">FY {fyStart}-{fyEnd}</p>
+              <p className="text-sm font-medium text-gray-900 dark:text-white">
+                {hasFiscalData ? `FY ${fyStart}-${fyEnd}` : (
+                  <span className="text-amber-600 dark:text-amber-400">No open fiscal year configured</span>
+                )}
+              </p>
             </div>
           </div>
           <ProgressTimeline data={fiscal.data || []} />
